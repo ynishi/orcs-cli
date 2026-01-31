@@ -41,7 +41,16 @@ pub struct LuaChild {
     abort_key: Option<RegistryKey>,
 }
 
-// SAFETY: Lua runtime is protected by Mutex
+// SAFETY: LuaChild can be safely sent between threads and accessed concurrently.
+//
+// Justification:
+// 1. mlua is built with "send" feature (see Cargo.toml), which enables thread-safe
+//    Lua state allocation.
+// 2. The Lua runtime is wrapped in Arc<Mutex<Lua>>, ensuring exclusive access.
+//    All methods that access the Lua state acquire the lock first.
+// 3. Lua callbacks are stored in the registry via RegistryKey, which is Send.
+// 4. No raw Lua values escape the Mutex guard scope.
+// 5. The remaining fields (id, status) are all Send+Sync.
 unsafe impl Send for LuaChild {}
 unsafe impl Sync for LuaChild {}
 

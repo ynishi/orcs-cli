@@ -63,7 +63,20 @@ pub struct LuaComponent {
     script_path: Option<String>,
 }
 
-// SAFETY: Lua runtime is protected by Mutex
+// SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
+//
+// Justification:
+// 1. mlua is built with "send" feature (see Cargo.toml), which enables thread-safe
+//    Lua state allocation and makes the allocator thread-safe.
+// 2. The Lua runtime is wrapped in Mutex<Lua>, ensuring exclusive mutable access.
+//    All methods that access the Lua state acquire the lock first.
+// 3. All Lua callbacks are stored in the Lua registry via RegistryKey, which is
+//    designed for this use case. RegistryKey itself is Send.
+// 4. No raw Lua values (userdata, functions) escape the Mutex guard scope.
+//    Values are converted to/from Rust types within the lock scope.
+// 5. The remaining fields (id, subscriptions, status, script_path) are all Send+Sync.
+//
+// The "send" feature documentation: https://docs.rs/mlua/latest/mlua/#async-send
 unsafe impl Send for LuaComponent {}
 unsafe impl Sync for LuaComponent {}
 
@@ -205,8 +218,8 @@ impl Component for LuaComponent {
         &self.id
     }
 
-    fn subscriptions(&self) -> Vec<EventCategory> {
-        self.subscriptions.clone()
+    fn subscriptions(&self) -> &[EventCategory] {
+        &self.subscriptions
     }
 
     fn status(&self) -> Status {
@@ -216,23 +229,26 @@ impl Component for LuaComponent {
     fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
         self.status = Status::Running;
 
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| ComponentError::ExecutionFailed(format!("lua lock failed: {}", e)))?;
+        let lua = self.lua.lock().map_err(|e| {
+            tracing::error!("Lua mutex poisoned: {}", e);
+            ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
+        })?;
 
         // Get callback from registry
-        let on_request: Function = lua
-            .registry_value(&self.on_request_key)
-            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
+        let on_request: Function = lua.registry_value(&self.on_request_key).map_err(|e| {
+            tracing::debug!("Failed to get on_request from registry: {}", e);
+            ComponentError::ExecutionFailed("lua callback not found".to_string())
+        })?;
 
         // Convert request to Lua
         let lua_req = LuaRequest::from_request(request);
 
         // Call Lua function
-        let result: LuaResponse = on_request
-            .call(lua_req)
-            .map_err(|e| ComponentError::ExecutionFailed(format!("lua call failed: {}", e)))?;
+        let result: LuaResponse = on_request.call(lua_req).map_err(|e| {
+            // Sanitize error message to avoid leaking internal details
+            tracing::debug!("Lua on_request error: {}", e);
+            ComponentError::ExecutionFailed("lua script execution failed".to_string())
+        })?;
 
         drop(lua);
         self.status = Status::Idle;
@@ -284,18 +300,20 @@ impl Component for LuaComponent {
             return Ok(());
         };
 
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| ComponentError::ExecutionFailed(format!("lua lock failed: {}", e)))?;
+        let lua = self.lua.lock().map_err(|e| {
+            tracing::error!("Lua mutex poisoned in init: {}", e);
+            ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
+        })?;
 
-        let init_fn: Function = lua
-            .registry_value(init_key)
-            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
+        let init_fn: Function = lua.registry_value(init_key).map_err(|e| {
+            tracing::debug!("Failed to get init from registry: {}", e);
+            ComponentError::ExecutionFailed("lua init callback not found".to_string())
+        })?;
 
-        init_fn
-            .call::<()>(())
-            .map_err(|e| ComponentError::ExecutionFailed(format!("init failed: {}", e)))?;
+        init_fn.call::<()>(()).map_err(|e| {
+            tracing::debug!("Lua init error: {}", e);
+            ComponentError::ExecutionFailed("lua init callback failed".to_string())
+        })?;
 
         Ok(())
     }
@@ -354,7 +372,7 @@ mod tests {
 
         let component = LuaComponent::from_script(script).expect("load script");
         assert!(component.id().fqn().contains("test-component"));
-        assert_eq!(component.subscriptions(), vec![EventCategory::Echo]);
+        assert_eq!(component.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]

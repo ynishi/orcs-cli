@@ -180,15 +180,65 @@ pub fn parse_status(s: &str) -> Status {
     }
 }
 
+/// Escape a string for safe inclusion in Lua code.
+///
+/// Handles all control characters and special sequences to prevent
+/// Lua code injection attacks.
+fn escape_lua_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 2);
+    result.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            '\0' => result.push_str("\\0"),
+            // Bell, backspace, form feed, vertical tab
+            '\x07' => result.push_str("\\a"),
+            '\x08' => result.push_str("\\b"),
+            '\x0C' => result.push_str("\\f"),
+            '\x0B' => result.push_str("\\v"),
+            // Other control characters (0x00-0x1F except already handled)
+            c if c.is_control() => {
+                result.push_str(&format!("\\{:03}", c as u32));
+            }
+            c => result.push(c),
+        }
+    }
+    result.push('"');
+    result
+}
+
+/// Escape a key for use in Lua table.
+fn escape_lua_key(key: &str) -> String {
+    // Check if key is a valid Lua identifier
+    let is_valid_identifier = !key.is_empty()
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    if is_valid_identifier {
+        key.to_string()
+    } else {
+        format!("[{}]", escape_lua_string(key))
+    }
+}
+
 /// Convert JSON value to Lua string representation.
+///
+/// # Security
+///
+/// All string values are properly escaped to prevent Lua code injection.
 fn json_to_lua(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "nil".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-        }
+        serde_json::Value::String(s) => escape_lua_string(s),
         serde_json::Value::Array(arr) => {
             let items: Vec<String> = arr.iter().map(json_to_lua).collect();
             format!("{{{}}}", items.join(", "))
@@ -196,7 +246,7 @@ fn json_to_lua(value: &serde_json::Value) -> String {
         serde_json::Value::Object(obj) => {
             let items: Vec<String> = obj
                 .iter()
-                .map(|(k, v)| format!("[\"{}\"] = {}", k, json_to_lua(v)))
+                .map(|(k, v)| format!("{} = {}", escape_lua_key(k), json_to_lua(v)))
                 .collect();
             format!("{{{}}}", items.join(", "))
         }
@@ -287,5 +337,166 @@ mod tests {
         assert_eq!(json_to_lua(&serde_json::json!(true)), "true");
         assert_eq!(json_to_lua(&serde_json::json!(42)), "42");
         assert_eq!(json_to_lua(&serde_json::json!("hello")), "\"hello\"");
+    }
+
+    // === Security Tests for Lua Injection Prevention ===
+
+    #[test]
+    fn escape_lua_string_basic_escapes() {
+        // Backslash
+        assert_eq!(escape_lua_string(r"a\b"), r#""a\\b""#);
+        // Double quote
+        assert_eq!(escape_lua_string(r#"a"b"#), r#""a\"b""#);
+        // Newline
+        assert_eq!(escape_lua_string("a\nb"), r#""a\nb""#);
+        // Carriage return
+        assert_eq!(escape_lua_string("a\rb"), r#""a\rb""#);
+        // Tab
+        assert_eq!(escape_lua_string("a\tb"), r#""a\tb""#);
+        // Null
+        assert_eq!(escape_lua_string("a\0b"), r#""a\0b""#);
+    }
+
+    #[test]
+    fn escape_lua_string_control_chars() {
+        // Bell
+        assert_eq!(escape_lua_string("a\x07b"), r#""a\ab""#);
+        // Backspace
+        assert_eq!(escape_lua_string("a\x08b"), r#""a\bb""#);
+        // Form feed
+        assert_eq!(escape_lua_string("a\x0Cb"), r#""a\fb""#);
+        // Vertical tab
+        assert_eq!(escape_lua_string("a\x0Bb"), r#""a\vb""#);
+    }
+
+    #[test]
+    fn escape_lua_string_injection_attempt() {
+        // Attempt to break out of string and execute code
+        let malicious = "hello\nend; os.execute('rm -rf /')--";
+        let escaped = escape_lua_string(malicious);
+        // Should be safely escaped, not executable
+        assert_eq!(escaped, r#""hello\nend; os.execute('rm -rf /')--""#);
+
+        // Verify it doesn't contain unescaped newline
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_lua_string_unicode() {
+        // Unicode should pass through unchanged
+        assert_eq!(escape_lua_string("日本語"), "\"日本語\"");
+        assert_eq!(escape_lua_string("emoji: 🎉"), "\"emoji: 🎉\"");
+    }
+
+    #[test]
+    fn escape_lua_string_empty() {
+        assert_eq!(escape_lua_string(""), "\"\"");
+    }
+
+    #[test]
+    fn escape_lua_key_valid_identifiers() {
+        assert_eq!(escape_lua_key("foo"), "foo");
+        assert_eq!(escape_lua_key("_bar"), "_bar");
+        assert_eq!(escape_lua_key("baz123"), "baz123");
+        assert_eq!(escape_lua_key("a_b_c"), "a_b_c");
+    }
+
+    #[test]
+    fn escape_lua_key_invalid_identifiers() {
+        // Starts with number
+        assert_eq!(escape_lua_key("123abc"), "[\"123abc\"]");
+        // Contains special chars
+        assert_eq!(escape_lua_key("foo-bar"), "[\"foo-bar\"]");
+        // Contains space
+        assert_eq!(escape_lua_key("foo bar"), "[\"foo bar\"]");
+        // Empty key
+        assert_eq!(escape_lua_key(""), "[\"\"]");
+    }
+
+    #[test]
+    fn json_to_lua_nested_structure() {
+        let nested = serde_json::json!({
+            "level1": {
+                "level2": {
+                    "value": "deep"
+                }
+            }
+        });
+        let lua_str = json_to_lua(&nested);
+        assert!(lua_str.contains("level1"));
+        assert!(lua_str.contains("level2"));
+        assert!(lua_str.contains("\"deep\""));
+    }
+
+    #[test]
+    fn json_to_lua_array() {
+        let arr = serde_json::json!([1, 2, "three", null]);
+        let lua_str = json_to_lua(&arr);
+        assert_eq!(lua_str, "{1, 2, \"three\", nil}");
+    }
+
+    #[test]
+    fn json_to_lua_special_string_in_object() {
+        let obj = serde_json::json!({
+            "key": "value\nwith\nnewlines"
+        });
+        let lua_str = json_to_lua(&obj);
+        // Newlines should be escaped
+        assert!(!lua_str.contains('\n'));
+        assert!(lua_str.contains(r"\n"));
+    }
+
+    #[test]
+    fn json_to_lua_execution_safety() {
+        // Create a Lua instance and verify the escaped string is safe
+        let lua = Lua::new();
+
+        // Malicious payload that tries to break out
+        let payload = serde_json::json!({
+            "data": "test\"); os.execute(\"echo pwned"
+        });
+        let lua_code = format!("return {}", json_to_lua(&payload));
+
+        // Should parse safely without executing os.execute
+        let result: mlua::Result<mlua::Table> = lua.load(&lua_code).eval();
+        assert!(result.is_ok(), "Lua code should parse safely");
+
+        // Verify the data is intact (escaped)
+        let table = result.unwrap();
+        let data: String = table.get("data").unwrap();
+        assert!(data.contains("os.execute"));
+    }
+
+    // === Boundary Tests for lua_to_json ===
+
+    #[test]
+    fn lua_to_json_empty_table() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        let result = lua_to_json(Value::Table(table), &lua).unwrap();
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn lua_to_json_array_table() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.raw_set(1, "a").unwrap();
+        table.raw_set(2, "b").unwrap();
+        let result = lua_to_json(Value::Table(table), &lua).unwrap();
+        assert_eq!(result, serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn lua_to_json_mixed_numbers() {
+        let lua = Lua::new();
+
+        // Integer
+        let int_result = lua_to_json(Value::Integer(42), &lua).unwrap();
+        assert_eq!(int_result, serde_json::json!(42));
+
+        // Float
+        let float_result = lua_to_json(Value::Number(3.14), &lua).unwrap();
+        assert!(float_result.as_f64().unwrap() - 3.14 < 0.001);
     }
 }

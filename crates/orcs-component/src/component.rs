@@ -167,12 +167,12 @@ pub trait Component: Send + Sync {
     /// # Example
     ///
     /// ```ignore
-    /// fn subscriptions(&self) -> Vec<EventCategory> {
-    ///     vec![EventCategory::Hil, EventCategory::Lifecycle]
+    /// fn subscriptions(&self) -> &[EventCategory] {
+    ///     &[EventCategory::Hil, EventCategory::Lifecycle]
     /// }
     /// ```
-    fn subscriptions(&self) -> Vec<EventCategory> {
-        vec![EventCategory::Lifecycle]
+    fn subscriptions(&self) -> &[EventCategory] {
+        &[EventCategory::Lifecycle]
     }
 
     /// Returns the current execution status.

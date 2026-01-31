@@ -220,8 +220,8 @@ impl Component for EchoWithHilComponent {
         &self.id
     }
 
-    fn subscriptions(&self) -> Vec<EventCategory> {
-        vec![EventCategory::Echo, EventCategory::Lifecycle]
+    fn subscriptions(&self) -> &[EventCategory] {
+        &[EventCategory::Echo, EventCategory::Lifecycle]
     }
 
     fn status(&self) -> Status {

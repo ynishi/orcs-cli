@@ -284,7 +284,7 @@ impl OrcsEngine {
     pub fn register(&mut self, component: Box<dyn Component>) {
         let id = component.id().clone();
         let subscriptions = component.subscriptions();
-        let handle = self.eventbus.register(id.clone(), subscriptions.clone());
+        let handle = self.eventbus.register(id.clone(), subscriptions.to_vec());
 
         info!(
             "Registered component: {} (subscriptions: {:?})",

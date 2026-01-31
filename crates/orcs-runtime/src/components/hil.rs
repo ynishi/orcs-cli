@@ -277,8 +277,8 @@ impl Component for HilComponent {
         &self.id
     }
 
-    fn subscriptions(&self) -> Vec<EventCategory> {
-        vec![EventCategory::Hil, EventCategory::Lifecycle]
+    fn subscriptions(&self) -> &[EventCategory] {
+        &[EventCategory::Hil, EventCategory::Lifecycle]
     }
 
     fn status(&self) -> Status {

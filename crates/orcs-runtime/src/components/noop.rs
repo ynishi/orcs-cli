@@ -43,8 +43,8 @@ impl Component for NoopComponent {
         &self.id
     }
 
-    fn subscriptions(&self) -> Vec<EventCategory> {
-        vec![EventCategory::Lifecycle]
+    fn subscriptions(&self) -> &[EventCategory] {
+        &[EventCategory::Lifecycle]
     }
 
     fn status(&self) -> Status {
