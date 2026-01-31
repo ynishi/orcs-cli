@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use orcs_app::{OrcsEngine, World};
+use orcs_app::OrcsApp;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -35,22 +35,20 @@ async fn main() -> Result<()> {
 
     info!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
 
-    // Create World with primary channel
-    let mut world = World::new();
-    world.create_primary()?;
+    // Build application
+    let mut builder = OrcsApp::builder();
 
-    // Create engine with injected World
-    let mut engine = OrcsEngine::new(world);
+    if args.debug {
+        builder = builder.verbose();
+    }
 
-    info!("Engine initialized with primary channel");
+    let mut app = builder.build()?;
 
-    // For now, just run a simple loop
+    info!("Application initialized");
+
+    // Run in interactive or command mode
     if args.command.is_empty() {
-        info!("Interactive mode (not yet implemented)");
-        info!("Press Ctrl+C to exit");
-
-        // Run engine
-        engine.run().await;
+        app.run_interactive().await?;
     } else {
         let cmd = args.command.join(" ");
         info!("Command mode: {}", cmd);

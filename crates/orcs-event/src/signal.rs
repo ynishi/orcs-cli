@@ -51,8 +51,15 @@ use serde::{Deserialize, Serialize};
 /// |------|-------|--------|
 /// | `Veto` | Global only | Stop all operations |
 /// | `Cancel` | Channel | Stop operations in channel |
+/// | `Pause` | Channel/Component | Pause operations |
+/// | `Resume` | Channel/Component | Resume paused operations |
+/// | `Steer` | Channel | Modify direction with message |
+/// | `Approve` | Component | Approve pending HIL request |
+/// | `Reject` | Component | Reject pending HIL request |
+/// | `Modify` | Component | Approve with modifications |
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalKind {
+    // === Stop signals ===
     /// Global stop - requires elevated privilege.
     ///
     /// Stops all operations across all channels.
@@ -63,6 +70,61 @@ pub enum SignalKind {
     ///
     /// Stops operations in the targeted channel(s).
     Cancel,
+
+    // === Control signals ===
+    /// Pause operations in a specific scope.
+    ///
+    /// Paused operations can be resumed with [`Resume`](SignalKind::Resume).
+    Pause,
+
+    /// Resume paused operations.
+    ///
+    /// Resumes operations that were paused with [`Pause`](SignalKind::Pause).
+    Resume,
+
+    /// Modify direction with a message.
+    ///
+    /// Allows Human to steer the execution without stopping.
+    Steer {
+        /// Instruction for how to change direction.
+        message: String,
+    },
+
+    // === HIL signals ===
+    /// Approve a pending HIL request.
+    ///
+    /// Sent by Human to approve an operation that requires approval.
+    Approve {
+        /// ID of the approval request to approve.
+        approval_id: String,
+    },
+
+    /// Reject a pending HIL request.
+    ///
+    /// Sent by Human to reject an operation that requires approval.
+    Reject {
+        /// ID of the approval request to reject.
+        approval_id: String,
+        /// Optional reason for rejection.
+        reason: Option<String>,
+    },
+
+    /// Approve with modifications.
+    ///
+    /// Sent by Human to approve an operation with modified parameters.
+    /// This allows Human to adjust the proposed action before execution.
+    ///
+    /// # Example Use Cases
+    ///
+    /// - Modify file path before write
+    /// - Adjust command arguments before execution
+    /// - Change scope of operation
+    Modify {
+        /// ID of the approval request to modify.
+        approval_id: String,
+        /// Modified payload to use instead of original.
+        modified_payload: serde_json::Value,
+    },
 }
 
 /// A control signal message.
@@ -214,6 +276,155 @@ impl Signal {
     pub fn affects_channel(&self, channel: ChannelId) -> bool {
         self.scope.affects(channel)
     }
+
+    /// Creates a Pause signal for a specific channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - The channel to pause
+    /// * `source` - Who is sending the signal
+    #[must_use]
+    pub fn pause(channel: ChannelId, source: Principal) -> Self {
+        Self {
+            kind: SignalKind::Pause,
+            scope: SignalScope::Channel(channel),
+            source,
+        }
+    }
+
+    /// Creates a Resume signal for a specific channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - The channel to resume
+    /// * `source` - Who is sending the signal
+    #[must_use]
+    pub fn resume(channel: ChannelId, source: Principal) -> Self {
+        Self {
+            kind: SignalKind::Resume,
+            scope: SignalScope::Channel(channel),
+            source,
+        }
+    }
+
+    /// Creates a Steer signal for a specific channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - The channel to steer
+    /// * `message` - Instruction for how to change direction
+    /// * `source` - Who is sending the signal
+    #[must_use]
+    pub fn steer(channel: ChannelId, message: impl Into<String>, source: Principal) -> Self {
+        Self {
+            kind: SignalKind::Steer {
+                message: message.into(),
+            },
+            scope: SignalScope::Channel(channel),
+            source,
+        }
+    }
+
+    /// Creates an Approve signal for a pending HIL request.
+    ///
+    /// # Arguments
+    ///
+    /// * `approval_id` - ID of the approval request to approve
+    /// * `source` - Who is sending the signal (typically Human)
+    #[must_use]
+    pub fn approve(approval_id: impl Into<String>, source: Principal) -> Self {
+        Self {
+            kind: SignalKind::Approve {
+                approval_id: approval_id.into(),
+            },
+            scope: SignalScope::Global,
+            source,
+        }
+    }
+
+    /// Creates a Reject signal for a pending HIL request.
+    ///
+    /// # Arguments
+    ///
+    /// * `approval_id` - ID of the approval request to reject
+    /// * `reason` - Optional reason for rejection
+    /// * `source` - Who is sending the signal (typically Human)
+    #[must_use]
+    pub fn reject(
+        approval_id: impl Into<String>,
+        reason: Option<String>,
+        source: Principal,
+    ) -> Self {
+        Self {
+            kind: SignalKind::Reject {
+                approval_id: approval_id.into(),
+                reason,
+            },
+            scope: SignalScope::Global,
+            source,
+        }
+    }
+
+    /// Returns `true` if this is a Pause signal.
+    #[must_use]
+    pub fn is_pause(&self) -> bool {
+        matches!(self.kind, SignalKind::Pause)
+    }
+
+    /// Returns `true` if this is a Resume signal.
+    #[must_use]
+    pub fn is_resume(&self) -> bool {
+        matches!(self.kind, SignalKind::Resume)
+    }
+
+    /// Returns `true` if this is an Approve signal.
+    #[must_use]
+    pub fn is_approve(&self) -> bool {
+        matches!(self.kind, SignalKind::Approve { .. })
+    }
+
+    /// Returns `true` if this is a Reject signal.
+    #[must_use]
+    pub fn is_reject(&self) -> bool {
+        matches!(self.kind, SignalKind::Reject { .. })
+    }
+
+    /// Returns `true` if this is a Modify signal.
+    #[must_use]
+    pub fn is_modify(&self) -> bool {
+        matches!(self.kind, SignalKind::Modify { .. })
+    }
+
+    /// Returns `true` if this is a HIL response signal (Approve, Reject, or Modify).
+    #[must_use]
+    pub fn is_hil_response(&self) -> bool {
+        self.is_approve() || self.is_reject() || self.is_modify()
+    }
+
+    /// Creates a Modify signal for a pending HIL request.
+    ///
+    /// Approves the request but with modified parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `approval_id` - ID of the approval request to modify
+    /// * `modified_payload` - Modified payload to use instead of original
+    /// * `source` - Who is sending the signal (typically Human)
+    #[must_use]
+    pub fn modify(
+        approval_id: impl Into<String>,
+        modified_payload: serde_json::Value,
+        source: Principal,
+    ) -> Self {
+        Self {
+            kind: SignalKind::Modify {
+                approval_id: approval_id.into(),
+                modified_payload,
+            },
+            scope: SignalScope::Global,
+            source,
+        }
+    }
 }
 
 /// Response from a component after receiving a signal.
@@ -323,5 +534,158 @@ mod tests {
         assert_eq!(SignalScope::Channel(ch1), SignalScope::Channel(ch1));
         assert_ne!(SignalScope::Channel(ch1), SignalScope::Channel(ch2));
         assert_ne!(SignalScope::Global, SignalScope::Channel(ch1));
+    }
+
+    // === M2 HIL Signal Tests ===
+
+    #[test]
+    fn pause_signal() {
+        let channel = ChannelId::new();
+        let signal = Signal::pause(channel, test_user());
+
+        assert!(signal.is_pause());
+        assert!(!signal.is_resume());
+        assert!(signal.affects_channel(channel));
+    }
+
+    #[test]
+    fn resume_signal() {
+        let channel = ChannelId::new();
+        let signal = Signal::resume(channel, test_user());
+
+        assert!(signal.is_resume());
+        assert!(!signal.is_pause());
+        assert!(signal.affects_channel(channel));
+    }
+
+    #[test]
+    fn steer_signal() {
+        let channel = ChannelId::new();
+        let signal = Signal::steer(channel, "focus on error handling", test_user());
+
+        if let SignalKind::Steer { message } = &signal.kind {
+            assert_eq!(message, "focus on error handling");
+        } else {
+            panic!("Expected Steer signal");
+        }
+        assert!(signal.affects_channel(channel));
+    }
+
+    #[test]
+    fn approve_signal() {
+        let signal = Signal::approve("req-123", test_user());
+
+        assert!(signal.is_approve());
+        assert!(signal.is_hil_response());
+        assert!(!signal.is_reject());
+
+        if let SignalKind::Approve { approval_id } = &signal.kind {
+            assert_eq!(approval_id, "req-123");
+        } else {
+            panic!("Expected Approve signal");
+        }
+    }
+
+    #[test]
+    fn reject_signal_with_reason() {
+        let signal = Signal::reject("req-456", Some("dangerous operation".into()), test_user());
+
+        assert!(signal.is_reject());
+        assert!(signal.is_hil_response());
+        assert!(!signal.is_approve());
+
+        if let SignalKind::Reject {
+            approval_id,
+            reason,
+        } = &signal.kind
+        {
+            assert_eq!(approval_id, "req-456");
+            assert_eq!(reason, &Some("dangerous operation".to_string()));
+        } else {
+            panic!("Expected Reject signal");
+        }
+    }
+
+    #[test]
+    fn reject_signal_without_reason() {
+        let signal = Signal::reject("req-789", None, test_user());
+
+        if let SignalKind::Reject {
+            approval_id,
+            reason,
+        } = &signal.kind
+        {
+            assert_eq!(approval_id, "req-789");
+            assert!(reason.is_none());
+        } else {
+            panic!("Expected Reject signal");
+        }
+    }
+
+    #[test]
+    fn signal_kind_equality_with_data() {
+        assert_eq!(SignalKind::Pause, SignalKind::Pause);
+        assert_eq!(SignalKind::Resume, SignalKind::Resume);
+
+        let approve1 = SignalKind::Approve {
+            approval_id: "a".into(),
+        };
+        let approve2 = SignalKind::Approve {
+            approval_id: "a".into(),
+        };
+        let approve3 = SignalKind::Approve {
+            approval_id: "b".into(),
+        };
+
+        assert_eq!(approve1, approve2);
+        assert_ne!(approve1, approve3);
+    }
+
+    #[test]
+    fn modify_signal() {
+        let modified_payload = serde_json::json!({
+            "path": "/safe/path/file.txt",
+            "content": "modified content"
+        });
+        let signal = Signal::modify("req-mod-1", modified_payload.clone(), test_user());
+
+        assert!(signal.is_modify());
+        assert!(signal.is_hil_response());
+        assert!(!signal.is_approve());
+        assert!(!signal.is_reject());
+
+        if let SignalKind::Modify {
+            approval_id,
+            modified_payload: payload,
+        } = &signal.kind
+        {
+            assert_eq!(approval_id, "req-mod-1");
+            assert_eq!(payload, &modified_payload);
+        } else {
+            panic!("Expected Modify signal");
+        }
+    }
+
+    #[test]
+    fn modify_signal_kind_equality() {
+        let payload1 = serde_json::json!({"key": "value1"});
+        let payload2 = serde_json::json!({"key": "value1"});
+        let payload3 = serde_json::json!({"key": "value2"});
+
+        let modify1 = SignalKind::Modify {
+            approval_id: "a".into(),
+            modified_payload: payload1,
+        };
+        let modify2 = SignalKind::Modify {
+            approval_id: "a".into(),
+            modified_payload: payload2,
+        };
+        let modify3 = SignalKind::Modify {
+            approval_id: "a".into(),
+            modified_payload: payload3,
+        };
+
+        assert_eq!(modify1, modify2);
+        assert_ne!(modify1, modify3);
     }
 }

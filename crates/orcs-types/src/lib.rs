@@ -173,12 +173,8 @@ mod tests {
         assert_ne!(id1, id2);
     }
 
-    #[test]
-    fn channel_id_default() {
-        let id1 = ChannelId::default();
-        let id2 = ChannelId::default();
-        assert_ne!(id1, id2);
-    }
+    // NOTE: ChannelId does not implement Default intentionally.
+    // See id.rs for rationale.
 
     #[test]
     fn channel_id_display() {
@@ -202,12 +198,8 @@ mod tests {
         assert!(display.contains(&id.uuid().to_string()));
     }
 
-    #[test]
-    fn request_id_default() {
-        let id1 = RequestId::default();
-        let id2 = RequestId::default();
-        assert_ne!(id1, id2);
-    }
+    // NOTE: RequestId does not implement Default intentionally.
+    // See id.rs for rationale.
 
     #[test]
     fn event_id_creation() {

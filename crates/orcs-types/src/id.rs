@@ -304,6 +304,7 @@ impl std::fmt::Display for PrincipalId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelId(pub Uuid);
 
+#[allow(clippy::new_without_default)] // Default intentionally not implemented - see below
 impl ChannelId {
     /// Creates a new [`ChannelId`] with a random UUID v4.
     ///
@@ -337,11 +338,9 @@ impl ChannelId {
     }
 }
 
-impl Default for ChannelId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// NOTE: ChannelId intentionally does NOT implement Default.
+// Default::default() would generate a new UUID that is not registered in World,
+// leading to subtle bugs. Use World::create_primary() or World::spawn() instead.
 
 impl std::fmt::Display for ChannelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -375,6 +374,7 @@ impl std::fmt::Display for ChannelId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub Uuid);
 
+#[allow(clippy::new_without_default)] // Default intentionally not implemented - RequestId is generated internally by Request::new()
 impl RequestId {
     /// Creates a new [`RequestId`] with a random UUID v4.
     ///
@@ -398,11 +398,9 @@ impl RequestId {
     }
 }
 
-impl Default for RequestId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// NOTE: RequestId intentionally does NOT implement Default.
+// RequestId is generated internally by Request::new()/try_new().
+// Direct construction should use RequestId::new() explicitly.
 
 impl std::fmt::Display for RequestId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

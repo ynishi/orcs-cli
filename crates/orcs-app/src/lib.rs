@@ -2,8 +2,22 @@
 //!
 //! This crate provides:
 //!
+//! - **[`OrcsApp`]**: High-level application wrapper with HIL integration
 //! - **Re-exports**: Convenient access to all ORCS crates
-//! - **AppError**: Unified application-level error type
+//! - **[`AppError`]**: Unified application-level error type
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use orcs_app::OrcsApp;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let mut app = OrcsApp::builder().build()?;
+//!     app.run_interactive().await?;
+//!     Ok(())
+//! }
+//! ```
 //!
 //! # Crate Architecture
 //!
@@ -17,19 +31,19 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                    Runtime Layer                             │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  orcs-runtime (auth, channel, engine)                       │
+//! │  orcs-runtime (auth, channel, engine, components, io)       │
 //! └─────────────────────────────────────────────────────────────┘
 //!                               ↓
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                 Application Layer  ◄── HERE                  │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  orcs-app (re-exports + AppError)                           │
+//! │  orcs-app (OrcsApp + re-exports + AppError)                 │
 //! └─────────────────────────────────────────────────────────────┘
 //!                               ↓
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                   Frontend Layer                             │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  orcs-cli (uses AppError → anyhow/eprintln)                 │
+//! │  orcs-cli (uses OrcsApp → interactive mode)                 │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -43,8 +57,10 @@
 //!               CLI output
 //! ```
 
+mod app;
 mod error;
 
+pub use app::{OrcsApp, OrcsAppBuilder};
 pub use error::AppError;
 
 // Re-export from Plugin SDK Layer

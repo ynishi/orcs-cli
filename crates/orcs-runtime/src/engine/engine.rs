@@ -122,6 +122,15 @@ impl OrcsEngine {
         self.running
     }
 
+    /// Start the engine (set running flag).
+    ///
+    /// Use this when you need to start the engine without entering the run loop,
+    /// for example in interactive mode where you control the polling yourself.
+    pub fn start(&mut self) {
+        self.running = true;
+        info!("OrcsEngine started");
+    }
+
     /// Stop the engine
     pub fn stop(&mut self) {
         self.running = false;

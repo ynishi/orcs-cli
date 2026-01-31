@@ -7,14 +7,25 @@
 //! # State Machine
 //!
 //! ```text
-//!                    ┌─────────┐
-//!      ┌─────────────│ Running │─────────────┐
-//!      │             └─────────┘             │
-//!      │ complete()                  abort() │
-//!      ▼                                     ▼
-//! ┌───────────┐                       ┌─────────┐
-//! │ Completed │                       │ Aborted │
-//! └───────────┘                       └─────────┘
+//!                         ┌─────────┐
+//!       ┌─────────────────│ Running │─────────────────┐
+//!       │                 └────┬────┘                 │
+//!       │                      │                      │
+//!       │ pause()              │ await_approval()     │ abort()
+//!       ▼                      ▼                      ▼
+//! ┌──────────┐         ┌────────────────┐      ┌─────────┐
+//! │  Paused  │         │AwaitingApproval│      │ Aborted │
+//! └────┬─────┘         └───────┬────────┘      └─────────┘
+//!      │                       │
+//!      │ resume()              │ approve()/reject()
+//!      │                       │
+//!      └───────►  Running  ◄───┘
+//!                    │
+//!                    │ complete()
+//!                    ▼
+//!              ┌───────────┐
+//!              │ Completed │
+//!              └───────────┘
 //! ```
 //!
 //! # Example
@@ -37,9 +48,8 @@ use std::collections::HashSet;
 /// State of a [`Channel`].
 ///
 /// Channels start in [`Running`](ChannelState::Running) state and can
-/// transition to either [`Completed`](ChannelState::Completed) or
-/// [`Aborted`](ChannelState::Aborted). Once in a terminal state,
-/// no further transitions are allowed.
+/// transition through various states. Terminal states are
+/// [`Completed`](ChannelState::Completed) and [`Aborted`](ChannelState::Aborted).
 ///
 /// # State Transitions
 ///
@@ -47,10 +57,28 @@ use std::collections::HashSet;
 /// |------|----|--------|
 /// | Running | Completed | [`Channel::complete()`] |
 /// | Running | Aborted | [`Channel::abort()`] |
+/// | Running | Paused | [`Channel::pause()`] |
+/// | Running | AwaitingApproval | [`Channel::await_approval()`] |
+/// | Paused | Running | [`Channel::resume()`] |
+/// | AwaitingApproval | Running | [`Channel::resolve_approval()`] |
+/// | AwaitingApproval | Aborted | [`Channel::abort()`] (rejected) |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Channel is actively running.
     Running,
+
+    /// Channel is paused.
+    ///
+    /// Can be resumed with [`Channel::resume()`].
+    Paused,
+
+    /// Channel is waiting for Human approval (HIL).
+    ///
+    /// Contains the request ID that needs approval.
+    AwaitingApproval {
+        /// ID of the approval request.
+        request_id: String,
+    },
 
     /// Channel completed successfully.
     Completed,
@@ -178,7 +206,9 @@ impl Channel {
 
     /// Transitions to [`Aborted`](ChannelState::Aborted) state.
     ///
-    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
+    /// Can be called from [`Running`](ChannelState::Running),
+    /// [`Paused`](ChannelState::Paused), or
+    /// [`AwaitingApproval`](ChannelState::AwaitingApproval) states.
     ///
     /// # Arguments
     ///
@@ -203,7 +233,8 @@ impl Channel {
     /// }
     /// ```
     pub fn abort(&mut self, reason: String) -> bool {
-        if matches!(self.state, ChannelState::Running) {
+        // Can abort from any non-terminal state
+        if !self.is_terminal() {
             self.state = ChannelState::Aborted { reason };
             true
         } else {
@@ -223,6 +254,103 @@ impl Channel {
     #[must_use]
     pub fn is_running(&self) -> bool {
         matches!(self.state, ChannelState::Running)
+    }
+
+    /// Returns `true` if the channel is in [`Paused`](ChannelState::Paused) state.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        matches!(self.state, ChannelState::Paused)
+    }
+
+    /// Returns `true` if the channel is in [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
+    #[must_use]
+    pub fn is_awaiting_approval(&self) -> bool {
+        matches!(self.state, ChannelState::AwaitingApproval { .. })
+    }
+
+    /// Returns `true` if the channel is in a terminal state (Completed or Aborted).
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::Completed | ChannelState::Aborted { .. }
+        )
+    }
+
+    /// Transitions to [`Paused`](ChannelState::Paused) state.
+    ///
+    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the transition succeeded
+    /// - `false` if not in Running state
+    #[must_use = "check if state transition succeeded"]
+    pub fn pause(&mut self) -> bool {
+        if matches!(self.state, ChannelState::Running) {
+            self.state = ChannelState::Paused;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Transitions from [`Paused`](ChannelState::Paused) back to [`Running`](ChannelState::Running).
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the transition succeeded
+    /// - `false` if not in Paused state
+    #[must_use = "check if state transition succeeded"]
+    pub fn resume(&mut self) -> bool {
+        if matches!(self.state, ChannelState::Paused) {
+            self.state = ChannelState::Running;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Transitions to [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
+    ///
+    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
+    ///
+    /// # Arguments
+    ///
+    /// * `request_id` - ID of the approval request
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the transition succeeded
+    /// - `false` if not in Running state
+    #[must_use = "check if state transition succeeded"]
+    pub fn await_approval(&mut self, request_id: impl Into<String>) -> bool {
+        if matches!(self.state, ChannelState::Running) {
+            self.state = ChannelState::AwaitingApproval {
+                request_id: request_id.into(),
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolves an approval and transitions back to [`Running`](ChannelState::Running).
+    ///
+    /// Only succeeds if currently in [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(request_id)` if the transition succeeded
+    /// - `None` if not in AwaitingApproval state
+    pub fn resolve_approval(&mut self) -> Option<String> {
+        if let ChannelState::AwaitingApproval { request_id } = &self.state {
+            let id = request_id.clone();
+            self.state = ChannelState::Running;
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Registers a child channel.
@@ -331,5 +459,119 @@ mod tests {
 
         parent.remove_child(&child1);
         assert_eq!(parent.children().len(), 1);
+    }
+
+    // === M2 HIL State Tests ===
+
+    #[test]
+    fn channel_pause_resume() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+
+        assert!(channel.is_running());
+        assert!(!channel.is_paused());
+
+        assert!(channel.pause());
+        assert!(!channel.is_running());
+        assert!(channel.is_paused());
+
+        // Cannot pause when already paused
+        assert!(!channel.pause());
+
+        assert!(channel.resume());
+        assert!(channel.is_running());
+        assert!(!channel.is_paused());
+
+        // Cannot resume when running
+        assert!(!channel.resume());
+    }
+
+    #[test]
+    fn channel_await_approval() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+
+        assert!(channel.await_approval("req-123"));
+        assert!(channel.is_awaiting_approval());
+        assert!(!channel.is_running());
+
+        // Cannot await approval when already awaiting
+        assert!(!channel.await_approval("req-456"));
+
+        if let ChannelState::AwaitingApproval { request_id } = channel.state() {
+            assert_eq!(request_id, "req-123");
+        } else {
+            panic!("Expected AwaitingApproval state");
+        }
+    }
+
+    #[test]
+    fn channel_resolve_approval() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+
+        assert!(channel.await_approval("req-123"));
+
+        let resolved_id = channel.resolve_approval();
+        assert_eq!(resolved_id, Some("req-123".to_string()));
+        assert!(channel.is_running());
+
+        // Cannot resolve when running
+        assert!(channel.resolve_approval().is_none());
+    }
+
+    #[test]
+    fn channel_abort_from_awaiting() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+
+        assert!(channel.await_approval("req-123"));
+        assert!(channel.abort("rejected by user".to_string()));
+
+        assert!(channel.is_terminal());
+        if let ChannelState::Aborted { reason } = channel.state() {
+            assert_eq!(reason, "rejected by user");
+        } else {
+            panic!("Expected Aborted state");
+        }
+    }
+
+    #[test]
+    fn channel_terminal_state() {
+        let id1 = ChannelId::new();
+        let mut ch1 = Channel::new(id1, None);
+        ch1.complete();
+        assert!(ch1.is_terminal());
+
+        let id2 = ChannelId::new();
+        let mut ch2 = Channel::new(id2, None);
+        ch2.abort("test".into());
+        assert!(ch2.is_terminal());
+
+        let id3 = ChannelId::new();
+        let ch3 = Channel::new(id3, None);
+        assert!(!ch3.is_terminal());
+    }
+
+    #[test]
+    fn channel_cannot_pause_from_terminal() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+        channel.complete();
+
+        assert!(!channel.pause());
+        assert!(!channel.await_approval("req"));
+    }
+
+    #[test]
+    fn channel_cannot_complete_from_paused() {
+        let id = ChannelId::new();
+        let mut channel = Channel::new(id, None);
+        assert!(channel.pause());
+
+        // Must resume first
+        assert!(!channel.complete());
+        assert!(channel.resume());
+        assert!(channel.complete());
     }
 }

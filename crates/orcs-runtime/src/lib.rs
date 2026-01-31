@@ -64,6 +64,19 @@
 //! - [`EventBus`](engine::EventBus): Message routing
 //! - [`ComponentHandle`](engine::ComponentHandle): Component communication
 //!
+//! ## [`components`] - Builtin Components
+//!
+//! Core components for the runtime:
+//!
+//! - [`HilComponent`](components::HilComponent): Human-in-the-Loop approval
+//!
+//! ## [`io`] - Human I/O
+//!
+//! Input/output for Human interaction:
+//!
+//! - [`HumanInput`](io::HumanInput): stdin command parsing
+//! - [`OutputSink`](io::OutputSink): output display trait
+//!
 //! # Why This Separation?
 //!
 //! The runtime layer is intentionally separate from the Plugin SDK because:
@@ -75,12 +88,16 @@
 
 pub mod auth;
 pub mod channel;
+pub mod components;
 pub mod engine;
+pub mod io;
 
 // Re-exports for convenience
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
 pub use channel::{Channel, ChannelError, ChannelState, World};
+pub use components::{ApprovalRequest, ApprovalResult, EchoWithHilComponent, HilComponent};
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
+pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};
 
 // Re-export Principal from orcs_types (it's part of the public API)
 pub use orcs_types::Principal;
