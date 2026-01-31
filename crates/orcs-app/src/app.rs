@@ -26,7 +26,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let mut app = OrcsApp::builder().build()?;
+//!     let mut app = OrcsApp::builder().build().await?;
 //!     app.run_interactive().await?;
 //!     Ok(())
 //! }
@@ -35,10 +35,11 @@
 use crate::AppError;
 use orcs_event::{EventCategory, Signal};
 use orcs_runtime::{
-    ChannelConfig, ChannelHandle, ConsoleOutput, EchoWithHilComponent, Event, HumanInput,
-    InputCommand, OrcsEngine, OutputSink, World,
+    default_session_path, ChannelConfig, ChannelHandle, ConsoleOutput, EchoWithHilComponent, Event,
+    HumanInput, InputCommand, LocalFileStore, OrcsEngine, OutputSink, SessionAsset, World,
 };
 use orcs_types::ComponentId;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -49,6 +50,17 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 struct PendingApproval {
     /// Approval ID (UUID).
     id: String,
+}
+
+/// Control flow for the main input loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControl {
+    /// Continue processing input.
+    Continue,
+    /// Exit the loop normally (quit command).
+    Exit,
+    /// Pause and save session before exit.
+    Pause,
 }
 
 /// ORCS Application.
@@ -64,6 +76,14 @@ pub struct OrcsApp {
     io_handle: ChannelHandle,
     /// Pending approval (for "y" / "n" without explicit ID).
     pending_approval: Option<PendingApproval>,
+    /// Session store for persistence.
+    store: LocalFileStore,
+    /// Current session asset.
+    session: SessionAsset,
+    /// Whether this session was resumed from storage.
+    is_resumed: bool,
+    /// Number of components restored (if resumed).
+    restored_count: usize,
 }
 
 impl OrcsApp {
@@ -104,6 +124,52 @@ impl OrcsApp {
         self.pending_approval.as_ref().map(|p| p.id.as_str())
     }
 
+    /// Returns the current session ID.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session.id
+    }
+
+    /// Returns whether this session was resumed from storage.
+    #[must_use]
+    pub fn is_resumed(&self) -> bool {
+        self.is_resumed
+    }
+
+    /// Returns the number of components restored (if resumed).
+    #[must_use]
+    pub fn restored_count(&self) -> usize {
+        self.restored_count
+    }
+
+    /// Saves the current session to storage.
+    ///
+    /// Collects component snapshots and persists the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Storage`] if saving fails.
+    pub async fn save_session(&mut self) -> Result<(), AppError> {
+        self.engine
+            .save_session(&self.store, &mut self.session)
+            .await?;
+        Ok(())
+    }
+
+    /// Loads a session from storage and restores component state.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session ID to load
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Storage`] if loading fails.
+    pub async fn load_session(&mut self, session_id: &str) -> Result<(), AppError> {
+        self.session = self.engine.load_session(&self.store, session_id).await?;
+        Ok(())
+    }
+
     /// Runs the application in interactive mode.
     ///
     /// Uses parallel execution infrastructure:
@@ -124,8 +190,20 @@ impl OrcsApp {
         self.output
             .info("Interactive mode started. Type 'q' to quit, 'help' for commands.");
 
+        // Display session status with restore information
+        if self.is_resumed {
+            self.output.info(&format!(
+                "Resumed session: {} ({} component(s) restored)",
+                self.session.id, self.restored_count
+            ));
+        } else {
+            self.output
+                .info(&format!("Session ID: {}", self.session.id));
+        }
+
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin).lines();
+        let mut should_save = false;
 
         loop {
             // Poll engine once
@@ -138,8 +216,13 @@ impl OrcsApp {
                 line_result = reader.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
-                            if !self.handle_input(&line) {
-                                break;
+                            match self.handle_input(&line) {
+                                LoopControl::Continue => {}
+                                LoopControl::Exit => break,
+                                LoopControl::Pause => {
+                                    should_save = true;
+                                    break;
+                                }
                             }
                         }
                         Ok(None) => {
@@ -162,27 +245,38 @@ impl OrcsApp {
         }
 
         self.engine.stop();
+
+        // Save session if paused
+        if should_save {
+            self.output.info("Saving session...");
+            self.save_session().await?;
+            self.output
+                .info(&format!("Session saved: {}", self.session.id));
+            self.output
+                .info(&format!("Resume with: orcs --resume {}", self.session.id));
+        }
+
         self.output.info("Shutting down...");
         Ok(())
     }
 
     /// Handles a single line of input.
     ///
-    /// Returns `false` if the application should quit.
-    fn handle_input(&mut self, line: &str) -> bool {
+    /// Returns control flow instruction for the main loop.
+    fn handle_input(&mut self, line: &str) -> LoopControl {
         let cmd = self.input.parse_line(line);
 
         match &cmd {
             InputCommand::Quit => {
                 tracing::info!("Quit requested");
-                return false;
+                return LoopControl::Exit;
             }
             InputCommand::Veto => {
                 tracing::warn!("Veto signal sent");
                 let signal = Signal::veto(self.input.principal().clone());
                 // Broadcast to all runners (including EchoWithHilComponent)
                 self.engine.signal(signal);
-                return false;
+                return LoopControl::Exit;
             }
             InputCommand::Approve { approval_id } => {
                 self.handle_approve(approval_id.as_deref());
@@ -194,12 +288,13 @@ impl OrcsApp {
                 self.handle_reject(approval_id.as_deref(), reason.clone());
             }
             InputCommand::Pause => {
-                self.output
-                    .info("Pause not yet implemented for interactive mode");
+                tracing::info!("Pause requested");
+                return LoopControl::Pause;
             }
             InputCommand::Resume => {
+                // Resume is handled at startup via --resume flag, not during interactive mode
                 self.output
-                    .info("Resume not yet implemented for interactive mode");
+                    .info("Resume is handled at startup. Use: orcs --resume");
             }
             InputCommand::Steer { message } => {
                 self.output.info(&format!("Steer: {}", message));
@@ -215,7 +310,7 @@ impl OrcsApp {
             }
         }
 
-        true
+        LoopControl::Continue
     }
 
     /// Handles user input by injecting an Event to the ChannelRunner.
@@ -327,6 +422,8 @@ impl OrcsApp {
 pub struct OrcsAppBuilder {
     output: Option<Arc<dyn OutputSink>>,
     verbose: bool,
+    session_path: Option<PathBuf>,
+    resume_session_id: Option<String>,
 }
 
 impl OrcsAppBuilder {
@@ -336,6 +433,8 @@ impl OrcsAppBuilder {
         Self {
             output: None,
             verbose: false,
+            session_path: None,
+            resume_session_id: None,
         }
     }
 
@@ -353,11 +452,33 @@ impl OrcsAppBuilder {
         self
     }
 
+    /// Sets a custom session storage path.
+    #[must_use]
+    pub fn with_session_path(mut self, path: PathBuf) -> Self {
+        self.session_path = Some(path);
+        self
+    }
+
+    /// Sets a session ID to resume from.
+    #[must_use]
+    pub fn resume(mut self, session_id: impl Into<String>) -> Self {
+        self.resume_session_id = Some(session_id.into());
+        self
+    }
+
     /// Builds the application.
     ///
     /// Creates the World, Engine, and spawns the IO channel runner with
     /// EchoWithHilComponent. All components are initialized at build time.
-    pub fn build(self) -> Result<OrcsApp, AppError> {
+    ///
+    /// If `resume` was called, loads the specified session and restores
+    /// component state.
+    pub async fn build(self) -> Result<OrcsApp, AppError> {
+        // Create session store
+        let session_path = self.session_path.unwrap_or_else(default_session_path);
+        let store = LocalFileStore::new(session_path)
+            .map_err(|e| AppError::Config(format!("Failed to create session store: {}", e)))?;
+
         // Create World with IO channel
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
@@ -372,6 +493,17 @@ impl OrcsAppBuilder {
             "IO channel runner spawned with EchoWithHilComponent: {}",
             io
         );
+
+        // Load or create session
+        let (session, is_resumed, restored_count) =
+            if let Some(session_id) = &self.resume_session_id {
+                tracing::info!("Resuming session: {}", session_id);
+                let asset = engine.load_session(&store, session_id).await?;
+                let count = asset.component_snapshots.len();
+                (asset, true, count)
+            } else {
+                (SessionAsset::new(), false, 0)
+            };
 
         // Create output sink
         let output: Arc<dyn OutputSink> = self.output.unwrap_or_else(|| {
@@ -393,6 +525,10 @@ impl OrcsAppBuilder {
             output,
             io_handle,
             pending_approval: None,
+            store,
+            session,
+            is_resumed,
+            restored_count,
         })
     }
 }
@@ -409,26 +545,26 @@ mod tests {
 
     #[tokio::test]
     async fn builder_default() {
-        let app = OrcsApp::builder().build().unwrap();
+        let app = OrcsApp::builder().build().await.unwrap();
         assert!(app.pending_approval_id().is_none());
     }
 
     #[tokio::test]
     async fn builder_verbose() {
-        let app = OrcsApp::builder().verbose().build().unwrap();
+        let app = OrcsApp::builder().verbose().build().await.unwrap();
         assert!(app.pending_approval_id().is_none());
     }
 
     #[tokio::test]
     async fn app_engine_access() {
-        let app = OrcsApp::builder().build().unwrap();
+        let app = OrcsApp::builder().build().await.unwrap();
         // Engine is not running until run() is called
         assert!(!app.engine().is_running());
     }
 
     #[tokio::test]
     async fn app_engine_parallel_access() {
-        let app = OrcsApp::builder().build().unwrap();
+        let app = OrcsApp::builder().build().await.unwrap();
         // WorldManager starts immediately in new(), io_channel is always set
         let io = app.engine().io_channel();
         // Verify the channel exists in World
@@ -439,9 +575,76 @@ mod tests {
 
     #[tokio::test]
     async fn app_io_handle_available() {
-        let app = OrcsApp::builder().build().unwrap();
+        let app = OrcsApp::builder().build().await.unwrap();
         // io_handle is set at build time (not Option)
         let io_channel = app.engine().io_channel();
         assert_eq!(app.io_handle().id, io_channel);
+    }
+
+    #[tokio::test]
+    async fn app_session_id() {
+        let app = OrcsApp::builder().build().await.unwrap();
+        // Session ID is generated at build time
+        assert!(!app.session_id().is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_new_session_not_resumed() {
+        let app = OrcsApp::builder().build().await.unwrap();
+        // New session is not resumed
+        assert!(!app.is_resumed());
+        assert_eq!(app.restored_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn app_save_and_load_session() {
+        // Use a unique temp directory for this test
+        let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create and save a session
+        let session_id = {
+            let mut app = OrcsApp::builder()
+                .with_session_path(temp_dir.clone())
+                .build()
+                .await
+                .unwrap();
+
+            let id = app.session_id().to_string();
+            app.save_session().await.unwrap();
+            id
+        };
+
+        // Resume the session
+        let app = OrcsApp::builder()
+            .with_session_path(temp_dir.clone())
+            .resume(&session_id)
+            .build()
+            .await
+            .unwrap();
+
+        // Verify resumed state
+        assert!(app.is_resumed());
+        assert_eq!(app.session_id(), session_id);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn app_resume_nonexistent_session_fails() {
+        let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let result = OrcsApp::builder()
+            .with_session_path(temp_dir.clone())
+            .resume("nonexistent-session-id")
+            .build()
+            .await;
+
+        assert!(result.is_err());
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

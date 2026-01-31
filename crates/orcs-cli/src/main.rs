@@ -15,6 +15,10 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
 
+    /// Resume a previous session by ID
+    #[arg(long)]
+    resume: Option<String>,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -42,7 +46,11 @@ async fn main() -> Result<()> {
         builder = builder.verbose();
     }
 
-    let mut app = builder.build()?;
+    if let Some(session_id) = args.resume {
+        builder = builder.resume(session_id);
+    }
+
+    let mut app = builder.build().await?;
 
     info!("Application initialized");
 

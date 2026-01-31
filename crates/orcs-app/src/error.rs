@@ -2,7 +2,7 @@
 //!
 //! [`AppError`] unifies all internal errors for the application layer.
 
-use orcs_runtime::{ChannelError, EngineError};
+use orcs_runtime::{ChannelError, EngineError, StorageError};
 use orcs_types::ErrorCode;
 use thiserror::Error;
 
@@ -44,6 +44,10 @@ pub enum AppError {
     /// Application not properly initialized
     #[error("Not initialized: {0}")]
     NotInitialized(String),
+
+    /// Session storage error
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
 }
 
 impl ErrorCode for AppError {
@@ -54,6 +58,7 @@ impl ErrorCode for AppError {
             Self::Config(_) => "APP_CONFIG_ERROR",
             Self::Io(_) => "APP_IO_ERROR",
             Self::NotInitialized(_) => "APP_NOT_INITIALIZED",
+            Self::Storage(_) => "APP_STORAGE_ERROR",
         }
     }
 
@@ -64,6 +69,7 @@ impl ErrorCode for AppError {
             Self::Config(_) => false,
             Self::Io(_) => true,
             Self::NotInitialized(_) => false,
+            Self::Storage(_) => true,
         }
     }
 }
