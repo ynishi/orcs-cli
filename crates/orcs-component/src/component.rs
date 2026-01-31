@@ -92,7 +92,7 @@
 //! }
 //! ```
 
-use crate::{ComponentError, Status, StatusDetail};
+use crate::{ComponentError, EventCategory, Status, StatusDetail};
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value;
@@ -108,9 +108,28 @@ use serde_json::Value;
 /// |--------|---------|
 /// | `id` | Component identification |
 /// | `status` | Current execution status |
+/// | `subscriptions` | Event categories to receive |
 /// | `on_request` | Handle incoming requests |
 /// | `on_signal` | Handle control signals |
 /// | `abort` | Immediate termination |
+///
+/// # Subscription-based Routing
+///
+/// Components declare which [`EventCategory`] they subscribe to.
+/// The EventBus routes requests only to subscribers of the matching category.
+///
+/// ```text
+/// Component::subscriptions() -> [Hil, Echo]
+///     │
+///     ▼
+/// EventBus::register(component, categories)
+///     │
+///     ▼
+/// Request { category: Hil, operation: "submit" }
+///     │
+///     ▼ (routed only to Hil subscribers)
+/// HilComponent::on_request()
+/// ```
 ///
 /// # Signal Handling Contract
 ///
@@ -134,6 +153,27 @@ pub trait Component: Send + Sync {
     /// - Signal scope checking
     /// - Logging and debugging
     fn id(&self) -> &ComponentId;
+
+    /// Returns the event categories this component subscribes to.
+    ///
+    /// The EventBus routes requests only to components that subscribe
+    /// to the request's category.
+    ///
+    /// # Default
+    ///
+    /// Default implementation returns `[Lifecycle]` only.
+    /// Override to receive requests from other categories.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn subscriptions(&self) -> Vec<EventCategory> {
+    ///     vec![EventCategory::Hil, EventCategory::Lifecycle]
+    /// }
+    /// ```
+    fn subscriptions(&self) -> Vec<EventCategory> {
+        vec![EventCategory::Lifecycle]
+    }
 
     /// Returns the current execution status.
     ///
@@ -284,7 +324,13 @@ mod tests {
         let mut comp = MockComponent::new("echo");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("echo", source, channel, Value::String("hello".into()));
+        let req = Request::new(
+            EventCategory::Echo,
+            "echo",
+            source,
+            channel,
+            Value::String("hello".into()),
+        );
 
         let result = comp.on_request(&req);
         assert!(result.is_ok());
@@ -296,7 +342,7 @@ mod tests {
         let mut comp = MockComponent::new("test");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("unknown", source, channel, Value::Null);
+        let req = Request::new(EventCategory::Echo, "unknown", source, channel, Value::Null);
 
         let result = comp.on_request(&req);
         assert!(result.is_err());

@@ -218,6 +218,9 @@ pub use status::{Progress, Status, StatusDetail};
 // Re-export error types
 pub use error::ComponentError;
 
+// Re-export EventCategory for convenience
+pub use orcs_event::EventCategory;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +277,13 @@ mod tests {
         let mut comp = MockComponent::new("echo");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("echo", source, channel, Value::String("hello".into()));
+        let req = Request::new(
+            EventCategory::Echo,
+            "echo",
+            source,
+            channel,
+            Value::String("hello".into()),
+        );
 
         let result = comp.on_request(&req);
         assert!(result.is_ok());
@@ -286,7 +295,7 @@ mod tests {
         let mut comp = MockComponent::new("test");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("unknown", source, channel, Value::Null);
+        let req = Request::new(EventCategory::Echo, "unknown", source, channel, Value::Null);
 
         let result = comp.on_request(&req);
         assert!(result.is_err());

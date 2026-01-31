@@ -139,7 +139,7 @@
 //! # Usage
 //!
 //! ```
-//! use orcs_event::{Signal, SignalKind, Request, EventError};
+//! use orcs_event::{Signal, SignalKind, Request, EventError, EventCategory};
 //! use orcs_types::{Principal, ComponentId, ChannelId, PrincipalId, SignalScope};
 //!
 //! // Create a principal (identity only, no permission)
@@ -153,6 +153,7 @@
 //! // Create a request
 //! let source = ComponentId::builtin("llm");
 //! let request = Request::new(
+//!     EventCategory::Echo,
 //!     "chat",
 //!     source,
 //!     channel,
@@ -176,10 +177,12 @@
 //! [`ComponentId`]: orcs_types::ComponentId
 //! [`Principal`]: orcs_types::Principal
 
+mod category;
 mod error;
 mod request;
 mod signal;
 
+pub use category::EventCategory;
 pub use error::EventError;
 pub use request::{Request, RequestArgs, DEFAULT_TIMEOUT_MS};
 pub use signal::{Signal, SignalKind, SignalResponse};

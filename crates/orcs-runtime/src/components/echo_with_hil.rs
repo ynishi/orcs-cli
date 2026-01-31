@@ -1,29 +1,35 @@
-//! Echo with HIL Component.
+//! Echo Component with HIL (Human-in-the-Loop) Support.
 //!
-//! A test component that demonstrates HIL integration.
-//! Before echoing user input, it requests Human approval.
+//! A component that demonstrates EventBus-based HIL integration.
+//! Before echoing user input, it requests Human approval via Signal.
+//!
+//! # Architecture
+//!
+//! This component is decoupled from HilComponent. It:
+//! - Subscribes to `EventCategory::Echo`
+//! - Manages its own pending approval state
+//! - Receives Approve/Reject signals directly
 //!
 //! # Flow
 //!
 //! ```text
-//! User                 EchoWithHilComponent           HilComponent
+//! User                 EchoWithHilComponent              Human
 //!   │                         │                            │
-//!   │ "echo Hi"               │                            │
+//!   │ Request: "echo Hi"      │                            │
 //!   ├────────────────────────►│                            │
-//!   │                         │ ApprovalRequest            │
-//!   │                         │ "You say 'Hi'?"            │
-//!   │                         ├───────────────────────────►│
+//!   │                         │ Response: pending          │
+//!   │◄────────────────────────┤ (approval_id)              │
 //!   │                         │                            │
-//!   │ Signal::Approve         │                            │
-//!   ├─────────────────────────┼───────────────────────────►│
-//!   │                         │        Approved            │
-//!   │                         │◄───────────────────────────┤
+//!   │                         │ (waiting for approval)     │
+//!   │                         │                            │
+//!   │ Signal::Approve(id)     │                            │
+//!   ├────────────────────────►│                            │
+//!   │                         │ Execute echo               │
 //!   │       "Echo: Hi"        │                            │
 //!   │◄────────────────────────┤                            │
 //! ```
 
-use crate::components::{ApprovalRequest, ApprovalResult, HilComponent};
-use orcs_component::{Component, ComponentError, Status};
+use orcs_component::{Component, ComponentError, EventCategory, Status};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value;
@@ -35,19 +41,20 @@ struct PendingEcho {
     approval_id: String,
     /// The original message to echo.
     message: String,
+    /// Human-readable description of the approval request.
+    description: String,
 }
 
 /// Echo component with HIL integration.
 ///
 /// Requests Human approval before echoing messages.
+/// Subscribes to `EventCategory::Echo` for request routing.
 pub struct EchoWithHilComponent {
     id: ComponentId,
     status: Status,
-    /// Internal HIL component for approval management.
-    hil: HilComponent,
-    /// Pending echo requests awaiting approval.
+    /// Pending echo request awaiting approval.
     pending: Option<PendingEcho>,
-    /// Last echo result (for testing).
+    /// Last echo result (for testing/inspection).
     last_result: Option<String>,
 }
 
@@ -58,7 +65,6 @@ impl EchoWithHilComponent {
         Self {
             id: ComponentId::builtin("echo_with_hil"),
             status: Status::Idle,
-            hil: HilComponent::new(),
             pending: None,
             last_result: None,
         }
@@ -82,18 +88,23 @@ impl EchoWithHilComponent {
         self.pending.as_ref().map(|p| p.approval_id.as_str())
     }
 
+    /// Returns the pending approval description if any.
+    #[must_use]
+    pub fn pending_description(&self) -> Option<&str> {
+        self.pending.as_ref().map(|p| p.description.as_str())
+    }
+
     /// Submits an echo request for approval.
+    ///
+    /// Generates a unique approval_id and stores the pending state.
     fn submit_for_approval(&mut self, message: String) -> String {
-        let request = ApprovalRequest::new(
-            "echo",
-            format!("You say '{}'?", message),
-            serde_json::json!({ "message": message }),
-        );
-        let approval_id = self.hil.submit(request);
+        let approval_id = uuid::Uuid::new_v4().to_string();
+        let description = format!("You say '{}'?", message);
 
         self.pending = Some(PendingEcho {
             approval_id: approval_id.clone(),
             message,
+            description,
         });
         self.status = Status::Running;
 
@@ -108,35 +119,58 @@ impl EchoWithHilComponent {
         result
     }
 
-    /// Handles approval result from HIL.
-    fn handle_approval(&mut self, approval_id: &str, result: &ApprovalResult) -> Option<String> {
-        let pending = self.pending.take()?;
+    /// Handles an Approve signal.
+    fn handle_approve(&mut self, approval_id: &str) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
 
         if pending.approval_id != approval_id {
-            // Not our approval, restore pending
-            self.pending = Some(pending);
-            return None;
+            return false;
         }
 
-        match result {
-            ApprovalResult::Approved => Some(self.execute_echo(&pending.message)),
-            ApprovalResult::Modified { modified_payload } => {
-                // Use modified message if provided
-                let message = modified_payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pending.message);
-                Some(self.execute_echo(message))
-            }
-            ApprovalResult::Rejected { reason } => {
-                self.status = Status::Idle;
-                self.last_result = Some(format!(
-                    "Rejected: {}",
-                    reason.as_deref().unwrap_or("No reason")
-                ));
-                None
-            }
+        let message = pending.message.clone();
+        self.pending = None;
+        self.execute_echo(&message);
+        true
+    }
+
+    /// Handles a Reject signal.
+    fn handle_reject(&mut self, approval_id: &str, reason: Option<&str>) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
+
+        if pending.approval_id != approval_id {
+            return false;
         }
+
+        self.pending = None;
+        self.status = Status::Idle;
+        self.last_result = Some(format!("Rejected: {}", reason.unwrap_or("No reason")));
+        true
+    }
+
+    /// Handles a Modify signal.
+    fn handle_modify(&mut self, approval_id: &str, modified_payload: &Value) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
+
+        if pending.approval_id != approval_id {
+            return false;
+        }
+
+        // Use modified message if provided, otherwise use original
+        let message = modified_payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&pending.message)
+            .to_string();
+
+        self.pending = None;
+        self.execute_echo(&message);
+        true
     }
 }
 
@@ -149,6 +183,10 @@ impl Default for EchoWithHilComponent {
 impl Component for EchoWithHilComponent {
     fn id(&self) -> &ComponentId {
         &self.id
+    }
+
+    fn subscriptions(&self) -> Vec<EventCategory> {
+        vec![EventCategory::Echo, EventCategory::Lifecycle]
     }
 
     fn status(&self) -> Status {
@@ -175,7 +213,6 @@ impl Component for EchoWithHilComponent {
                 }))
             }
             "check" => {
-                // Check if there's a result ready
                 if let Some(result) = &self.last_result {
                     Ok(serde_json::json!({
                         "status": "completed",
@@ -196,59 +233,45 @@ impl Component for EchoWithHilComponent {
     }
 
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        // First, let HIL handle the signal
-        let hil_response = self.hil.on_signal(signal);
-
-        match hil_response {
-            SignalResponse::Handled => {
-                // HIL handled it - check if our pending request was resolved
-                if let Some(pending) = &self.pending {
-                    // Check if the approval was resolved
-                    if !self.hil.is_pending(&pending.approval_id) {
-                        // Infer result from signal type
-                        let approval_id = pending.approval_id.clone();
-                        if signal.is_approve() {
-                            let _ = self.handle_approval(&approval_id, &ApprovalResult::Approved);
-                        } else if signal.is_reject() {
-                            let _ = self.handle_approval(
-                                &approval_id,
-                                &ApprovalResult::Rejected { reason: None },
-                            );
-                        } else if let SignalKind::Modify {
-                            modified_payload, ..
-                        } = &signal.kind
-                        {
-                            let _ = self.handle_approval(
-                                &approval_id,
-                                &ApprovalResult::Modified {
-                                    modified_payload: modified_payload.clone(),
-                                },
-                            );
-                        }
-                    }
-                }
-                SignalResponse::Handled
-            }
-            SignalResponse::Abort => {
+        match &signal.kind {
+            SignalKind::Veto => {
                 self.abort();
                 SignalResponse::Abort
             }
-            SignalResponse::Ignored => {
-                // Check for veto
-                if signal.is_veto() {
-                    self.abort();
-                    SignalResponse::Abort
+            SignalKind::Approve { approval_id } => {
+                if self.handle_approve(approval_id) {
+                    SignalResponse::Handled
                 } else {
                     SignalResponse::Ignored
                 }
             }
+            SignalKind::Reject {
+                approval_id,
+                reason,
+            } => {
+                if self.handle_reject(approval_id, reason.as_deref()) {
+                    SignalResponse::Handled
+                } else {
+                    SignalResponse::Ignored
+                }
+            }
+            SignalKind::Modify {
+                approval_id,
+                modified_payload,
+            } => {
+                if self.handle_modify(approval_id, modified_payload) {
+                    SignalResponse::Handled
+                } else {
+                    SignalResponse::Ignored
+                }
+            }
+            _ => SignalResponse::Ignored,
         }
     }
 
     fn abort(&mut self) {
         self.status = Status::Aborted;
         self.pending = None;
-        self.hil.abort();
     }
 }
 
@@ -263,6 +286,7 @@ mod tests {
 
     fn test_request(operation: &str, payload: Value) -> Request {
         Request::new(
+            EventCategory::Echo,
             operation,
             ComponentId::builtin("test"),
             ChannelId::new(),
@@ -277,6 +301,14 @@ mod tests {
         assert_eq!(comp.status(), Status::Idle);
         assert!(!comp.has_pending());
         assert!(comp.last_result().is_none());
+    }
+
+    #[test]
+    fn subscriptions_include_echo() {
+        let comp = EchoWithHilComponent::new();
+        let subs = comp.subscriptions();
+        assert!(subs.contains(&EventCategory::Echo));
+        assert!(subs.contains(&EventCategory::Lifecycle));
     }
 
     #[test]
@@ -296,10 +328,19 @@ mod tests {
     }
 
     #[test]
+    fn pending_has_description() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let req = test_request("echo", Value::String("Hi".into()));
+        comp.on_request(&req).unwrap();
+
+        assert_eq!(comp.pending_description(), Some("You say 'Hi'?"));
+    }
+
+    #[test]
     fn echo_approved_produces_output() {
         let mut comp = EchoWithHilComponent::new();
 
-        // Step 1: User sends "Hi"
         let req = test_request("echo", Value::String("Hi".into()));
         let result = comp.on_request(&req).unwrap();
         let approval_id = result["approval_id"].as_str().unwrap().to_string();
@@ -307,7 +348,6 @@ mod tests {
         assert!(comp.has_pending());
         assert!(comp.last_result().is_none());
 
-        // Step 2: User approves
         let signal = Signal::approve(&approval_id, test_user());
         let response = comp.on_signal(&signal);
 
@@ -321,18 +361,15 @@ mod tests {
     fn echo_rejected_no_output() {
         let mut comp = EchoWithHilComponent::new();
 
-        // Step 1: User sends "Bad message"
         let req = test_request("echo", Value::String("Bad message".into()));
         let result = comp.on_request(&req).unwrap();
         let approval_id = result["approval_id"].as_str().unwrap().to_string();
 
-        // Step 2: User rejects
         let signal = Signal::reject(&approval_id, Some("Not allowed".into()), test_user());
         let response = comp.on_signal(&signal);
 
         assert_eq!(response, SignalResponse::Handled);
         assert!(!comp.has_pending());
-        // Rejected doesn't produce echo output
         assert!(comp.last_result().unwrap().starts_with("Rejected:"));
         assert_eq!(comp.status(), Status::Idle);
     }
@@ -341,12 +378,10 @@ mod tests {
     fn echo_modified_uses_new_message() {
         let mut comp = EchoWithHilComponent::new();
 
-        // Step 1: User sends "Original"
         let req = test_request("echo", Value::String("Original".into()));
         let result = comp.on_request(&req).unwrap();
         let approval_id = result["approval_id"].as_str().unwrap().to_string();
 
-        // Step 2: User modifies
         let modified_payload = serde_json::json!({ "message": "Modified" });
         let signal = Signal::modify(&approval_id, modified_payload, test_user());
         let response = comp.on_signal(&signal);
@@ -360,11 +395,9 @@ mod tests {
     fn echo_veto_aborts() {
         let mut comp = EchoWithHilComponent::new();
 
-        // Start an echo request
         let req = test_request("echo", Value::String("Hi".into()));
         let _ = comp.on_request(&req);
 
-        // Veto
         let signal = Signal::veto(test_user());
         let response = comp.on_signal(&signal);
 
@@ -405,7 +438,6 @@ mod tests {
     fn echo_invalid_payload() {
         let mut comp = EchoWithHilComponent::new();
 
-        // Send non-string payload
         let req = test_request("echo", serde_json::json!({"not": "string"}));
         let result = comp.on_request(&req);
 
@@ -430,6 +462,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signal_wrong_approval_id_ignored() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let req = test_request("echo", Value::String("Hi".into()));
+        let _ = comp.on_request(&req);
+
+        // Wrong approval_id
+        let signal = Signal::approve("wrong-id", test_user());
+        let response = comp.on_signal(&signal);
+
+        assert_eq!(response, SignalResponse::Ignored);
+        assert!(comp.has_pending()); // Still pending
+    }
+
+    #[test]
+    fn signal_no_pending_ignored() {
+        let mut comp = EchoWithHilComponent::new();
+
+        // No pending request
+        let signal = Signal::approve("any-id", test_user());
+        let response = comp.on_signal(&signal);
+
+        assert_eq!(response, SignalResponse::Ignored);
+    }
+
     /// E2E test: Full user interaction flow
     #[test]
     fn e2e_user_says_hi_and_approves() {
@@ -443,9 +501,8 @@ mod tests {
         assert_eq!(result["status"], "pending_approval");
         let approval_id = result["approval_id"].as_str().unwrap();
 
-        // Verify the approval request description
-        let pending_req = comp.hil.get_pending(approval_id).unwrap();
-        assert_eq!(pending_req.description, "You say 'Hi'?");
+        // Verify the approval description
+        assert_eq!(comp.pending_description(), Some("You say 'Hi'?"));
 
         // User: "y" (approve)
         let signal = Signal::approve(approval_id, test_user());
@@ -466,8 +523,7 @@ mod tests {
         let approval_id = result["approval_id"].as_str().unwrap();
 
         // System prompts: "You say 'BadWord'?"
-        let pending_req = comp.hil.get_pending(approval_id).unwrap();
-        assert_eq!(pending_req.description, "You say 'BadWord'?");
+        assert_eq!(comp.pending_description(), Some("You say 'BadWord'?"));
 
         // User: "n" (reject)
         let signal = Signal::reject(approval_id, Some("Changed my mind".into()), test_user());

@@ -99,12 +99,20 @@ impl OrcsEngine {
         }
     }
 
-    /// Register a component
+    /// Register a component with its subscriptions.
+    ///
+    /// The component's `subscriptions()` method is called to determine
+    /// which event categories it should receive requests for.
     pub fn register(&mut self, component: Box<dyn Component>) {
         let id = component.id().clone();
-        let handle = self.eventbus.register(id.clone());
+        let subscriptions = component.subscriptions();
+        let handle = self.eventbus.register(id.clone(), subscriptions.clone());
 
-        info!("Registered component: {}", id);
+        info!(
+            "Registered component: {} (subscriptions: {:?})",
+            id,
+            subscriptions.iter().map(|c| c.name()).collect::<Vec<_>>()
+        );
 
         self.handles.insert(id.clone(), handle);
         self.components.insert(id, component);

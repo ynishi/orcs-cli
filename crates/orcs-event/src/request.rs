@@ -22,18 +22,18 @@
 //! - All required fields are provided
 //!
 //! ```
-//! use orcs_event::Request;
+//! use orcs_event::{Request, EventCategory};
 //! use orcs_types::{ComponentId, ChannelId};
 //! use serde_json::Value;
 //!
 //! let source = ComponentId::builtin("llm");
 //! let channel = ChannelId::new();
 //!
-//! let request = Request::new("chat", source, channel, Value::Null)
+//! let request = Request::new(EventCategory::Echo, "chat", source, channel, Value::Null)
 //!     .with_timeout(5000);
 //! ```
 
-use crate::EventError;
+use crate::{EventCategory, EventError};
 use orcs_types::{ChannelId, ComponentId, RequestId, TryNew};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,11 +94,12 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// # Example
 ///
 /// ```
-/// use orcs_event::Request;
+/// use orcs_event::{Request, EventCategory};
 /// use orcs_types::{ComponentId, ChannelId};
 /// use serde_json::json;
 ///
 /// let request = Request::new(
+///     EventCategory::Echo,
 ///     "read",
 ///     ComponentId::builtin("tool"),
 ///     ChannelId::new(),
@@ -115,6 +116,12 @@ pub struct Request {
     /// Generated automatically by [`Request::new`].
     /// Used to correlate with the corresponding `Response`.
     pub id: RequestId,
+
+    /// Event category for subscription-based routing.
+    ///
+    /// The EventBus routes this request only to Components
+    /// that subscribe to this category.
+    pub category: EventCategory,
 
     /// Operation name (e.g., "chat", "read", "approve").
     ///
@@ -162,13 +169,14 @@ pub struct Request {
 /// # Example
 ///
 /// ```
-/// use orcs_event::{Request, RequestArgs};
+/// use orcs_event::{Request, RequestArgs, EventCategory};
 /// use orcs_types::{ComponentId, ChannelId, TryNew};
 /// use serde_json::json;
 ///
 /// let args = RequestArgs {
-///     operation: "chat".to_string(),
-///     source: ComponentId::builtin("llm"),
+///     category: EventCategory::Echo,
+///     operation: "echo".to_string(),
+///     source: ComponentId::builtin("test"),
 ///     channel: ChannelId::new(),
 ///     payload: json!({ "message": "Hello" }),
 /// };
@@ -176,6 +184,8 @@ pub struct Request {
 /// let request = Request::try_new(args).expect("valid request");
 /// ```
 pub struct RequestArgs {
+    /// Event category for routing.
+    pub category: EventCategory,
     /// Operation name (must not be empty).
     pub operation: String,
     /// Source Component.
@@ -204,14 +214,15 @@ impl TryNew for Request {
     /// # Example
     ///
     /// ```
-    /// use orcs_event::{Request, RequestArgs, EventError};
+    /// use orcs_event::{Request, RequestArgs, EventError, EventCategory};
     /// use orcs_types::{ComponentId, ChannelId, TryNew, ErrorCode};
     /// use serde_json::Value;
     ///
     /// // Valid request
     /// let args = RequestArgs {
-    ///     operation: "chat".to_string(),
-    ///     source: ComponentId::builtin("llm"),
+    ///     category: EventCategory::Echo,
+    ///     operation: "echo".to_string(),
+    ///     source: ComponentId::builtin("echo"),
     ///     channel: ChannelId::new(),
     ///     payload: Value::Null,
     /// };
@@ -219,8 +230,9 @@ impl TryNew for Request {
     ///
     /// // Invalid: empty operation
     /// let args = RequestArgs {
+    ///     category: EventCategory::Echo,
     ///     operation: String::new(),
-    ///     source: ComponentId::builtin("llm"),
+    ///     source: ComponentId::builtin("echo"),
     ///     channel: ChannelId::new(),
     ///     payload: Value::Null,
     /// };
@@ -237,6 +249,7 @@ impl TryNew for Request {
 
         Ok(Self {
             id: RequestId::new(),
+            category: args.category,
             operation: operation.to_string(),
             source: args.source,
             target: None,
@@ -256,6 +269,7 @@ impl Request {
     ///
     /// # Arguments
     ///
+    /// * `category` - Event category for routing
     /// * `operation` - Operation name (e.g., "chat", "read")
     /// * `source` - The Component initiating this request
     /// * `channel` - Execution context for scoping
@@ -264,19 +278,21 @@ impl Request {
     /// # Example
     ///
     /// ```
-    /// use orcs_event::Request;
+    /// use orcs_event::{Request, EventCategory};
     /// use orcs_types::{ComponentId, ChannelId};
     /// use serde_json::json;
     ///
     /// let req = Request::new(
-    ///     "chat",
-    ///     ComponentId::builtin("llm"),
+    ///     EventCategory::Echo,
+    ///     "echo",
+    ///     ComponentId::builtin("test"),
     ///     ChannelId::new(),
     ///     json!({ "message": "Hello" }),
     /// );
     /// ```
     #[must_use]
     pub fn new(
+        category: EventCategory,
         operation: impl Into<String>,
         source: ComponentId,
         channel: ChannelId,
@@ -284,6 +300,7 @@ impl Request {
     ) -> Self {
         Self {
             id: RequestId::new(),
+            category,
             operation: operation.into(),
             source,
             target: None,
@@ -301,11 +318,12 @@ impl Request {
     /// # Example
     ///
     /// ```
-    /// use orcs_event::Request;
+    /// use orcs_event::{Request, EventCategory};
     /// use orcs_types::{ComponentId, ChannelId};
     /// use serde_json::Value;
     ///
     /// let req = Request::new(
+    ///     EventCategory::Hil,
     ///     "approve",
     ///     ComponentId::builtin("tool"),
     ///     ChannelId::new(),
@@ -328,12 +346,13 @@ impl Request {
     /// # Example
     ///
     /// ```
-    /// use orcs_event::Request;
+    /// use orcs_event::{Request, EventCategory};
     /// use orcs_types::{ComponentId, ChannelId};
     /// use serde_json::Value;
     ///
     /// // Short timeout for quick operations
     /// let req = Request::new(
+    ///     EventCategory::Lifecycle,
     ///     "ping",
     ///     ComponentId::builtin("monitor"),
     ///     ChannelId::new(),
@@ -359,12 +378,14 @@ mod tests {
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
         let req = Request::new(
+            EventCategory::Echo,
             "echo",
             source.clone(),
             channel,
             Value::String("hello".into()),
         );
 
+        assert_eq!(req.category, EventCategory::Echo);
         assert_eq!(req.operation, "echo");
         assert_eq!(req.source, source);
         assert!(req.target.is_none());
@@ -376,7 +397,8 @@ mod tests {
         let source = ComponentId::builtin("source");
         let target = ComponentId::builtin("target");
         let channel = ChannelId::new();
-        let req = Request::new("call", source, channel, Value::Null).with_target(target.clone());
+        let req = Request::new(EventCategory::Hil, "submit", source, channel, Value::Null)
+            .with_target(target.clone());
 
         assert_eq!(req.target, Some(target));
     }
@@ -385,8 +407,14 @@ mod tests {
     fn request_unique_ids() {
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req1 = Request::new("op1", source.clone(), channel, Value::Null);
-        let req2 = Request::new("op2", source, channel, Value::Null);
+        let req1 = Request::new(
+            EventCategory::Echo,
+            "op1",
+            source.clone(),
+            channel,
+            Value::Null,
+        );
+        let req2 = Request::new(EventCategory::Echo, "op2", source, channel, Value::Null);
 
         assert_ne!(req1.id, req2.id);
     }
@@ -395,7 +423,8 @@ mod tests {
     fn request_with_custom_timeout() {
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("op", source, channel, Value::Null).with_timeout(5000);
+        let req = Request::new(EventCategory::Echo, "op", source, channel, Value::Null)
+            .with_timeout(5000);
 
         assert_eq!(req.timeout_ms, 5000);
     }
@@ -403,8 +432,9 @@ mod tests {
     #[test]
     fn try_new_valid_request() {
         let args = RequestArgs {
-            operation: "chat".to_string(),
-            source: ComponentId::builtin("llm"),
+            category: EventCategory::Echo,
+            operation: "echo".to_string(),
+            source: ComponentId::builtin("echo"),
             channel: ChannelId::new(),
             payload: Value::Null,
         };
@@ -413,7 +443,8 @@ mod tests {
         assert!(result.is_ok());
 
         let req = result.unwrap();
-        assert_eq!(req.operation, "chat");
+        assert_eq!(req.category, EventCategory::Echo);
+        assert_eq!(req.operation, "echo");
     }
 
     #[test]
@@ -421,8 +452,9 @@ mod tests {
         use orcs_types::ErrorCode;
 
         let args = RequestArgs {
+            category: EventCategory::Echo,
             operation: String::new(),
-            source: ComponentId::builtin("llm"),
+            source: ComponentId::builtin("echo"),
             channel: ChannelId::new(),
             payload: Value::Null,
         };
@@ -439,8 +471,9 @@ mod tests {
         use orcs_types::ErrorCode;
 
         let args = RequestArgs {
+            category: EventCategory::Echo,
             operation: "   ".to_string(),
-            source: ComponentId::builtin("llm"),
+            source: ComponentId::builtin("echo"),
             channel: ChannelId::new(),
             payload: Value::Null,
         };
@@ -455,8 +488,9 @@ mod tests {
     #[test]
     fn try_new_trims_operation() {
         let args = RequestArgs {
-            operation: "  chat  ".to_string(),
-            source: ComponentId::builtin("llm"),
+            category: EventCategory::Echo,
+            operation: "  echo  ".to_string(),
+            source: ComponentId::builtin("echo"),
             channel: ChannelId::new(),
             payload: Value::Null,
         };
@@ -465,6 +499,24 @@ mod tests {
         assert!(result.is_ok());
 
         let req = result.unwrap();
-        assert_eq!(req.operation, "chat");
+        assert_eq!(req.operation, "echo");
+    }
+
+    #[test]
+    fn request_category_routing() {
+        let source = ComponentId::builtin("test");
+        let channel = ChannelId::new();
+
+        let hil_req = Request::new(
+            EventCategory::Hil,
+            "submit",
+            source.clone(),
+            channel,
+            Value::Null,
+        );
+        let echo_req = Request::new(EventCategory::Echo, "echo", source, channel, Value::Null);
+
+        assert!(hil_req.category.is_hil());
+        assert!(!echo_req.category.is_hil());
     }
 }

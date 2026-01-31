@@ -41,7 +41,7 @@
 //! assert!(hil.is_pending(&id));
 //! ```
 
-use orcs_component::{Component, ComponentError, Status};
+use orcs_component::{Component, ComponentError, EventCategory, Status};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::ComponentId;
 use serde::{Deserialize, Serialize};
@@ -277,6 +277,10 @@ impl Component for HilComponent {
         &self.id
     }
 
+    fn subscriptions(&self) -> Vec<EventCategory> {
+        vec![EventCategory::Hil, EventCategory::Lifecycle]
+    }
+
     fn status(&self) -> Status {
         self.status
     }
@@ -358,6 +362,7 @@ impl Component for HilComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_component::EventCategory;
     use orcs_types::{ChannelId, Principal, PrincipalId};
 
     fn test_user() -> Principal {
@@ -503,7 +508,7 @@ mod tests {
             "created_at_ms": 0
         });
 
-        let req = Request::new("submit", source, channel, payload);
+        let req = Request::new(EventCategory::Hil, "submit", source, channel, payload);
         let result = hil.on_request(&req);
 
         assert!(result.is_ok());
@@ -530,7 +535,13 @@ mod tests {
 
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
-        let req = Request::new("list", source, channel, serde_json::json!({}));
+        let req = Request::new(
+            EventCategory::Hil,
+            "list",
+            source,
+            channel,
+            serde_json::json!({}),
+        );
 
         let result = hil.on_request(&req);
         assert!(result.is_ok());
@@ -553,6 +564,7 @@ mod tests {
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
         let req = Request::new(
+            EventCategory::Hil,
             "status",
             source,
             channel,

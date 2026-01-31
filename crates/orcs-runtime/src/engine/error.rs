@@ -14,6 +14,7 @@
 //! | [`EngineError::NotRunning`] | `ENGINE_NOT_RUNNING` | No |
 //! | [`EngineError::Timeout`] | `ENGINE_TIMEOUT` | Yes |
 //! | [`EngineError::ComponentFailed`] | `ENGINE_COMPONENT_FAILED` | No |
+//! | [`EngineError::NoSubscriber`] | `ENGINE_NO_SUBSCRIBER` | No |
 //!
 //! # Recoverability
 //!
@@ -23,6 +24,7 @@
 //!
 //! Non-recoverable errors require code/config changes.
 
+use orcs_event::EventCategory;
 use orcs_types::{ComponentId, ErrorCode, RequestId};
 use thiserror::Error;
 
@@ -70,6 +72,10 @@ pub enum EngineError {
     /// Component returned an error.
     #[error("component error: {0}")]
     ComponentFailed(String),
+
+    /// No subscriber for the requested category.
+    #[error("no subscriber for category: {0}")]
+    NoSubscriber(EventCategory),
 }
 
 impl ErrorCode for EngineError {
@@ -82,6 +88,7 @@ impl ErrorCode for EngineError {
             Self::NotRunning => "ENGINE_NOT_RUNNING",
             Self::Timeout(_) => "ENGINE_TIMEOUT",
             Self::ComponentFailed(_) => "ENGINE_COMPONENT_FAILED",
+            Self::NoSubscriber(_) => "ENGINE_NO_SUBSCRIBER",
         }
     }
 
@@ -104,6 +111,7 @@ mod tests {
             EngineError::NotRunning,
             EngineError::Timeout(RequestId::new()),
             EngineError::ComponentFailed("x".into()),
+            EngineError::NoSubscriber(EventCategory::Echo),
         ]
     }
 

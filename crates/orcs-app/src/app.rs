@@ -28,7 +28,7 @@
 
 use crate::AppError;
 use orcs_component::Component;
-use orcs_event::{Request, Signal};
+use orcs_event::{EventCategory, Request, Signal};
 use orcs_runtime::{
     ConsoleOutput, EchoWithHilComponent, HumanInput, InputCommand, OrcsEngine, OutputSink, World,
 };
@@ -195,6 +195,7 @@ impl OrcsApp {
         };
 
         let request = Request::new(
+            EventCategory::Echo,
             "echo",
             ComponentId::builtin("app"),
             channel_id,
@@ -381,6 +382,7 @@ mod tests {
         // Simulate user input
         let channel_id = app.engine().world().primary().unwrap();
         let request = Request::new(
+            EventCategory::Echo,
             "echo",
             ComponentId::builtin("test"),
             channel_id,
