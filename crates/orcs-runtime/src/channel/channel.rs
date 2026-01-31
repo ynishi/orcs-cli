@@ -116,6 +116,11 @@ pub enum ChannelState {
 /// - Child channels reference their parent
 /// - A channel tracks all its children
 ///
+/// # Ancestor Path (DOD Optimization)
+///
+/// Each channel maintains a cached path to all ancestors for O(1) descendant checks.
+/// The path is ordered from immediate parent to root: `[parent, grandparent, ..., root]`.
+///
 /// # Configuration
 ///
 /// Channel behavior is controlled by [`ChannelConfig`]:
@@ -150,6 +155,9 @@ pub struct Channel {
     parent: Option<ChannelId>,
     children: HashSet<ChannelId>,
     config: ChannelConfig,
+    /// Cached ancestor path for O(1) descendant checks.
+    /// Ordered: [parent, grandparent, ..., root]
+    ancestor_path: Vec<ChannelId>,
 }
 
 impl Channel {
@@ -160,6 +168,11 @@ impl Channel {
     /// * `id` - Unique identifier for this channel
     /// * `parent` - Parent channel ID, or `None` for root channels
     /// * `config` - Configuration controlling channel behavior
+    ///
+    /// # Note
+    ///
+    /// The `ancestor_path` is initialized empty. When spawning via [`World`](crate::World),
+    /// use [`new_with_ancestors`](Self::new_with_ancestors) to properly set the ancestor path.
     ///
     /// # Example
     ///
@@ -184,6 +197,35 @@ impl Channel {
             parent,
             children: HashSet::new(),
             config,
+            ancestor_path: Vec::new(),
+        }
+    }
+
+    /// Creates a new channel with a pre-computed ancestor path.
+    ///
+    /// This constructor is used by [`World`](crate::World) when spawning child channels
+    /// to maintain the ancestor path for O(1) descendant checks.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this channel
+    /// * `parent` - Parent channel ID
+    /// * `config` - Configuration controlling channel behavior
+    /// * `ancestor_path` - Pre-computed path: [parent, grandparent, ..., root]
+    #[must_use]
+    pub fn new_with_ancestors(
+        id: ChannelId,
+        parent: ChannelId,
+        config: ChannelConfig,
+        ancestor_path: Vec<ChannelId>,
+    ) -> Self {
+        Self {
+            id,
+            state: ChannelState::Running,
+            parent: Some(parent),
+            children: HashSet::new(),
+            config,
+            ancestor_path,
         }
     }
 
@@ -431,6 +473,54 @@ impl Channel {
     pub fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
+
+    /// Returns the cached ancestor path.
+    ///
+    /// The path is ordered: `[parent, grandparent, ..., root]`.
+    /// Empty for root channels.
+    #[must_use]
+    pub fn ancestor_path(&self) -> &[ChannelId] {
+        &self.ancestor_path
+    }
+
+    /// Returns the depth of this channel in the tree.
+    ///
+    /// Root channels have depth 0.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        self.ancestor_path.len()
+    }
+
+    /// Returns `true` if this channel is a descendant of the given ancestor.
+    ///
+    /// Uses the cached ancestor path for O(1) lookup.
+    /// A channel is NOT its own descendant.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{Channel, ChannelConfig};
+    /// use orcs_types::ChannelId;
+    ///
+    /// let root_id = ChannelId::new();
+    /// let root = Channel::new(root_id, None, ChannelConfig::interactive());
+    ///
+    /// // Child with ancestor path
+    /// let child_id = ChannelId::new();
+    /// let child = Channel::new_with_ancestors(
+    ///     child_id,
+    ///     root_id,
+    ///     ChannelConfig::default(),
+    ///     vec![root_id],
+    /// );
+    ///
+    /// assert!(child.is_descendant_of(root_id));
+    /// assert!(!root.is_descendant_of(child_id));
+    /// ```
+    #[must_use]
+    pub fn is_descendant_of(&self, ancestor: ChannelId) -> bool {
+        self.ancestor_path.contains(&ancestor)
+    }
 }
 
 #[cfg(test)]
@@ -651,5 +741,58 @@ mod tests {
         assert!(!channel.complete());
         assert!(channel.resume());
         assert!(channel.complete());
+    }
+
+    // === Ancestor Path Tests (DOD) ===
+
+    #[test]
+    fn channel_root_has_empty_ancestor_path() {
+        let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        assert!(root.ancestor_path().is_empty());
+        assert_eq!(root.depth(), 0);
+    }
+
+    #[test]
+    fn channel_with_ancestors() {
+        let root_id = ChannelId::new();
+        let parent_id = ChannelId::new();
+
+        let child = Channel::new_with_ancestors(
+            ChannelId::new(),
+            parent_id,
+            ChannelConfig::default(),
+            vec![parent_id, root_id],
+        );
+
+        assert_eq!(child.ancestor_path(), &[parent_id, root_id]);
+        assert_eq!(child.depth(), 2);
+    }
+
+    #[test]
+    fn channel_is_descendant_of() {
+        let root_id = ChannelId::new();
+        let parent_id = ChannelId::new();
+        let other_id = ChannelId::new();
+
+        let child = Channel::new_with_ancestors(
+            ChannelId::new(),
+            parent_id,
+            ChannelConfig::default(),
+            vec![parent_id, root_id],
+        );
+
+        assert!(child.is_descendant_of(parent_id));
+        assert!(child.is_descendant_of(root_id));
+        assert!(!child.is_descendant_of(other_id));
+        assert!(!child.is_descendant_of(child.id())); // not self
+    }
+
+    #[test]
+    fn channel_root_not_descendant_of_anything() {
+        let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        let other_id = ChannelId::new();
+
+        assert!(!root.is_descendant_of(other_id));
+        assert!(!root.is_descendant_of(root.id()));
     }
 }

@@ -96,7 +96,7 @@ pub mod io;
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
 pub use channel::{
     priority, Channel, ChannelConfig, ChannelError, ChannelHandle, ChannelRunner,
-    ChannelRunnerFactory, ChannelState, Event, StateTransition, World, WorldCommand,
+    ChannelRunnerFactory, ChannelState, Event, MaxPrivilege, StateTransition, World, WorldCommand,
     WorldCommandSender, WorldManager,
 };
 pub use components::{

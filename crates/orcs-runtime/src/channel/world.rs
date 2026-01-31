@@ -188,10 +188,15 @@ impl World {
     /// - `Some(ChannelId)` if the spawn succeeded
     /// - `None` if the parent channel does not exist
     ///
+    /// # Privilege Inheritance
+    ///
+    /// The child's `max_privilege` is automatically capped by the parent's level.
+    /// This ensures privilege reduction propagates down the channel tree.
+    ///
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelConfig};
+    /// use orcs_runtime::{World, ChannelConfig, MaxPrivilege};
     ///
     /// let mut world = World::new();
     /// let root = world.create_channel(ChannelConfig::interactive());
@@ -202,18 +207,32 @@ impl World {
     /// assert_eq!(world.get(&bg).unwrap().priority(), 10);
     /// assert!(!world.get(&bg).unwrap().can_spawn());
     ///
-    /// // Spawn a tool channel
+    /// // Spawn a tool channel (inherits elevated from interactive parent)
     /// let tool = world.spawn_with(root, ChannelConfig::tool())
     ///     .expect("parent exists");
     /// assert_eq!(world.get(&tool).unwrap().priority(), 100);
+    /// assert_eq!(world.get(&tool).unwrap().config().max_privilege(), MaxPrivilege::Elevated);
+    ///
+    /// // Spawn from background parent (max_privilege capped to Standard)
+    /// let child = world.spawn_with(bg, ChannelConfig::tool())
+    ///     .expect("parent exists");
+    /// assert_eq!(world.get(&child).unwrap().config().max_privilege(), MaxPrivilege::Standard);
     /// ```
     pub fn spawn_with(&mut self, parent: ChannelId, config: ChannelConfig) -> Option<ChannelId> {
-        if !self.channels.contains_key(&parent) {
-            return None;
-        }
+        // Get parent channel for inheritance
+        let parent_channel = self.channels.get(&parent)?;
+        let parent_config = *parent_channel.config();
+
+        // Build ancestor path: [parent, ...parent's ancestors]
+        let mut ancestor_path = Vec::with_capacity(parent_channel.depth() + 1);
+        ancestor_path.push(parent);
+        ancestor_path.extend_from_slice(parent_channel.ancestor_path());
+
+        // Apply privilege inheritance
+        let inherited_config = config.inherit_from(&parent_config);
 
         let id = ChannelId::new();
-        let channel = Channel::new(id, Some(parent), config);
+        let channel = Channel::new_with_ancestors(id, parent, inherited_config, ancestor_path);
         self.channels.insert(id, channel);
 
         // Register with parent
@@ -349,6 +368,53 @@ impl World {
     #[must_use]
     pub fn channel_count(&self) -> usize {
         self.channels.len()
+    }
+
+    /// Checks if `child` is a descendant of `ancestor`.
+    ///
+    /// A channel is a descendant if there's a path from it to the ancestor
+    /// through parent relationships. A channel is NOT its own descendant.
+    ///
+    /// # Performance
+    ///
+    /// Uses cached ancestor path for O(depth) lookup with cache-friendly
+    /// sequential memory access (DOD optimization).
+    ///
+    /// # Arguments
+    ///
+    /// * `child` - ID of the potential descendant
+    /// * `ancestor` - ID of the potential ancestor
+    ///
+    /// # Returns
+    ///
+    /// `true` if `child` is a descendant of `ancestor`, `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{World, ChannelConfig};
+    ///
+    /// let mut world = World::new();
+    /// let root = world.create_channel(ChannelConfig::interactive());
+    /// let child = world.spawn(root).unwrap();
+    /// let grandchild = world.spawn(child).unwrap();
+    ///
+    /// assert!(world.is_descendant_of(child, root));
+    /// assert!(world.is_descendant_of(grandchild, root));
+    /// assert!(world.is_descendant_of(grandchild, child));
+    /// assert!(!world.is_descendant_of(root, child)); // parent is not descendant
+    /// assert!(!world.is_descendant_of(root, root));  // not own descendant
+    /// ```
+    #[must_use]
+    pub fn is_descendant_of(&self, child: ChannelId, ancestor: ChannelId) -> bool {
+        if child == ancestor {
+            return false;
+        }
+
+        self.channels
+            .get(&child)
+            .map(|ch| ch.is_descendant_of(ancestor))
+            .unwrap_or(false)
     }
 }
 
@@ -519,5 +585,56 @@ mod tests {
         // Default config: NORMAL priority (50), can_spawn = true
         assert_eq!(channel.priority(), 50);
         assert!(channel.can_spawn());
+    }
+
+    #[test]
+    fn is_descendant_direct_child() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child = world.spawn(root).unwrap();
+
+        assert!(world.is_descendant_of(child, root));
+        assert!(!world.is_descendant_of(root, child));
+    }
+
+    #[test]
+    fn is_descendant_grandchild() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child = world.spawn(root).unwrap();
+        let grandchild = world.spawn(child).unwrap();
+
+        assert!(world.is_descendant_of(grandchild, root));
+        assert!(world.is_descendant_of(grandchild, child));
+        assert!(world.is_descendant_of(child, root));
+    }
+
+    #[test]
+    fn is_descendant_not_self() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+
+        assert!(!world.is_descendant_of(root, root));
+    }
+
+    #[test]
+    fn is_descendant_siblings_not_related() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child1 = world.spawn(root).unwrap();
+        let child2 = world.spawn(root).unwrap();
+
+        assert!(!world.is_descendant_of(child1, child2));
+        assert!(!world.is_descendant_of(child2, child1));
+    }
+
+    #[test]
+    fn is_descendant_nonexistent() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let nonexistent = ChannelId::new();
+
+        assert!(!world.is_descendant_of(nonexistent, root));
+        assert!(!world.is_descendant_of(root, nonexistent));
     }
 }

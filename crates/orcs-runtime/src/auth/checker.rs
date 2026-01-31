@@ -131,7 +131,7 @@ impl PermissionChecker for DefaultPolicy {
     fn can_signal(&self, session: &Session, scope: &SignalScope) -> bool {
         match scope {
             SignalScope::Global => session.is_elevated(),
-            SignalScope::Channel(_) => {
+            SignalScope::Channel(_) | SignalScope::WithChildren(_) => {
                 // M1: Allow all channel signals
                 // Future: Check channel ownership
                 true

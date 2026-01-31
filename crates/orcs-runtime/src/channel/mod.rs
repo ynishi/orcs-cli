@@ -156,7 +156,7 @@ mod world;
 
 pub use channel::{Channel, ChannelState};
 pub use command::{StateTransition, WorldCommand};
-pub use config::{priority, ChannelConfig};
+pub use config::{priority, ChannelConfig, MaxPrivilege};
 pub use error::ChannelError;
 pub use manager::{WorldCommandSender, WorldManager};
 pub use runner::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};

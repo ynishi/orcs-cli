@@ -315,6 +315,7 @@ mod tests {
     }
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct Service {
         name: String,
         max_retries: u32,
@@ -376,6 +377,7 @@ mod tests {
 
     // Test: Boundary values
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct BoundedValue(u8);
 
     #[derive(Debug, PartialEq)]
