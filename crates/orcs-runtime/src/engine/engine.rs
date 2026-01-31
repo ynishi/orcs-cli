@@ -711,13 +711,13 @@ impl OrcsEngine {
     ///
     /// A map of component ID to list of installed packages.
     pub fn collect_packages(&self) -> HashMap<ComponentId, Vec<PackageInfo>> {
-        let mut packages = HashMap::new();
+        let mut packages = HashMap::with_capacity(self.components.len());
 
         for (id, component) in &self.components {
             if let Some(packageable) = component.as_packageable() {
                 let list = packageable.list_packages();
                 if !list.is_empty() {
-                    packages.insert(id.clone(), list);
+                    packages.insert(id.clone(), list.to_vec());
                 }
             }
         }

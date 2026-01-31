@@ -335,8 +335,8 @@ impl Component for EchoWithHilComponent {
 }
 
 impl Packageable for EchoWithHilComponent {
-    fn list_packages(&self) -> Vec<PackageInfo> {
-        self.installed_packages.clone()
+    fn list_packages(&self) -> &[PackageInfo] {
+        &self.installed_packages
     }
 
     fn install_package(&mut self, package: &Package) -> Result<(), PackageError> {

@@ -27,8 +27,8 @@
 //! }
 //!
 //! impl Packageable for EchoComponent {
-//!     fn list_packages(&self) -> Vec<PackageInfo> {
-//!         self.installed_packages.clone()
+//!     fn list_packages(&self) -> &[PackageInfo] {
+//!         &self.installed_packages
 //!     }
 //!
 //!     fn install_package(&mut self, package: &Package) -> Result<(), PackageError> {
@@ -216,7 +216,7 @@ pub enum PackageSupport {
 /// - `uninstall_package()` removes installed package behavior
 pub trait Packageable {
     /// Returns the list of installed packages.
-    fn list_packages(&self) -> Vec<PackageInfo>;
+    fn list_packages(&self) -> &[PackageInfo];
 
     /// Installs a package.
     ///
@@ -297,8 +297,8 @@ mod tests {
     }
 
     impl Packageable for TestComponent {
-        fn list_packages(&self) -> Vec<PackageInfo> {
-            self.packages.clone()
+        fn list_packages(&self) -> &[PackageInfo] {
+            &self.packages
         }
 
         fn install_package(&mut self, package: &Package) -> Result<(), PackageError> {
