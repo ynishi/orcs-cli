@@ -12,6 +12,12 @@ path = "src/main.rs"
 [[example]]
 name = "echo_component"
 
+[[example]]
+name = "stop_resume"
+
+[[example]]
+name = "package_decorator"
+
 [dependencies]
 orcs-app = { workspace = true }
 tokio = { workspace = true }
@@ -20,6 +26,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+orcs-component = { workspace = true }
+orcs-runtime = { workspace = true }
+orcs-types = { workspace = true }
 
 [lints]
 workspace = true

@@ -81,6 +81,14 @@ pub enum EngineError {
     /// No subscriber for the requested category.
     #[error("no subscriber for category: {0}")]
     NoSubscriber(EventCategory),
+
+    /// Package operation failed.
+    #[error("package error: {0}")]
+    PackageFailed(String),
+
+    /// Component does not support packages.
+    #[error("component does not support packages: {0}")]
+    PackageNotSupported(ComponentId),
 }
 
 impl ErrorCode for EngineError {
@@ -95,6 +103,8 @@ impl ErrorCode for EngineError {
             Self::Timeout(_) => "ENGINE_TIMEOUT",
             Self::ComponentFailed(_) => "ENGINE_COMPONENT_FAILED",
             Self::NoSubscriber(_) => "ENGINE_NO_SUBSCRIBER",
+            Self::PackageFailed(_) => "ENGINE_PACKAGE_FAILED",
+            Self::PackageNotSupported(_) => "ENGINE_PACKAGE_NOT_SUPPORTED",
         }
     }
 
@@ -119,6 +129,8 @@ mod tests {
             EngineError::Timeout(RequestId::new()),
             EngineError::ComponentFailed("x".into()),
             EngineError::NoSubscriber(EventCategory::Echo),
+            EngineError::PackageFailed("x".into()),
+            EngineError::PackageNotSupported(ComponentId::builtin("x")),
         ]
     }
 

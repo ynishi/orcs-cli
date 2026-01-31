@@ -101,7 +101,8 @@ pub use channel::{
     WorldCommandSender, WorldManager,
 };
 pub use components::{
-    ApprovalRequest, ApprovalResult, EchoWithHilComponent, HilComponent, NoopComponent,
+    ApprovalRequest, ApprovalResult, DecoratorConfig, EchoWithHilComponent, HilComponent,
+    NoopComponent,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};

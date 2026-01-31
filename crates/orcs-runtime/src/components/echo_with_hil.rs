@@ -29,10 +29,25 @@
 //!   │◄────────────────────────┤                            │
 //! ```
 
-use orcs_component::{Component, ComponentError, EventCategory, Status};
+use orcs_component::{
+    Component, ComponentError, EventCategory, Package, PackageError, PackageInfo, Packageable,
+    Status,
+};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::ComponentId;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Decorator package configuration.
+///
+/// Modifies echo output with prefix and suffix.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DecoratorConfig {
+    /// Prefix to add before the echo message.
+    pub prefix: String,
+    /// Suffix to add after the echo message.
+    pub suffix: String,
+}
 
 /// State of an echo request awaiting approval.
 #[derive(Debug, Clone)]
@@ -49,6 +64,8 @@ struct PendingEcho {
 ///
 /// Requests Human approval before echoing messages.
 /// Subscribes to `EventCategory::Echo` for request routing.
+///
+/// Supports packages for customizing output (e.g., decorators).
 pub struct EchoWithHilComponent {
     id: ComponentId,
     status: Status,
@@ -56,6 +73,10 @@ pub struct EchoWithHilComponent {
     pending: Option<PendingEcho>,
     /// Last echo result (for testing/inspection).
     last_result: Option<String>,
+    /// Installed packages.
+    installed_packages: Vec<PackageInfo>,
+    /// Current decorator configuration.
+    decorator: DecoratorConfig,
 }
 
 impl EchoWithHilComponent {
@@ -67,6 +88,8 @@ impl EchoWithHilComponent {
             status: Status::Idle,
             pending: None,
             last_result: None,
+            installed_packages: Vec::new(),
+            decorator: DecoratorConfig::default(),
         }
     }
 
@@ -112,11 +135,23 @@ impl EchoWithHilComponent {
     }
 
     /// Executes the echo after approval.
+    ///
+    /// Applies decorator prefix/suffix if configured.
     fn execute_echo(&mut self, message: &str) -> String {
-        let result = format!("Echo: {}", message);
+        let decorated = format!(
+            "{}{}{}",
+            self.decorator.prefix, message, self.decorator.suffix
+        );
+        let result = format!("Echo: {}", decorated);
         self.last_result = Some(result.clone());
         self.status = Status::Idle;
         result
+    }
+
+    /// Returns the current decorator configuration.
+    #[must_use]
+    pub fn decorator(&self) -> &DecoratorConfig {
+        &self.decorator
     }
 
     /// Handles an Approve signal.
@@ -288,6 +323,60 @@ impl Component for EchoWithHilComponent {
     fn abort(&mut self) {
         self.status = Status::Aborted;
         self.pending = None;
+    }
+
+    fn as_packageable(&self) -> Option<&dyn Packageable> {
+        Some(self)
+    }
+
+    fn as_packageable_mut(&mut self) -> Option<&mut dyn Packageable> {
+        Some(self)
+    }
+}
+
+impl Packageable for EchoWithHilComponent {
+    fn list_packages(&self) -> Vec<PackageInfo> {
+        self.installed_packages.clone()
+    }
+
+    fn install_package(&mut self, package: &Package) -> Result<(), PackageError> {
+        // Check if already installed
+        if self.is_installed(package.id()) {
+            return Err(PackageError::AlreadyInstalled(package.id().to_string()));
+        }
+
+        // Parse decorator config from package content
+        let config: DecoratorConfig = package.to_content()?;
+
+        // Apply decorator
+        self.decorator = config;
+        self.installed_packages.push(package.info.clone());
+
+        tracing::info!(
+            "Installed package '{}': prefix='{}', suffix='{}'",
+            package.id(),
+            self.decorator.prefix,
+            self.decorator.suffix
+        );
+
+        Ok(())
+    }
+
+    fn uninstall_package(&mut self, package_id: &str) -> Result<(), PackageError> {
+        // Check if installed
+        if !self.is_installed(package_id) {
+            return Err(PackageError::NotFound(package_id.to_string()));
+        }
+
+        // Remove from list
+        self.installed_packages.retain(|p| p.id != package_id);
+
+        // Reset decorator to default
+        self.decorator = DecoratorConfig::default();
+
+        tracing::info!("Uninstalled package '{}'", package_id);
+
+        Ok(())
     }
 }
 
@@ -547,5 +636,105 @@ mod tests {
 
         // No echo output
         assert!(comp.last_result().unwrap().contains("Rejected"));
+    }
+
+    // --- Package tests ---
+
+    fn create_decorator_package(id: &str, prefix: &str, suffix: &str) -> Package {
+        let info = PackageInfo::new(id, "Decorator", "1.0.0", "Add decoration to echo output");
+        let config = DecoratorConfig {
+            prefix: prefix.to_string(),
+            suffix: suffix.to_string(),
+        };
+        Package::new(info, &config).unwrap()
+    }
+
+    #[test]
+    fn package_install_decorator() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let package = create_decorator_package("angle-brackets", "<<", ">>");
+        comp.install_package(&package).unwrap();
+
+        assert!(comp.is_installed("angle-brackets"));
+        assert_eq!(comp.decorator().prefix, "<<");
+        assert_eq!(comp.decorator().suffix, ">>");
+        assert_eq!(comp.list_packages().len(), 1);
+    }
+
+    #[test]
+    fn package_uninstall_decorator() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let package = create_decorator_package("stars", "***", "***");
+        comp.install_package(&package).unwrap();
+        comp.uninstall_package("stars").unwrap();
+
+        assert!(!comp.is_installed("stars"));
+        assert_eq!(comp.decorator().prefix, "");
+        assert_eq!(comp.decorator().suffix, "");
+        assert!(comp.list_packages().is_empty());
+    }
+
+    #[test]
+    fn package_already_installed_error() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let package = create_decorator_package("test-pkg", "[", "]");
+        comp.install_package(&package).unwrap();
+
+        let result = comp.install_package(&package);
+        assert!(matches!(result, Err(PackageError::AlreadyInstalled(_))));
+    }
+
+    #[test]
+    fn package_not_found_error() {
+        let mut comp = EchoWithHilComponent::new();
+
+        let result = comp.uninstall_package("nonexistent");
+        assert!(matches!(result, Err(PackageError::NotFound(_))));
+    }
+
+    #[test]
+    fn package_decorator_applied_to_echo() {
+        let mut comp = EchoWithHilComponent::new();
+
+        // Install decorator
+        let package = create_decorator_package("brackets", "[", "]");
+        comp.install_package(&package).unwrap();
+
+        // Request echo
+        let req = test_request("echo", Value::String("Hello".into()));
+        let result = comp.on_request(&req).unwrap();
+        let approval_id = result["approval_id"].as_str().unwrap();
+
+        // Approve
+        let signal = Signal::approve(approval_id, test_user());
+        comp.on_signal(&signal);
+
+        // Verify decorated output
+        assert_eq!(comp.last_result(), Some("Echo: [Hello]"));
+    }
+
+    #[test]
+    fn package_uninstall_removes_decoration() {
+        let mut comp = EchoWithHilComponent::new();
+
+        // Install and then uninstall
+        let package = create_decorator_package("brackets", "[", "]");
+        comp.install_package(&package).unwrap();
+        comp.uninstall_package("brackets").unwrap();
+
+        // Request echo
+        let req = test_request("echo", Value::String("Hello".into()));
+        let result = comp.on_request(&req).unwrap();
+        let approval_id = result["approval_id"].as_str().unwrap();
+
+        // Approve
+        let signal = Signal::approve(approval_id, test_user());
+        comp.on_signal(&signal);
+
+        // Verify no decoration
+        assert_eq!(comp.last_result(), Some("Echo: Hello"));
     }
 }

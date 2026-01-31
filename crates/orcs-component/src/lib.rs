@@ -202,6 +202,7 @@
 mod child;
 mod component;
 mod error;
+mod package;
 mod snapshot;
 mod status;
 mod traits;
@@ -219,6 +220,11 @@ pub use status::{Progress, Status, StatusDetail};
 // Re-export snapshot types
 pub use snapshot::{
     ComponentSnapshot, SnapshotError, SnapshotSupport, Snapshottable, SNAPSHOT_VERSION,
+};
+
+// Re-export package types
+pub use package::{
+    Package, PackageError, PackageInfo, PackageSupport, Packageable, PACKAGE_VERSION,
 };
 
 // Re-export error types

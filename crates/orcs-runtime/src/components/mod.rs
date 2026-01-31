@@ -10,6 +10,6 @@ mod echo_with_hil;
 mod hil;
 mod noop;
 
-pub use echo_with_hil::EchoWithHilComponent;
+pub use echo_with_hil::{DecoratorConfig, EchoWithHilComponent};
 pub use hil::{ApprovalRequest, ApprovalResult, HilComponent};
 pub use noop::NoopComponent;

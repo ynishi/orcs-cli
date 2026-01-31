@@ -268,6 +268,30 @@ pub trait Component: Send + Sync {
     fn shutdown(&mut self) {
         // Default: no-op
     }
+
+    /// Returns this component as a [`Packageable`] if supported.
+    ///
+    /// Override this method in components that implement [`Packageable`]
+    /// to enable package management.
+    ///
+    /// # Default
+    ///
+    /// Returns `None` - component does not support packages.
+    fn as_packageable(&self) -> Option<&dyn crate::Packageable> {
+        None
+    }
+
+    /// Returns this component as a mutable [`Packageable`] if supported.
+    ///
+    /// Override this method in components that implement [`Packageable`]
+    /// to enable package installation/uninstallation.
+    ///
+    /// # Default
+    ///
+    /// Returns `None` - component does not support packages.
+    fn as_packageable_mut(&mut self) -> Option<&mut dyn crate::Packageable> {
+        None
+    }
 }
 
 #[cfg(test)]

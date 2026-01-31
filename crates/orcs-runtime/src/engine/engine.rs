@@ -32,13 +32,14 @@
 //! Components MUST respond to Signals. If a Component returns
 //! [`SignalResponse::Ignored`], the engine forces abort.
 
+use super::error::EngineError;
 use super::eventbus::{ComponentHandle, EventBus};
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, World, WorldCommand,
     WorldCommandSender, WorldManager,
 };
 use crate::session::{SessionAsset, SessionStore, StorageError};
-use orcs_component::{Component, ComponentSnapshot, EventCategory};
+use orcs_component::{Component, ComponentSnapshot, EventCategory, Package, PackageInfo};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
@@ -698,6 +699,109 @@ impl OrcsEngine {
             session_id, restored
         );
         Ok(asset)
+    }
+
+    // --- Package Management ---
+
+    /// Collects package info from all registered components.
+    ///
+    /// Only components that implement [`Packageable`] will report packages.
+    ///
+    /// # Returns
+    ///
+    /// A map of component ID to list of installed packages.
+    pub fn collect_packages(&self) -> HashMap<ComponentId, Vec<PackageInfo>> {
+        let mut packages = HashMap::new();
+
+        for (id, component) in &self.components {
+            if let Some(packageable) = component.as_packageable() {
+                let list = packageable.list_packages();
+                if !list.is_empty() {
+                    packages.insert(id.clone(), list);
+                }
+            }
+        }
+
+        packages
+    }
+
+    /// Installs a package into a specific component.
+    ///
+    /// The component must implement [`Packageable`].
+    ///
+    /// # Arguments
+    ///
+    /// * `component_id` - The target component
+    /// * `package` - The package to install
+    ///
+    /// # Errors
+    ///
+    /// - `EngineError::ComponentNotFound` - Component doesn't exist
+    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
+    /// - `EngineError::PackageFailed` - Installation failed
+    pub fn install_package(
+        &mut self,
+        component_id: &ComponentId,
+        package: &Package,
+    ) -> Result<(), EngineError> {
+        let component = self
+            .components
+            .get_mut(component_id)
+            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
+
+        let packageable = component
+            .as_packageable_mut()
+            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
+
+        packageable
+            .install_package(package)
+            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
+
+        info!(
+            "Package '{}' installed to component '{}'",
+            package.id(),
+            component_id
+        );
+
+        Ok(())
+    }
+
+    /// Uninstalls a package from a specific component.
+    ///
+    /// # Arguments
+    ///
+    /// * `component_id` - The target component
+    /// * `package_id` - The package ID to uninstall
+    ///
+    /// # Errors
+    ///
+    /// - `EngineError::ComponentNotFound` - Component doesn't exist
+    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
+    /// - `EngineError::PackageFailed` - Uninstallation failed
+    pub fn uninstall_package(
+        &mut self,
+        component_id: &ComponentId,
+        package_id: &str,
+    ) -> Result<(), EngineError> {
+        let component = self
+            .components
+            .get_mut(component_id)
+            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
+
+        let packageable = component
+            .as_packageable_mut()
+            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
+
+        packageable
+            .uninstall_package(package_id)
+            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
+
+        info!(
+            "Package '{}' uninstalled from component '{}'",
+            package_id, component_id
+        );
+
+        Ok(())
     }
 }
 
