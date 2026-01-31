@@ -48,6 +48,10 @@ pub enum StorageError {
     /// Permission denied.
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+
+    /// Snapshot restore failed for an Enabled component.
+    #[error("snapshot restore failed: {0}")]
+    Snapshot(#[from] orcs_component::SnapshotError),
 }
 
 impl StorageError {

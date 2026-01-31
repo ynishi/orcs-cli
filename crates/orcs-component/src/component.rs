@@ -332,9 +332,10 @@ mod tests {
             Value::String("hello".into()),
         );
 
-        let result = comp.on_request(&req);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::String("hello".into()));
+        assert_eq!(
+            comp.on_request(&req).unwrap(),
+            Value::String("hello".into())
+        );
     }
 
     #[test]

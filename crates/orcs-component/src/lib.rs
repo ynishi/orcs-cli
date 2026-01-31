@@ -202,6 +202,7 @@
 mod child;
 mod component;
 mod error;
+mod snapshot;
 mod status;
 mod traits;
 
@@ -214,6 +215,11 @@ pub use component::Component;
 
 // Re-export status types
 pub use status::{Progress, Status, StatusDetail};
+
+// Re-export snapshot types
+pub use snapshot::{
+    ComponentSnapshot, SnapshotError, SnapshotSupport, Snapshottable, SNAPSHOT_VERSION,
+};
 
 // Re-export error types
 pub use error::ComponentError;
@@ -285,9 +291,10 @@ mod tests {
             Value::String("hello".into()),
         );
 
-        let result = comp.on_request(&req);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::String("hello".into()));
+        assert_eq!(
+            comp.on_request(&req).unwrap(),
+            Value::String("hello".into())
+        );
     }
 
     #[test]

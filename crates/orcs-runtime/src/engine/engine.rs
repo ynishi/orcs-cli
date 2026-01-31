@@ -37,19 +37,26 @@ use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, World, WorldCommand,
     WorldCommandSender, WorldManager,
 };
-use orcs_component::Component;
-use orcs_event::{Signal, SignalKind, SignalResponse};
+use crate::session::{SessionAsset, SessionStore, StorageError};
+use orcs_component::{Component, ComponentSnapshot, EventCategory};
+use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Signal broadcast channel buffer size.
 ///
 /// 256 signals provides sufficient buffering for HIL interactions.
 /// Lagged receivers will miss old signals but continue receiving new ones.
 const SIGNAL_BUFFER_SIZE: usize = 256;
+
+/// Lifecycle operation: snapshot collection.
+const OP_SNAPSHOT: &str = "snapshot";
+
+/// Lifecycle operation: state restoration.
+const OP_RESTORE: &str = "restore";
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
@@ -497,6 +504,201 @@ impl OrcsEngine {
             component.abort();
         }
     }
+
+    // === Session Persistence ===
+
+    /// Collects snapshots from all components via Lifecycle Request.
+    ///
+    /// Sends `Request { category: Lifecycle, operation: "snapshot" }` to each component.
+    /// Components that support snapshots return `Ok(Value)` containing the snapshot.
+    /// Components that don't support snapshots return `Err(NotSupported)` and are skipped.
+    ///
+    /// Returns a map of component FQN (fully qualified name) to snapshot.
+    /// Uses FQN (`namespace::name`) instead of full ID to enable
+    /// snapshot restoration across sessions (UUIDs differ between runs).
+    pub fn collect_snapshots(&mut self) -> HashMap<String, ComponentSnapshot> {
+        let mut snapshots = HashMap::new();
+
+        // Collect component IDs first to avoid borrow issues
+        let component_ids: Vec<ComponentId> = self.components.keys().cloned().collect();
+
+        for id in component_ids {
+            if let Some(component) = self.components.get_mut(&id) {
+                let request = Request::new(
+                    EventCategory::Lifecycle,
+                    OP_SNAPSHOT,
+                    id.clone(),
+                    ChannelId::new(),
+                    serde_json::Value::Null,
+                );
+
+                match component.on_request(&request) {
+                    Ok(value) => {
+                        // Deserialize snapshot from Value
+                        match serde_json::from_value::<ComponentSnapshot>(value) {
+                            Ok(snapshot) => {
+                                debug!("Collected snapshot for component: {}", id.fqn());
+                                snapshots.insert(id.fqn(), snapshot);
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize snapshot from {}: {}", id.fqn(), e);
+                            }
+                        }
+                    }
+                    Err(orcs_component::ComponentError::NotSupported(_)) => {
+                        // Component doesn't support snapshots - skip silently
+                        debug!("Component {} does not support snapshots", id.fqn());
+                    }
+                    Err(e) => {
+                        warn!("Failed to collect snapshot from {}: {}", id.fqn(), e);
+                    }
+                }
+            }
+        }
+
+        info!("Collected {} component snapshots", snapshots.len());
+        snapshots
+    }
+
+    /// Restores components from snapshots in a SessionAsset via Lifecycle Request.
+    ///
+    /// Sends `Request { category: Lifecycle, operation: "restore", payload: snapshot }`
+    /// to each component that has a saved snapshot.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)` - Number of successfully restored components
+    /// - `Err(SnapshotError)` - Restore failed for a component
+    pub fn restore_snapshots(
+        &mut self,
+        asset: &SessionAsset,
+    ) -> Result<usize, orcs_component::SnapshotError> {
+        let mut restored = 0;
+
+        for (fqn, snapshot) in &asset.component_snapshots {
+            // Find component by FQN (namespace::name)
+            let component_id = self.components.keys().find(|k| k.fqn() == *fqn).cloned();
+
+            if let Some(id) = component_id {
+                if let Some(component) = self.components.get_mut(&id) {
+                    // Serialize snapshot to Value for request payload
+                    let payload = match serde_json::to_value(snapshot) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(orcs_component::SnapshotError::RestoreFailed {
+                                component: fqn.clone(),
+                                reason: format!("Failed to serialize snapshot: {e}"),
+                            });
+                        }
+                    };
+
+                    let request = Request::new(
+                        EventCategory::Lifecycle,
+                        OP_RESTORE,
+                        id.clone(),
+                        ChannelId::new(),
+                        payload,
+                    );
+
+                    match component.on_request(&request) {
+                        Ok(_) => {
+                            debug!("Restored component: {}", id.fqn());
+                            restored += 1;
+                        }
+                        Err(orcs_component::ComponentError::NotSupported(_)) => {
+                            warn!("Component {} does not support snapshot restore", id.fqn());
+                        }
+                        Err(e) => {
+                            error!("Failed to restore component {}: {}", id.fqn(), e);
+                            return Err(orcs_component::SnapshotError::RestoreFailed {
+                                component: id.fqn(),
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            } else {
+                debug!(
+                    "Component {} not registered, skipping snapshot restore",
+                    fqn
+                );
+            }
+        }
+
+        info!("Restored {} components from session", restored);
+        Ok(restored)
+    }
+
+    /// Saves the current session state to a store.
+    ///
+    /// Collects snapshots from all components and saves them along with
+    /// the provided SessionAsset.
+    ///
+    /// # Arguments
+    ///
+    /// * `store` - The session store to save to
+    /// * `asset` - The session asset to update and save
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` if saving fails.
+    pub async fn save_session<S: SessionStore>(
+        &mut self,
+        store: &S,
+        asset: &mut SessionAsset,
+    ) -> Result<(), StorageError> {
+        // Collect component snapshots
+        let snapshots = self.collect_snapshots();
+
+        // Update asset with snapshots
+        for (id, snapshot) in snapshots {
+            asset.component_snapshots.insert(id, snapshot);
+        }
+        asset.touch();
+
+        // Save to store
+        store.save(asset).await?;
+
+        info!("Session saved: {}", asset.id);
+        Ok(())
+    }
+
+    /// Loads a session and restores component state.
+    ///
+    /// Loads the session from the store and restores all component
+    /// snapshots. For components with `SnapshotSupport::Enabled`,
+    /// restore failures are errors (not warnings).
+    ///
+    /// # Arguments
+    ///
+    /// * `store` - The session store to load from
+    /// * `session_id` - The session ID to load
+    ///
+    /// # Returns
+    ///
+    /// The loaded SessionAsset with restored component states.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::Storage` - Loading from store failed
+    /// - `StorageError::Snapshot` - Restore failed for Enabled component
+    pub async fn load_session<S: SessionStore>(
+        &mut self,
+        store: &S,
+        session_id: &str,
+    ) -> Result<SessionAsset, StorageError> {
+        // Load session from store
+        let asset = store.load(session_id).await?;
+
+        // Restore component snapshots
+        let restored = self.restore_snapshots(&asset)?;
+
+        info!(
+            "Session loaded: {} ({} components restored)",
+            session_id, restored
+        );
+        Ok(asset)
+    }
 }
 
 #[cfg(test)]
@@ -539,7 +741,12 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            Ok(request.payload.clone())
+            match request.operation.as_str() {
+                OP_SNAPSHOT | OP_RESTORE => {
+                    Err(ComponentError::NotSupported(request.operation.clone()))
+                }
+                _ => Ok(request.payload.clone()),
+            }
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -671,12 +878,12 @@ mod tests {
                 reply: reply_tx,
             })
             .await
-            .unwrap();
-        assert!(reply_rx.await.unwrap());
+            .expect("send complete command");
+        assert!(reply_rx.await.expect("receive complete reply"));
 
         // Verify state
         let w = engine.world_read().read().await;
-        assert!(!w.get(&io).unwrap().is_running());
+        assert!(!w.get(&io).expect("get channel").is_running());
         drop(w);
 
         // Cleanup
@@ -789,5 +996,166 @@ mod tests {
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+    }
+
+    // === Snapshot Tests ===
+
+    /// A component that supports snapshots for testing via Request.
+    struct SnapshottableComponent {
+        id: ComponentId,
+        counter: u64,
+    }
+
+    impl SnapshottableComponent {
+        fn new(name: &str, initial_value: u64) -> Self {
+            Self {
+                id: ComponentId::builtin(name),
+                counter: initial_value,
+            }
+        }
+    }
+
+    impl Component for SnapshottableComponent {
+        fn id(&self) -> &ComponentId {
+            &self.id
+        }
+
+        fn status(&self) -> orcs_component::Status {
+            orcs_component::Status::Idle
+        }
+
+        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+            match request.operation.as_str() {
+                OP_SNAPSHOT => {
+                    // Return snapshot as Value
+                    let snapshot =
+                        orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
+                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
+                    serde_json::to_value(snapshot)
+                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))
+                }
+                OP_RESTORE => {
+                    // Restore from snapshot in payload
+                    let snapshot: orcs_component::ComponentSnapshot =
+                        serde_json::from_value(request.payload.clone())
+                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
+                    self.counter = snapshot
+                        .to_state()
+                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
+                    Ok(Value::Null)
+                }
+                _ => {
+                    self.counter += 1;
+                    Ok(Value::Number(self.counter.into()))
+                }
+            }
+        }
+
+        fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+            if signal.is_veto() {
+                SignalResponse::Abort
+            } else {
+                SignalResponse::Handled
+            }
+        }
+
+        fn abort(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn collect_snapshots_from_components() {
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
+        // Register snapshottable component
+        let comp = Box::new(SnapshottableComponent::new("snap", 42));
+        engine.register(comp);
+
+        // Register non-snapshottable component
+        let echo = Box::new(EchoComponent::new());
+        engine.register(echo);
+
+        // Collect snapshots
+        let snapshots = engine.collect_snapshots();
+
+        // Only snapshottable component should have snapshot
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots.contains_key("builtin::snap"));
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn restore_snapshots_to_components() {
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
+        // Register snapshottable component with initial value
+        let comp = Box::new(SnapshottableComponent::new("snap", 0));
+        engine.register(comp);
+
+        // Create asset with snapshot containing different value
+        // Use FQN format (namespace::name) for snapshot key
+        let mut asset = SessionAsset::new();
+        let snapshot = orcs_component::ComponentSnapshot::from_state("builtin::snap", &100u64)
+            .expect("create snapshot");
+        asset.save_snapshot(snapshot);
+
+        // Restore from asset
+        let restored = engine.restore_snapshots(&asset).expect("restore snapshots");
+
+        assert_eq!(restored, 1);
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn save_and_load_session() {
+        use crate::session::LocalFileStore;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let store = LocalFileStore::new(temp_dir.path().to_path_buf()).expect("create store");
+
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
+        // Register snapshottable component
+        let comp = Box::new(SnapshottableComponent::new("snap", 42));
+        engine.register(comp);
+
+        // Save session
+        let mut asset = SessionAsset::new();
+        let session_id = asset.id.clone();
+        engine
+            .save_session(&store, &mut asset)
+            .await
+            .expect("save session");
+
+        // Verify snapshot was saved (uses FQN format)
+        assert!(asset.get_snapshot("builtin::snap").is_some());
+
+        // Create new engine and load session
+        let (world2, io2) = test_world();
+        let mut engine2 = OrcsEngine::new(world2, io2);
+
+        // Register component with different initial value
+        let comp2 = Box::new(SnapshottableComponent::new("snap", 0));
+        engine2.register(comp2);
+
+        // Load session
+        let loaded = engine2
+            .load_session(&store, &session_id)
+            .await
+            .expect("load session");
+
+        assert_eq!(loaded.id, session_id);
+        assert!(loaded.get_snapshot("builtin::snap").is_some());
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+        let _ = engine2.world_tx().send(WorldCommand::Shutdown).await;
     }
 }

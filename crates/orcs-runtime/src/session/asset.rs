@@ -8,8 +8,10 @@
 //! - **Preferences**: Learned user preferences
 //! - **ProjectContext**: Project-specific information (grows over time)
 //! - **SkillConfigs**: Skill customization settings
+//! - **ComponentSnapshots**: Saved component states for resume
 
 use chrono::{DateTime, Utc};
+use orcs_component::ComponentSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +63,10 @@ pub struct SessionAsset {
     /// Skill configurations.
     pub skill_configs: HashMap<String, SkillConfig>,
 
+    /// Component snapshots for resume.
+    #[serde(default)]
+    pub component_snapshots: HashMap<String, ComponentSnapshot>,
+
     /// Arbitrary metadata.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -79,6 +85,7 @@ impl SessionAsset {
             preferences: UserPreferences::default(),
             project_context: ProjectContext::default(),
             skill_configs: HashMap::new(),
+            component_snapshots: HashMap::new(),
             metadata: HashMap::new(),
         }
     }
@@ -106,6 +113,42 @@ impl SessionAsset {
     pub fn set_skill_config(&mut self, skill_id: impl Into<String>, config: SkillConfig) {
         self.skill_configs.insert(skill_id.into(), config);
         self.touch();
+    }
+
+    /// Saves a component snapshot.
+    pub fn save_snapshot(&mut self, snapshot: ComponentSnapshot) {
+        self.component_snapshots
+            .insert(snapshot.component_fqn.clone(), snapshot);
+        self.touch();
+    }
+
+    /// Retrieves a component snapshot by FQN.
+    #[must_use]
+    pub fn get_snapshot(&self, fqn: &str) -> Option<&ComponentSnapshot> {
+        self.component_snapshots.get(fqn)
+    }
+
+    /// Removes a component snapshot by FQN.
+    pub fn remove_snapshot(&mut self, fqn: &str) -> Option<ComponentSnapshot> {
+        let snapshot = self.component_snapshots.remove(fqn);
+        if snapshot.is_some() {
+            self.touch();
+        }
+        snapshot
+    }
+
+    /// Clears all component snapshots.
+    pub fn clear_snapshots(&mut self) {
+        if !self.component_snapshots.is_empty() {
+            self.component_snapshots.clear();
+            self.touch();
+        }
+    }
+
+    /// Returns the number of saved snapshots.
+    #[must_use]
+    pub fn snapshot_count(&self) -> usize {
+        self.component_snapshots.len()
     }
 
     /// Returns the creation time as a DateTime.
