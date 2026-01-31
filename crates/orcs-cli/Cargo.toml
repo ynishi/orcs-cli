@@ -1,0 +1,25 @@
+[package]
+name = "orcs-cli"
+description = "ORCS CLI - Hackable Agentic Shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orcs"
+path = "src/main.rs"
+
+[[example]]
+name = "echo_component"
+
+[dependencies]
+orcs-app = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

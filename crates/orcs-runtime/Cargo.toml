@@ -1,0 +1,19 @@
+[package]
+name = "orcs-runtime"
+description = "ORCS Runtime - Internal implementation (auth, channel, engine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orcs-types = { workspace = true }
+orcs-event = { workspace = true }
+orcs-component = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

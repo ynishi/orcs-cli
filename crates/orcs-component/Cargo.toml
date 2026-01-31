@@ -1,0 +1,16 @@
+[package]
+name = "orcs-component"
+description = "Component trait for ORCS CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orcs-types = { workspace = true }
+orcs-event = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

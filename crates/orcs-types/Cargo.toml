@@ -1,0 +1,13 @@
+[package]
+name = "orcs-types"
+description = "Core types for ORCS CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
