@@ -269,7 +269,10 @@ dependencies = [
  "orcs-event",
  "orcs-runtime",
  "orcs-types",
+ "serde_json",
  "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -318,6 +321,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

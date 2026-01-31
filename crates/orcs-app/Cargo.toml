@@ -10,7 +10,10 @@ orcs-types = { workspace = true }
 orcs-event = { workspace = true }
 orcs-component = { workspace = true }
 orcs-runtime = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true
