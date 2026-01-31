@@ -40,6 +40,10 @@ pub enum AppError {
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Application not properly initialized
+    #[error("Not initialized: {0}")]
+    NotInitialized(String),
 }
 
 impl ErrorCode for AppError {
@@ -49,6 +53,7 @@ impl ErrorCode for AppError {
             Self::Engine(e) => e.code(),
             Self::Config(_) => "APP_CONFIG_ERROR",
             Self::Io(_) => "APP_IO_ERROR",
+            Self::NotInitialized(_) => "APP_NOT_INITIALIZED",
         }
     }
 
@@ -58,6 +63,7 @@ impl ErrorCode for AppError {
             Self::Engine(e) => e.is_recoverable(),
             Self::Config(_) => false,
             Self::Io(_) => true,
+            Self::NotInitialized(_) => false,
         }
     }
 }

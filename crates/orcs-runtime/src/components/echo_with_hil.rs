@@ -96,9 +96,9 @@ impl EchoWithHilComponent {
 
     /// Submits an echo request for approval.
     ///
-    /// Generates a unique approval_id and stores the pending state.
-    fn submit_for_approval(&mut self, message: String) -> String {
-        let approval_id = uuid::Uuid::new_v4().to_string();
+    /// Uses provided approval_id if given, otherwise generates a new one.
+    fn submit_for_approval(&mut self, message: String, provided_id: Option<String>) -> String {
+        let approval_id = provided_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let description = format!("You say '{}'?", message);
 
         self.pending = Some(PendingEcho {
@@ -196,15 +196,31 @@ impl Component for EchoWithHilComponent {
     fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
         match request.operation.as_str() {
             "echo" => {
-                let message = request
-                    .payload
-                    .as_str()
-                    .ok_or_else(|| {
-                        ComponentError::InvalidPayload("Expected string message".into())
-                    })?
-                    .to_string();
+                // Support both formats:
+                // 1. Simple string: "hello"
+                // 2. Object with message and optional approval_id: {"message": "hello", "approval_id": "xxx"}
+                let (message, provided_approval_id) = if let Some(s) = request.payload.as_str() {
+                    (s.to_string(), None)
+                } else if let Some(obj) = request.payload.as_object() {
+                    let msg = obj
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ComponentError::InvalidPayload("Expected 'message' field".into())
+                        })?
+                        .to_string();
+                    let id = obj
+                        .get("approval_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    (msg, id)
+                } else {
+                    return Err(ComponentError::InvalidPayload(
+                        "Expected string or object with 'message' field".into(),
+                    ));
+                };
 
-                let approval_id = self.submit_for_approval(message);
+                let approval_id = self.submit_for_approval(message, provided_approval_id);
 
                 Ok(serde_json::json!({
                     "status": "pending_approval",

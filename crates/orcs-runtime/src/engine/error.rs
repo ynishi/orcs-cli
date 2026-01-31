@@ -8,6 +8,7 @@
 //! | Variant | Code | Recoverable |
 //! |---------|------|-------------|
 //! | [`EngineError::ComponentNotFound`] | `ENGINE_COMPONENT_NOT_FOUND` | No |
+//! | [`EngineError::ChannelNotFound`] | `ENGINE_CHANNEL_NOT_FOUND` | No |
 //! | [`EngineError::NoTarget`] | `ENGINE_NO_TARGET` | No |
 //! | [`EngineError::SendFailed`] | `ENGINE_SEND_FAILED` | Yes |
 //! | [`EngineError::ChannelClosed`] | `ENGINE_CHANNEL_CLOSED` | No |
@@ -25,7 +26,7 @@
 //! Non-recoverable errors require code/config changes.
 
 use orcs_event::EventCategory;
-use orcs_types::{ComponentId, ErrorCode, RequestId};
+use orcs_types::{ChannelId, ComponentId, ErrorCode, RequestId};
 use thiserror::Error;
 
 /// Engine layer error.
@@ -48,6 +49,10 @@ pub enum EngineError {
     /// Component not found in EventBus registry.
     #[error("component not found: {0}")]
     ComponentNotFound(ComponentId),
+
+    /// Channel not found for event injection.
+    #[error("channel not found: {0}")]
+    ChannelNotFound(ChannelId),
 
     /// Request target is required but not specified.
     #[error("request target is required")]
@@ -82,6 +87,7 @@ impl ErrorCode for EngineError {
     fn code(&self) -> &'static str {
         match self {
             Self::ComponentNotFound(_) => "ENGINE_COMPONENT_NOT_FOUND",
+            Self::ChannelNotFound(_) => "ENGINE_CHANNEL_NOT_FOUND",
             Self::NoTarget => "ENGINE_NO_TARGET",
             Self::SendFailed(_) => "ENGINE_SEND_FAILED",
             Self::ChannelClosed => "ENGINE_CHANNEL_CLOSED",
@@ -100,11 +106,12 @@ impl ErrorCode for EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orcs_types::assert_error_codes;
+    use orcs_types::{assert_error_codes, ChannelId};
 
     fn all_variants() -> Vec<EngineError> {
         vec![
             EngineError::ComponentNotFound(ComponentId::builtin("x")),
+            EngineError::ChannelNotFound(ChannelId::new()),
             EngineError::NoTarget,
             EngineError::SendFailed("x".into()),
             EngineError::ChannelClosed,

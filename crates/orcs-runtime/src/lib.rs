@@ -94,8 +94,14 @@ pub mod io;
 
 // Re-exports for convenience
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
-pub use channel::{Channel, ChannelError, ChannelState, World};
-pub use components::{ApprovalRequest, ApprovalResult, EchoWithHilComponent, HilComponent};
+pub use channel::{
+    priority, Channel, ChannelConfig, ChannelError, ChannelHandle, ChannelRunner,
+    ChannelRunnerFactory, ChannelState, Event, StateTransition, World, WorldCommand,
+    WorldCommandSender, WorldManager,
+};
+pub use components::{
+    ApprovalRequest, ApprovalResult, EchoWithHilComponent, HilComponent, NoopComponent,
+};
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};
 

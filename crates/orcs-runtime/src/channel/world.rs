@@ -5,7 +5,8 @@
 //!
 //! # Responsibilities
 //!
-//! - **Spawn**: Create new channels with parent-child relationships
+//! - **Create**: Create root channels (no parent)
+//! - **Spawn**: Create child channels with parent relationships
 //! - **Kill**: Remove channels and cascade to descendants
 //! - **Complete**: Transition channels to completed state
 //! - **Query**: Look up channels by ID
@@ -13,15 +14,15 @@
 //! # Example
 //!
 //! ```
-//! use orcs_runtime::World;
+//! use orcs_runtime::{World, ChannelConfig};
 //!
 //! let mut world = World::new();
 //!
-//! // Create the primary (root) channel
-//! let primary = world.create_primary().unwrap();
+//! // Create a root channel (no parent)
+//! let root = world.create_channel(ChannelConfig::interactive());
 //!
 //! // Spawn child channels
-//! let agent = world.spawn(primary).unwrap();
+//! let agent = world.spawn(root).unwrap();
 //! let tool = world.spawn(agent).unwrap();
 //!
 //! // Kill cascades to descendants
@@ -30,7 +31,7 @@
 //! ```
 
 use super::channel::Channel;
-use super::error::ChannelError;
+use super::config::ChannelConfig;
 use orcs_types::ChannelId;
 use std::collections::HashMap;
 
@@ -44,13 +45,14 @@ use std::collections::HashMap;
 /// ```text
 /// World
 ///   │
-///   └── Primary Channel (root)
-///         │
-///         ├── Agent Channel
-///         │     ├── Tool Channel 1
-///         │     └── Tool Channel 2
-///         │
-///         └── Background Channel
+///   ├── IO Channel (interactive)
+///   │     ├── Agent Channel
+///   │     │     ├── Tool Channel 1
+///   │     │     └── Tool Channel 2
+///   │     │
+///   │     └── Background Channel
+///   │
+///   └── Other Root Channels...
 /// ```
 ///
 /// # Thread Safety
@@ -61,16 +63,15 @@ use std::collections::HashMap;
 /// # Example
 ///
 /// ```
-/// use orcs_runtime::{World, ChannelState};
+/// use orcs_runtime::{World, ChannelConfig, ChannelState};
 ///
 /// let mut world = World::new();
 ///
-/// // Create primary channel
-/// let primary = world.create_primary().unwrap();
-/// assert_eq!(world.primary(), Some(primary));
+/// // Create a root channel
+/// let root = world.create_channel(ChannelConfig::interactive());
 ///
 /// // Spawn and complete a child
-/// let child = world.spawn(primary).unwrap();
+/// let child = world.spawn(root).unwrap();
 /// world.complete(child);
 ///
 /// assert_eq!(
@@ -81,13 +82,12 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct World {
     channels: HashMap<ChannelId, Channel>,
-    primary: Option<ChannelId>,
 }
 
 impl World {
     /// Creates an empty World with no channels.
     ///
-    /// Call [`create_primary()`](Self::create_primary) to create the root channel.
+    /// Use [`create_channel()`](Self::create_channel) to create root channels.
     ///
     /// # Example
     ///
@@ -95,72 +95,59 @@ impl World {
     /// use orcs_runtime::World;
     ///
     /// let world = World::new();
-    /// assert!(world.primary().is_none());
     /// assert_eq!(world.channel_count(), 0);
     /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),
-            primary: None,
         }
     }
 
-    /// Creates the primary (root) channel.
+    /// Creates a root channel (no parent).
     ///
-    /// The primary channel has no parent and serves as the root of
-    /// the channel tree. This should typically be called once at
-    /// startup.
+    /// Root channels have no parent and serve as entry points to the
+    /// channel tree. Multiple root channels are allowed.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration for the new channel
     ///
     /// # Returns
     ///
-    /// - `Ok(ChannelId)` - The ID of the newly created primary channel
-    /// - `Err(ChannelError::AlreadyExists)` - If a primary channel already exists
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ChannelError::AlreadyExists`] if called when a primary
-    /// channel has already been created.
+    /// The ID of the newly created channel.
     ///
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelError};
+    /// use orcs_runtime::{World, ChannelConfig};
     ///
     /// let mut world = World::new();
-    /// let primary = world.create_primary().unwrap();
     ///
-    /// assert_eq!(world.primary(), Some(primary));
-    /// assert!(world.get(&primary).unwrap().parent().is_none());
+    /// // Create an interactive (IO) channel
+    /// let io = world.create_channel(ChannelConfig::interactive());
+    /// assert!(world.get(&io).unwrap().parent().is_none());
+    /// assert_eq!(world.get(&io).unwrap().priority(), 255);
     ///
-    /// // Second call returns error
-    /// assert!(matches!(
-    ///     world.create_primary(),
-    ///     Err(ChannelError::AlreadyExists(_))
-    /// ));
+    /// // Create a background root channel
+    /// let bg = world.create_channel(ChannelConfig::background());
+    /// assert_eq!(world.channel_count(), 2);
     /// ```
-    pub fn create_primary(&mut self) -> Result<ChannelId, ChannelError> {
-        if let Some(existing) = self.primary {
-            return Err(ChannelError::AlreadyExists(existing));
-        }
-
-        let id = ChannelId::new();
-        let channel = Channel::new(id, None);
-        self.channels.insert(id, channel);
-        self.primary = Some(id);
-        Ok(id)
-    }
-
-    /// Returns the primary channel's ID, if created.
     #[must_use]
-    pub fn primary(&self) -> Option<ChannelId> {
-        self.primary
+    pub fn create_channel(&mut self, config: ChannelConfig) -> ChannelId {
+        let id = ChannelId::new();
+        let channel = Channel::new(id, None, config);
+        self.channels.insert(id, channel);
+        id
     }
 
-    /// Spawns a new child channel under the given parent.
+    /// Spawns a new child channel under the given parent with default config.
     ///
     /// The new channel starts in [`Running`](crate::ChannelState::Running)
     /// state and is registered as a child of the parent.
+    ///
+    /// Uses [`ChannelConfig::default()`] for the new channel.
+    /// For explicit configuration, use [`spawn_with()`](Self::spawn_with).
     ///
     /// # Arguments
     ///
@@ -174,21 +161,59 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::World;
+    /// use orcs_runtime::{World, ChannelConfig};
     ///
     /// let mut world = World::new();
-    /// let primary = world.create_primary().unwrap();
+    /// let root = world.create_channel(ChannelConfig::interactive());
     ///
-    /// let child = world.spawn(primary).expect("parent exists");
-    /// assert_eq!(world.get(&child).unwrap().parent(), Some(primary));
+    /// let child = world.spawn(root).expect("parent exists");
+    /// assert_eq!(world.get(&child).unwrap().parent(), Some(root));
     /// ```
     pub fn spawn(&mut self, parent: ChannelId) -> Option<ChannelId> {
+        self.spawn_with(parent, ChannelConfig::default())
+    }
+
+    /// Spawns a new child channel with explicit configuration.
+    ///
+    /// The new channel starts in [`Running`](crate::ChannelState::Running)
+    /// state and is registered as a child of the parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent` - ID of the parent channel
+    /// * `config` - Configuration for the new channel
+    ///
+    /// # Returns
+    ///
+    /// - `Some(ChannelId)` if the spawn succeeded
+    /// - `None` if the parent channel does not exist
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{World, ChannelConfig};
+    ///
+    /// let mut world = World::new();
+    /// let root = world.create_channel(ChannelConfig::interactive());
+    ///
+    /// // Spawn a background channel
+    /// let bg = world.spawn_with(root, ChannelConfig::background())
+    ///     .expect("parent exists");
+    /// assert_eq!(world.get(&bg).unwrap().priority(), 10);
+    /// assert!(!world.get(&bg).unwrap().can_spawn());
+    ///
+    /// // Spawn a tool channel
+    /// let tool = world.spawn_with(root, ChannelConfig::tool())
+    ///     .expect("parent exists");
+    /// assert_eq!(world.get(&tool).unwrap().priority(), 100);
+    /// ```
+    pub fn spawn_with(&mut self, parent: ChannelId, config: ChannelConfig) -> Option<ChannelId> {
         if !self.channels.contains_key(&parent) {
             return None;
         }
 
         let id = ChannelId::new();
-        let channel = Channel::new(id, Some(parent));
+        let channel = Channel::new(id, Some(parent), config);
         self.channels.insert(id, channel);
 
         // Register with parent
@@ -220,11 +245,11 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::World;
+    /// use orcs_runtime::{World, ChannelConfig};
     ///
     /// let mut world = World::new();
-    /// let primary = world.create_primary().unwrap();
-    /// let agent = world.spawn(primary).unwrap();
+    /// let root = world.create_channel(ChannelConfig::interactive());
+    /// let agent = world.spawn(root).unwrap();
     /// let tool = world.spawn(agent).unwrap();
     ///
     /// // Killing agent also removes tool
@@ -232,7 +257,7 @@ impl World {
     ///
     /// assert!(world.get(&agent).is_none());
     /// assert!(world.get(&tool).is_none());
-    /// assert_eq!(world.channel_count(), 1); // only primary
+    /// assert_eq!(world.channel_count(), 1); // only root
     /// ```
     pub fn kill(&mut self, id: ChannelId, reason: String) {
         // Collect children first to avoid borrow issues
@@ -276,13 +301,13 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelState};
+    /// use orcs_runtime::{World, ChannelConfig, ChannelState};
     ///
     /// let mut world = World::new();
-    /// let primary = world.create_primary().unwrap();
+    /// let root = world.create_channel(ChannelConfig::interactive());
     ///
-    /// assert!(world.complete(primary));
-    /// assert!(!world.complete(primary)); // Already completed
+    /// assert!(world.complete(root));
+    /// assert!(!world.complete(root)); // Already completed
     /// ```
     pub fn complete(&mut self, id: ChannelId) -> bool {
         self.channels
@@ -341,39 +366,41 @@ mod tests {
     #[test]
     fn world_creation() {
         let world = World::new();
-        assert!(world.primary().is_none());
         assert_eq!(world.channel_count(), 0);
     }
 
     #[test]
-    fn create_primary() {
+    fn create_channel_interactive() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
+        let io = world.create_channel(ChannelConfig::interactive());
 
-        assert_eq!(world.primary(), Some(primary));
         assert_eq!(world.channel_count(), 1);
-        assert!(world.get(&primary).is_some());
+        assert!(world.get(&io).is_some());
+        assert!(world.get(&io).unwrap().parent().is_none());
+        assert_eq!(world.get(&io).unwrap().priority(), 255);
     }
 
     #[test]
-    fn create_primary_twice_fails() {
+    fn create_multiple_root_channels() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
+        let io = world.create_channel(ChannelConfig::interactive());
+        let bg = world.create_channel(ChannelConfig::background());
 
-        let result = world.create_primary();
-        assert!(matches!(result, Err(ChannelError::AlreadyExists(id)) if id == primary));
+        assert_eq!(world.channel_count(), 2);
+        assert!(world.get(&io).unwrap().parent().is_none());
+        assert!(world.get(&bg).unwrap().parent().is_none());
     }
 
     #[test]
     fn spawn_child() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
-        let child = world.spawn(primary).unwrap();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child = world.spawn(root).unwrap();
 
         assert_eq!(world.channel_count(), 2);
         assert!(world.get(&child).is_some());
-        assert_eq!(world.get(&child).unwrap().parent(), Some(primary));
-        assert!(world.get(&primary).unwrap().children().contains(&child));
+        assert_eq!(world.get(&child).unwrap().parent(), Some(root));
+        assert!(world.get(&root).unwrap().children().contains(&child));
     }
 
     #[test]
@@ -388,21 +415,21 @@ mod tests {
     #[test]
     fn kill_channel() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
-        let child = world.spawn(primary).unwrap();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child = world.spawn(root).unwrap();
 
         world.kill(child, "test".into());
 
         assert_eq!(world.channel_count(), 1);
         assert!(world.get(&child).is_none());
-        assert!(!world.get(&primary).unwrap().children().contains(&child));
+        assert!(!world.get(&root).unwrap().children().contains(&child));
     }
 
     #[test]
     fn kill_with_children() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
-        let child = world.spawn(primary).unwrap();
+        let root = world.create_channel(ChannelConfig::interactive());
+        let child = world.spawn(root).unwrap();
         let grandchild = world.spawn(child).unwrap();
 
         assert_eq!(world.channel_count(), 3);
@@ -417,17 +444,14 @@ mod tests {
     #[test]
     fn complete_channel() {
         let mut world = World::new();
-        let primary = world.create_primary().unwrap();
+        let root = world.create_channel(ChannelConfig::interactive());
 
-        assert!(world.complete(primary));
+        assert!(world.complete(root));
 
-        assert_eq!(
-            world.get(&primary).unwrap().state(),
-            &ChannelState::Completed
-        );
+        assert_eq!(world.get(&root).unwrap().state(), &ChannelState::Completed);
 
         // Cannot complete twice
-        assert!(!world.complete(primary));
+        assert!(!world.complete(root));
     }
 
     #[test]
@@ -435,5 +459,65 @@ mod tests {
         let mut world = World::new();
         let invalid = ChannelId::new();
         assert!(!world.complete(invalid));
+    }
+
+    #[test]
+    fn interactive_has_high_priority() {
+        let mut world = World::new();
+        let io = world.create_channel(ChannelConfig::interactive());
+
+        let channel = world.get(&io).unwrap();
+        assert_eq!(channel.priority(), 255);
+        assert!(channel.can_spawn());
+    }
+
+    #[test]
+    fn spawn_with_background_config() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+
+        let bg = world.spawn_with(root, ChannelConfig::background()).unwrap();
+
+        let channel = world.get(&bg).unwrap();
+        assert_eq!(channel.priority(), 10);
+        assert!(!channel.can_spawn());
+    }
+
+    #[test]
+    fn spawn_with_tool_config() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+
+        let tool = world.spawn_with(root, ChannelConfig::tool()).unwrap();
+
+        let channel = world.get(&tool).unwrap();
+        assert_eq!(channel.priority(), 100);
+        assert!(channel.can_spawn());
+    }
+
+    #[test]
+    fn spawn_with_custom_config() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+
+        let config = ChannelConfig::new(200, false);
+        let custom = world.spawn_with(root, config).unwrap();
+
+        let channel = world.get(&custom).unwrap();
+        assert_eq!(channel.priority(), 200);
+        assert!(!channel.can_spawn());
+    }
+
+    #[test]
+    fn spawn_uses_default_config() {
+        let mut world = World::new();
+        let root = world.create_channel(ChannelConfig::interactive());
+
+        let child = world.spawn(root).unwrap();
+
+        let channel = world.get(&child).unwrap();
+        // Default config: NORMAL priority (50), can_spawn = true
+        assert_eq!(channel.priority(), 50);
+        assert!(channel.can_spawn());
     }
 }

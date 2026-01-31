@@ -44,19 +44,21 @@
 //! | Timeout | `ENGINE_TIMEOUT` | Yes |
 
 use super::error::EngineError;
+use crate::channel::{ChannelHandle, Event};
 use orcs_event::{EventCategory, Request, Signal};
-use orcs_types::{ComponentId, RequestId};
+use orcs_types::{ChannelId, ComponentId, RequestId};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// EventBus - routes messages between components.
+/// EventBus - routes messages between components and channels.
 ///
 /// The EventBus is responsible for:
 /// - Registering/unregistering Components
 /// - Routing Request messages to target Components
 /// - Broadcasting Signal messages to all Components
+/// - Injecting Events into specific Channels
 /// - Managing pending response channels
 ///
 /// # Thread Safety
@@ -72,6 +74,8 @@ pub struct EventBus {
     signal_tx: broadcast::Sender<Signal>,
     /// Category subscriptions: category -> set of component IDs
     subscriptions: HashMap<EventCategory, HashSet<ComponentId>>,
+    /// Channel handles for event injection
+    channel_handles: HashMap<ChannelId, ChannelHandle>,
 }
 
 impl EventBus {
@@ -84,6 +88,7 @@ impl EventBus {
             pending_responses: HashMap::new(),
             signal_tx,
             subscriptions: HashMap::new(),
+            channel_handles: HashMap::new(),
         }
     }
 
@@ -255,6 +260,94 @@ impl EventBus {
     #[must_use]
     pub fn component_count(&self) -> usize {
         self.request_senders.len()
+    }
+
+    // === Channel Event Injection ===
+
+    /// Registers a channel handle for event injection.
+    ///
+    /// Call this when a new [`ChannelRunner`](crate::channel::ChannelRunner)
+    /// is created to enable event injection to that channel.
+    pub fn register_channel(&mut self, handle: ChannelHandle) {
+        self.channel_handles.insert(handle.id, handle);
+    }
+
+    /// Unregisters a channel handle.
+    ///
+    /// Call this when a channel is killed or completed.
+    pub fn unregister_channel(&mut self, id: &ChannelId) {
+        self.channel_handles.remove(id);
+    }
+
+    /// Injects an event into a specific channel.
+    ///
+    /// This enables external event injection (e.g., from Human input)
+    /// at any time.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - Target channel
+    /// * `event` - Event to inject
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::ChannelNotFound`] if the channel is not registered.
+    /// Returns [`EngineError::SendFailed`] if the channel's buffer is full or closed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use orcs_event::{Event, EventCategory};
+    ///
+    /// let event = Event {
+    ///     category: EventCategory::Echo,
+    ///     payload: serde_json::json!({"message": "hello"}),
+    /// };
+    ///
+    /// eventbus.inject(channel_id, event).await?;
+    /// ```
+    pub async fn inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
+        let handle = self
+            .channel_handles
+            .get(&channel_id)
+            .ok_or(EngineError::ChannelNotFound(channel_id))?;
+
+        handle
+            .inject(event)
+            .await
+            .map_err(|_| EngineError::SendFailed("channel closed".into()))
+    }
+
+    /// Try to inject an event without blocking.
+    ///
+    /// Returns immediately if the buffer is full.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if channel not found, buffer full, or channel closed.
+    pub fn try_inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
+        let handle = self
+            .channel_handles
+            .get(&channel_id)
+            .ok_or(EngineError::ChannelNotFound(channel_id))?;
+
+        handle
+            .try_inject(event)
+            .map_err(|e| EngineError::SendFailed(e.to_string()))
+    }
+
+    /// Returns the number of registered channels.
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.channel_handles.len()
+    }
+
+    /// Returns the signal broadcast sender.
+    ///
+    /// Use this to create signal receivers for new channel runners.
+    #[must_use]
+    pub fn signal_sender(&self) -> broadcast::Sender<Signal> {
+        self.signal_tx.clone()
     }
 }
 

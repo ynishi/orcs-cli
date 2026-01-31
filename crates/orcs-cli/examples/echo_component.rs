@@ -6,8 +6,8 @@
 //! - Signal (Veto) handling
 
 use orcs_app::{
-    Component, ComponentError, ComponentId, OrcsEngine, Principal, PrincipalId, Request, Signal,
-    SignalResponse, Status, World,
+    ChannelConfig, Component, ComponentError, ComponentId, OrcsEngine, Principal, PrincipalId,
+    Request, Signal, SignalResponse, Status, World,
 };
 use serde_json::Value;
 
@@ -64,16 +64,13 @@ impl Component for EchoComponent {
 async fn main() {
     println!("=== M1 E2E Test: Echo Component ===\n");
 
-    // Create World with primary channel
+    // Create World with IO channel
     let mut world = World::new();
-    world.create_primary().expect("first call always succeeds");
+    let io = world.create_channel(ChannelConfig::interactive());
 
-    // Inject World into Engine
-    let mut engine = OrcsEngine::new(world);
-    println!(
-        "Engine created with primary channel: {:?}",
-        engine.world().primary()
-    );
+    // Inject World into Engine with IO channel (required)
+    let mut engine = OrcsEngine::new(world, io);
+    println!("Engine created with IO channel: {}", engine.io_channel());
 
     let echo = Box::new(EchoComponent::new());
     engine.register(echo);

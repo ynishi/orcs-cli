@@ -33,35 +33,52 @@
 //! [`SignalResponse::Ignored`], the engine forces abort.
 
 use super::eventbus::{ComponentHandle, EventBus};
-use crate::channel::World;
+use crate::channel::{
+    ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, World, WorldCommand,
+    WorldCommandSender, WorldManager,
+};
 use orcs_component::Component;
 use orcs_event::{Signal, SignalKind, SignalResponse};
-use orcs_types::ComponentId;
+use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
+
+/// Signal broadcast channel buffer size.
+///
+/// 256 signals provides sufficient buffering for HIL interactions.
+/// Lagged receivers will miss old signals but continue receiving new ones.
+const SIGNAL_BUFFER_SIZE: usize = 256;
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
 /// Manages the complete lifecycle of Components and coordinates
 /// communication via EventBus.
 ///
+/// # Parallel Execution Model
+///
+/// Engine operates in parallel mode with:
+/// - [`WorldManager`](crate::channel::WorldManager) for concurrent World access
+/// - [`ChannelRunner`](crate::channel::ChannelRunner) per channel
+/// - Event injection via channel handles
+///
 /// # Example
 ///
 /// ```ignore
-/// use orcs_runtime::World;
+/// use orcs_runtime::{World, ChannelConfig};
 ///
-/// // Create World with primary channel (caller's responsibility)
+/// // Create World with IO channel
 /// let mut world = World::new();
-/// world.create_primary().expect("first call always succeeds");
+/// let io = world.create_channel(ChannelConfig::interactive());
 ///
-/// // Inject into engine
-/// let mut engine = OrcsEngine::new(world);
+/// // Inject into engine with IO channel (required)
+/// let engine = OrcsEngine::new(world, io);
 ///
-/// // Register components
-/// engine.register(Box::new(LlmComponent::new()));
-/// engine.register(Box::new(ToolsComponent::new()));
+/// // Spawn channel runners with bound components
+/// engine.spawn_runner(io, Box::new(MyComponent::new()));
 ///
-/// // Run the engine
+/// // Run the engine (parallel execution)
 /// engine.run().await;
 /// ```
 ///
@@ -72,31 +89,184 @@ use tracing::{debug, info, warn};
 pub struct OrcsEngine {
     /// EventBus for message routing
     eventbus: EventBus,
-    /// World for Channel management
-    world: World,
     /// Registered Components
     components: HashMap<ComponentId, Box<dyn Component>>,
     /// Component handles for message delivery
     handles: HashMap<ComponentId, ComponentHandle>,
     /// Running state
     running: bool,
+    // --- Parallel execution infrastructure ---
+    /// World command sender for async modifications
+    world_tx: WorldCommandSender,
+    /// Read-only World access for parallel reads
+    world_read: Arc<RwLock<World>>,
+    /// Signal broadcaster for all channel runners
+    signal_tx: broadcast::Sender<Signal>,
+    /// Channel runner handles (for event injection)
+    channel_handles: HashMap<ChannelId, ChannelHandle>,
+    /// WorldManager task handle
+    manager_task: Option<tokio::task::JoinHandle<()>>,
+    /// Channel runner task handles
+    runner_tasks: HashMap<ChannelId, tokio::task::JoinHandle<()>>,
+    // --- IO Channel (required) ---
+    /// IO channel for Human input/output.
+    ///
+    /// This is a required field - every engine must have an IO channel
+    /// for Human interaction.
+    io_channel: ChannelId,
 }
 
 impl OrcsEngine {
-    /// Create new engine with injected World.
+    /// Create new engine with injected World and IO channel.
     ///
-    /// The World should already have a primary channel created.
-    /// This design separates World initialization from Engine creation,
-    /// making the Engine easier to test and configure.
+    /// The World is immediately transferred to a [`WorldManager`] which
+    /// starts processing commands. The IO channel is required for Human
+    /// input/output.
+    ///
+    /// # Arguments
+    ///
+    /// * `world` - The World containing the IO channel
+    /// * `io_channel` - The IO channel ID (must exist in World)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut world = World::new();
+    /// let io = world.create_channel(ChannelConfig::interactive());
+    ///
+    /// let engine = OrcsEngine::new(world, io);
+    /// ```
     #[must_use]
-    pub fn new(world: World) -> Self {
+    pub fn new(world: World, io_channel: ChannelId) -> Self {
+        // Create WorldManager immediately (takes ownership of World)
+        let (manager, world_tx) = WorldManager::with_world(world);
+        let world_read = manager.world();
+
+        // Create signal broadcaster
+        let (signal_tx, _) = broadcast::channel(SIGNAL_BUFFER_SIZE);
+
+        // Start WorldManager task
+        let manager_task = tokio::spawn(manager.run());
+
+        info!(
+            "OrcsEngine created with IO channel {} (WorldManager started)",
+            io_channel
+        );
+
         Self {
             eventbus: EventBus::new(),
-            world,
             components: HashMap::new(),
             handles: HashMap::new(),
             running: false,
+            world_tx,
+            world_read,
+            signal_tx,
+            channel_handles: HashMap::new(),
+            manager_task: Some(manager_task),
+            runner_tasks: HashMap::new(),
+            io_channel,
         }
+    }
+
+    /// Spawn a channel runner for a channel with a bound Component.
+    ///
+    /// Returns the channel handle for event injection.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind (1:1 relationship)
+    pub fn spawn_runner(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+    ) -> ChannelHandle {
+        let signal_rx = self.signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::new(
+            channel_id,
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            signal_rx,
+            component,
+        );
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!("Spawned runner for channel {}", channel_id);
+        handle
+    }
+
+    /// Spawn a child channel with configuration and bound Component.
+    ///
+    /// Creates a new channel in World and spawns its runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent` - Parent channel ID
+    /// * `config` - Channel configuration
+    /// * `component` - Component to bind to the new channel (1:1)
+    pub async fn spawn_channel(
+        &mut self,
+        parent: ChannelId,
+        config: ChannelConfig,
+        component: Box<dyn Component>,
+    ) -> Option<ChannelId> {
+        // Send spawn command
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = WorldCommand::Spawn {
+            parent,
+            config,
+            reply: reply_tx,
+        };
+
+        if self.world_tx.send(cmd).await.is_err() {
+            return None;
+        }
+
+        // Wait for reply
+        let child_id = reply_rx.await.ok()??;
+
+        // Spawn runner for new channel with bound component
+        self.spawn_runner(child_id, component);
+
+        Some(child_id)
+    }
+
+    /// Returns a runner factory for creating channel runners.
+    #[must_use]
+    pub fn runner_factory(&self) -> ChannelRunnerFactory {
+        ChannelRunnerFactory::new(
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            self.signal_tx.clone(),
+        )
+    }
+
+    /// Returns the read-only World handle for parallel access.
+    #[must_use]
+    pub fn world_read(&self) -> &Arc<RwLock<World>> {
+        &self.world_read
+    }
+
+    /// Returns the world command sender.
+    #[must_use]
+    pub fn world_tx(&self) -> &WorldCommandSender {
+        &self.world_tx
+    }
+
+    /// Broadcast a signal to all channel runners.
+    pub fn broadcast_signal(&self, signal: Signal) {
+        let _ = self.signal_tx.send(signal.clone());
+        // Also send to component-level eventbus
+        self.eventbus.signal(signal);
     }
 
     /// Register a component with its subscriptions.
@@ -144,29 +314,69 @@ impl OrcsEngine {
         self.running = false;
     }
 
-    /// Get world reference
+    /// Returns the IO channel ID.
+    ///
+    /// The IO channel is required and always available.
     #[must_use]
-    pub fn world(&self) -> &World {
-        &self.world
+    pub fn io_channel(&self) -> ChannelId {
+        self.io_channel
     }
 
-    /// Get mutable world reference
-    pub fn world_mut(&mut self) -> &mut World {
-        &mut self.world
-    }
-
-    /// Main run loop
+    /// Main run loop with parallel execution.
+    ///
+    /// This method:
+    /// 1. Runs the main polling loop
+    /// 2. Shuts down all runners on exit
+    ///
+    /// # Note
+    ///
+    /// Caller must spawn runners via `spawn_runner()` before calling `run()`.
+    /// Each runner requires a bound Component (1:1 relationship).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut engine = OrcsEngine::new(world);
+    /// engine.spawn_runner(io_id, Box::new(MyComponent::new()));
+    /// engine.run().await;
+    /// ```
     pub async fn run(&mut self) {
         self.running = true;
-        info!("OrcsEngine started");
+        info!("OrcsEngine started (parallel mode)");
 
         while self.running {
             self.poll_once();
             tokio::task::yield_now().await;
         }
 
-        self.shutdown();
-        info!("OrcsEngine stopped");
+        self.shutdown_parallel().await;
+        info!("OrcsEngine stopped (parallel mode)");
+    }
+
+    /// Shutdown parallel execution infrastructure.
+    async fn shutdown_parallel(&mut self) {
+        // Send shutdown to WorldManager
+        let _ = self.world_tx.send(WorldCommand::Shutdown).await;
+
+        // Wait for manager task
+        if let Some(task) = self.manager_task.take() {
+            let _ = task.await;
+        }
+
+        // Abort all runner tasks (they should stop on channel close)
+        for (id, task) in self.runner_tasks.drain() {
+            debug!("Aborting runner for channel {}", id);
+            task.abort();
+        }
+
+        // Unregister channel handles
+        for id in self.channel_handles.keys() {
+            self.eventbus.unregister_channel(id);
+        }
+        self.channel_handles.clear();
+
+        // Also do component shutdown
+        self.shutdown_components();
     }
 
     /// Poll all components once
@@ -279,8 +489,8 @@ impl OrcsEngine {
         info!("Unregistered component: {}", id);
     }
 
-    /// Shutdown all components
-    fn shutdown(&mut self) {
+    /// Shutdown all components.
+    pub fn shutdown_components(&mut self) {
         info!("Shutting down all components");
         for (id, component) in &mut self.components {
             debug!("Aborting component: {}", id);
@@ -292,16 +502,17 @@ impl OrcsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::WorldCommand;
     use crate::Principal;
     use orcs_component::ComponentError;
     use orcs_event::Request;
     use serde_json::Value;
 
-    /// Create a World with primary channel for testing.
-    fn test_world() -> World {
+    /// Create a World with IO channel for testing.
+    fn test_world() -> (World, ChannelId) {
         let mut world = World::new();
-        world.create_primary().expect("first call always succeeds");
-        world
+        let io = world.create_channel(ChannelConfig::interactive());
+        (world, io)
     }
 
     struct EchoComponent {
@@ -356,25 +567,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn engine_creation() {
-        let engine = OrcsEngine::new(test_world());
+    #[tokio::test]
+    async fn engine_creation() {
+        let (world, io) = test_world();
+        let engine = OrcsEngine::new(world, io);
         assert!(!engine.is_running());
-        assert!(engine.world().primary().is_some());
+        assert_eq!(engine.io_channel(), io);
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
-    #[test]
-    fn register_component() {
-        let mut engine = OrcsEngine::new(test_world());
+    #[tokio::test]
+    async fn engine_world_access() {
+        let (world, io) = test_world();
+        let engine = OrcsEngine::new(world, io);
+
+        // WorldManager starts immediately in new()
+        let w = engine.world_read().read().await;
+        assert!(w.get(&io).is_some());
+        drop(w);
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn register_component() {
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
         let echo = Box::new(EchoComponent::new());
         engine.register(echo);
 
         assert_eq!(engine.components.len(), 1);
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     #[tokio::test]
     async fn veto_stops_engine() {
-        let mut engine = OrcsEngine::new(test_world());
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
         let echo = Box::new(EchoComponent::new());
         engine.register(echo);
 
@@ -384,11 +619,15 @@ mod tests {
         engine.poll_once();
 
         assert!(!engine.is_running());
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
-    #[test]
-    fn multiple_components() {
-        let mut engine = OrcsEngine::new(test_world());
+    #[tokio::test]
+    async fn multiple_components() {
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
 
         let echo1 = Box::new(EchoComponent::new());
         let mut echo2_inner = EchoComponent::new();
@@ -399,39 +638,61 @@ mod tests {
         engine.register(echo2);
 
         assert_eq!(engine.components.len(), 2);
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
-    #[test]
-    fn stop_engine() {
-        let mut engine = OrcsEngine::new(test_world());
+    #[tokio::test]
+    async fn stop_engine() {
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
         engine.running = true;
 
         assert!(engine.is_running());
         engine.stop();
         assert!(!engine.is_running());
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
-    #[test]
-    fn world_access() {
-        let mut engine = OrcsEngine::new(test_world());
+    #[tokio::test]
+    async fn world_access_parallel() {
+        let (world, io) = test_world();
+        let engine = OrcsEngine::new(world, io);
 
-        assert!(engine.world().primary().is_some());
+        // Complete via command
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        engine
+            .world_tx()
+            .send(WorldCommand::Complete {
+                id: io,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        assert!(reply_rx.await.unwrap());
 
-        let primary = engine.world().primary().unwrap();
-        engine.world_mut().complete(primary);
+        // Verify state
+        let w = engine.world_read().read().await;
+        assert!(!w.get(&io).unwrap().is_running());
+        drop(w);
 
-        assert!(!engine.world().get(&primary).unwrap().is_running());
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     #[tokio::test]
     async fn cancel_signal_handled() {
-        let mut engine = OrcsEngine::new(test_world());
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
         let echo = Box::new(EchoComponent::new());
         engine.register(echo);
 
-        let channel_id = engine.world().primary().unwrap();
         let principal = Principal::System;
-        let cancel = Signal::cancel(channel_id, principal);
+        let cancel = Signal::cancel(io, principal);
 
         engine.signal(cancel);
         engine.running = true;
@@ -439,20 +700,26 @@ mod tests {
 
         // Cancel should not stop engine (only Veto does)
         assert!(engine.is_running());
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     #[tokio::test]
     async fn shutdown_aborts_all_components() {
-        let mut engine = OrcsEngine::new(test_world());
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
         let echo = Box::new(EchoComponent::new());
         let id = echo.id.clone();
         engine.register(echo);
 
-        engine.shutdown();
+        engine.shutdown_components();
 
         // Component should have been aborted
-        // (We can't directly check aborted flag, but shutdown was called)
         assert!(engine.components.contains_key(&id));
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     struct CountingComponent {
@@ -501,16 +768,17 @@ mod tests {
 
     #[tokio::test]
     async fn poll_processes_signals() {
-        let mut engine = OrcsEngine::new(test_world());
+        let (world, io) = test_world();
+        let mut engine = OrcsEngine::new(world, io);
+
         let comp = Box::new(CountingComponent::new("counter"));
         engine.register(comp);
 
-        let channel_id = engine.world().primary().unwrap();
         let principal = Principal::System;
 
         // Send multiple non-veto signals
-        engine.signal(Signal::cancel(channel_id, principal.clone()));
-        engine.signal(Signal::cancel(channel_id, principal));
+        engine.signal(Signal::cancel(io, principal.clone()));
+        engine.signal(Signal::cancel(io, principal));
 
         engine.running = true;
         tokio::task::yield_now().await;
@@ -518,5 +786,8 @@ mod tests {
 
         // Engine should still be running (no veto)
         assert!(engine.is_running());
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 }

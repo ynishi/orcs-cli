@@ -5,27 +5,43 @@
 //!
 //! # Architecture Overview
 //!
-//! Channels are the unit of parallel execution, managed by the World:
+//! Channels execute in parallel, each with its own [`ChannelRunner`]:
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────────────────┐
-//! │                            OrcsEngine                                │
-//! │  ┌────────────────────────────────────────────────────────────────┐  │
-//! │  │                           World                                │  │
-//! │  │   - Channel spawn/kill                                         │  │
-//! │  │   - Parent-child relationships                                 │  │
-//! │  │   - State management                                           │  │
-//! │  └────────────────────────────────────────────────────────────────┘  │
-//! │                                    │                                  │
-//! │          ┌─────────────────────────┼─────────────────────────┐       │
-//! │          │                         │                         │       │
-//! │          ▼                         ▼                         ▼       │
-//! │    ┌──────────┐              ┌──────────┐              ┌──────────┐  │
-//! │    │ Primary  │───spawn───▶  │  Agent   │───spawn───▶  │   Tool   │  │
-//! │    │ Channel  │              │ Channel  │              │ Channel  │  │
-//! │    └──────────┘              └──────────┘              └──────────┘  │
-//! └──────────────────────────────────────────────────────────────────────┘
+//! ┌────────────────────────────────────────────────────────────────────────────┐
+//! │                              OrcsEngine                                    │
+//! │                                                                            │
+//! │  ┌──────────────────────────────────────────────────────────────────────┐ │
+//! │  │                         WorldManager                                  │ │
+//! │  │   - Arc<RwLock<World>> (read: parallel, write: command queue)        │ │
+//! │  │   - mpsc::Receiver<WorldCommand>                                     │ │
+//! │  └──────────────────────────────────────────────────────────────────────┘ │
+//! │                                    │                                       │
+//! │         ┌──────────────────────────┼──────────────────────────┐           │
+//! │         │                          │                          │           │
+//! │         ▼                          ▼                          ▼           │
+//! │  ┌─────────────┐           ┌─────────────┐           ┌─────────────┐     │
+//! │  │ChannelRunner│           │ChannelRunner│           │ChannelRunner│     │
+//! │  │  (Primary)  │──spawn──▶ │  (Agent)    │──spawn──▶ │  (Tool)     │     │
+//! │  │             │           │             │           │             │     │
+//! │  │ event_rx ◄──┼───────────┼─────────────┼───────────┼── EventBus  │     │
+//! │  └─────────────┘           └─────────────┘           └─────────────┘     │
+//! │         │                          │                          │           │
+//! │         └──────────────────────────┴──────────────────────────┘           │
+//! │                                    │                                       │
+//! │                                    ▼                                       │
+//! │                    mpsc::Sender<WorldCommand>                              │
+//! └────────────────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Parallel Execution Model
+//!
+//! Each channel runs in its own tokio task via [`ChannelRunner`]:
+//!
+//! - **Event injection**: External events arrive via [`ChannelHandle::inject()`]
+//! - **Signal broadcast**: Signals reach all runners via broadcast channel
+//! - **World modification**: Changes go through [`WorldCommand`] queue
+//! - **Read access**: Parallel reads via `Arc<RwLock<World>>`
 //!
 //! # Core Concepts
 //!
@@ -64,17 +80,17 @@
 //! # Example: Basic Usage
 //!
 //! ```
-//! use orcs_runtime::{World, ChannelState};
+//! use orcs_runtime::{World, ChannelConfig, ChannelState};
 //!
 //! // Create World
 //! let mut world = World::new();
 //!
-//! // Create primary channel (root)
-//! let primary = world.create_primary().unwrap();
-//! assert!(world.get(&primary).is_some());
+//! // Create root channel (IO)
+//! let io = world.create_channel(ChannelConfig::interactive());
+//! assert!(world.get(&io).is_some());
 //!
 //! // Spawn child channel
-//! let child = world.spawn(primary).expect("parent exists");
+//! let child = world.spawn(io).expect("parent exists");
 //! assert_eq!(world.channel_count(), 2);
 //!
 //! // Complete the child
@@ -88,19 +104,19 @@
 //! # Example: Channel Tree
 //!
 //! ```
-//! use orcs_runtime::World;
+//! use orcs_runtime::{World, ChannelConfig};
 //!
 //! let mut world = World::new();
-//! let primary = world.create_primary().unwrap();
+//! let io = world.create_channel(ChannelConfig::interactive());
 //!
 //! // Build hierarchical channel tree
-//! let agent = world.spawn(primary).unwrap();
+//! let agent = world.spawn(io).unwrap();
 //! let tool1 = world.spawn(agent).unwrap();
 //! let tool2 = world.spawn(agent).unwrap();
 //!
 //! // Killing agent also kills tool1 and tool2
 //! world.kill(agent, "task cancelled".to_string());
-//! assert_eq!(world.channel_count(), 1); // only primary remains
+//! assert_eq!(world.channel_count(), 1); // only IO remains
 //! ```
 //!
 //! # Error Handling
@@ -131,9 +147,17 @@
 
 #[allow(clippy::module_inception)]
 mod channel;
+mod command;
+mod config;
 mod error;
+mod manager;
+mod runner;
 mod world;
 
 pub use channel::{Channel, ChannelState};
+pub use command::{StateTransition, WorldCommand};
+pub use config::{priority, ChannelConfig};
 pub use error::ChannelError;
+pub use manager::{WorldCommandSender, WorldManager};
+pub use runner::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
 pub use world::World;

@@ -3,15 +3,21 @@
 //! High-level application wrapper that integrates:
 //!
 //! - [`OrcsEngine`] - Core execution engine
-//! - [`EchoWithHilComponent`] - Echo with HIL integration (front-facing)
+//! - [`EchoWithHilComponent`] - Echo with HIL integration (via ChannelRunner)
 //! - [`HumanInput`] - stdin command parsing
 //! - [`OutputSink`] - User output display
 //!
 //! # Flow
 //!
 //! ```text
-//! User Input → EchoWithHilComponent → HIL承認要求 → Y/N待ち → Echo出力
+//! User Input → Event injection → ChannelRunner → EchoWithHilComponent
+//!           → HIL承認要求 → Y/N待ち → Echo出力
 //! ```
+//!
+//! # Architecture
+//!
+//! The EchoWithHilComponent runs inside ChannelRunner (parallel tokio task).
+//! App manages approval state locally - Component communicates via Event/Signal only.
 //!
 //! # Example
 //!
@@ -27,15 +33,23 @@
 //! ```
 
 use crate::AppError;
-use orcs_component::Component;
-use orcs_event::{EventCategory, Request, Signal};
+use orcs_event::{EventCategory, Signal};
 use orcs_runtime::{
-    ConsoleOutput, EchoWithHilComponent, HumanInput, InputCommand, OrcsEngine, OutputSink, World,
+    ChannelConfig, ChannelHandle, ConsoleOutput, EchoWithHilComponent, Event, HumanInput,
+    InputCommand, OrcsEngine, OutputSink, World,
 };
 use orcs_types::ComponentId;
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Pending approval state.
+///
+/// Tracks the last approval request for "y" / "n" without explicit ID.
+#[derive(Debug, Clone)]
+struct PendingApproval {
+    /// Approval ID (UUID).
+    id: String,
+}
 
 /// ORCS Application.
 ///
@@ -44,8 +58,12 @@ pub struct OrcsApp {
     engine: OrcsEngine,
     input: HumanInput,
     output: Arc<dyn OutputSink>,
-    /// Echo component with HIL integration (front-facing for user input).
-    echo: EchoWithHilComponent,
+    /// Handle for injecting events into the IO channel.
+    ///
+    /// This is always available after construction (not Option).
+    io_handle: ChannelHandle,
+    /// Pending approval (for "y" / "n" without explicit ID).
+    pending_approval: Option<PendingApproval>,
 }
 
 impl OrcsApp {
@@ -72,17 +90,36 @@ impl OrcsApp {
         &self.output
     }
 
-    /// Returns a reference to the echo component.
+    /// Returns the IO channel handle for event injection.
+    ///
+    /// The IO handle is always available after construction.
     #[must_use]
-    pub fn echo(&self) -> &EchoWithHilComponent {
-        &self.echo
+    pub fn io_handle(&self) -> &ChannelHandle {
+        &self.io_handle
+    }
+
+    /// Returns the pending approval ID.
+    #[must_use]
+    pub fn pending_approval_id(&self) -> Option<&str> {
+        self.pending_approval.as_ref().map(|p| p.id.as_str())
     }
 
     /// Runs the application in interactive mode.
     ///
+    /// Uses parallel execution infrastructure:
+    /// - WorldManager for concurrent World access
+    /// - ChannelRunner per channel for parallel execution
+    /// - Event injection via channel handles
+    ///
     /// Reads commands from stdin and processes them until quit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Io`] on stdin read errors.
     pub async fn run_interactive(&mut self) -> Result<(), AppError> {
-        tracing::info!("Starting interactive mode");
+        let io_id = self.engine.io_channel();
+        tracing::info!("Starting interactive mode (IO channel: {})", io_id);
+
         self.engine.start();
         self.output
             .info("Interactive mode started. Type 'q' to quit, 'help' for commands.");
@@ -143,7 +180,7 @@ impl OrcsApp {
             InputCommand::Veto => {
                 tracing::warn!("Veto signal sent");
                 let signal = Signal::veto(self.input.principal().clone());
-                self.echo.on_signal(&signal);
+                // Broadcast to all runners (including EchoWithHilComponent)
                 self.engine.signal(signal);
                 return false;
             }
@@ -172,7 +209,7 @@ impl OrcsApp {
                 if input == "help" {
                     self.show_help();
                 } else if !input.is_empty() {
-                    // Send to Echo component for HIL processing
+                    // Send to Echo component via Event injection
                     self.handle_echo_input(input);
                 }
             }
@@ -181,59 +218,64 @@ impl OrcsApp {
         true
     }
 
-    /// Handles user input by sending it to the Echo component.
+    /// Handles user input by injecting an Event to the ChannelRunner.
     ///
-    /// The Echo component will request HIL approval before echoing.
+    /// App generates the approval_id and includes it in the Event payload.
+    /// This allows App to track pending approvals without accessing Component state.
     fn handle_echo_input(&mut self, input: &str) {
-        let channel_id = match self.engine.world().primary() {
-            Some(id) => id,
-            None => {
-                self.output
-                    .error("No primary channel. Application not properly initialized.");
-                return;
-            }
+        // Generate approval_id in App (not Component)
+        let approval_id = uuid::Uuid::new_v4().to_string();
+
+        // Create event with approval_id in payload
+        let event = Event {
+            category: EventCategory::Echo,
+            operation: "echo".to_string(),
+            source: ComponentId::builtin("app"),
+            payload: serde_json::json!({
+                "message": input,
+                "approval_id": approval_id
+            }),
         };
 
-        let request = Request::new(
-            EventCategory::Echo,
-            "echo",
-            ComponentId::builtin("app"),
-            channel_id,
-            Value::String(input.to_string()),
-        );
+        // Try to inject event (non-blocking)
+        match self.io_handle.try_inject(event) {
+            Ok(()) => {
+                // Store for later use with "y" command
+                self.pending_approval = Some(PendingApproval {
+                    id: approval_id.clone(),
+                });
 
-        match self.echo.on_request(&request) {
-            Ok(response) => {
-                if let Some(approval_id) = response.get("approval_id").and_then(|v| v.as_str()) {
-                    self.output.info(&format!(
-                        "Awaiting approval for: '{}' [approval_id: {}]",
-                        input, approval_id
-                    ));
-                    self.output.info("Type 'y' to approve or 'n' to reject");
-                }
+                self.output.info(&format!(
+                    "Awaiting approval for: '{}' [id: {}]",
+                    input, approval_id
+                ));
+                self.output.info("Type 'y' to approve or 'n' to reject");
             }
             Err(e) => {
-                self.output.error(&format!("Echo error: {}", e));
+                self.output
+                    .error(&format!("Failed to inject event: {:?}", e));
             }
         }
     }
 
     /// Handles an approve command.
+    ///
+    /// Broadcasts an Approve signal via the engine.
+    /// Uses pending approval if no explicit ID provided.
     fn handle_approve(&mut self, approval_id: Option<&str>) {
-        // Use pending approval ID if not specified (clone to avoid borrow issues)
-        let id: Option<String> = approval_id
+        let id = approval_id
             .map(String::from)
-            .or_else(|| self.echo.pending_approval_id().map(String::from));
+            .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
         if let Some(id) = id {
             let signal = Signal::approve(&id, self.input.principal().clone());
-            // Send to Echo component (which has internal HIL)
-            self.echo.on_signal(&signal);
+            // Broadcast to all runners (ChannelRunner delivers to Component)
+            self.engine.signal(signal);
             self.output.show_approved(&id);
 
-            // Check if echo produced a result
-            if let Some(result) = self.echo.last_result() {
-                self.output.info(result);
+            // Clear pending approval after use
+            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(&id) {
+                self.pending_approval = None;
             }
         } else {
             self.output.warn("No pending approval. Use: y <id>");
@@ -241,21 +283,23 @@ impl OrcsApp {
     }
 
     /// Handles a reject command.
+    ///
+    /// Broadcasts a Reject signal via the engine.
+    /// Uses pending approval if no explicit ID provided.
     fn handle_reject(&mut self, approval_id: Option<&str>, reason: Option<String>) {
-        // Use pending approval ID if not specified (clone to avoid borrow issues)
-        let id: Option<String> = approval_id
+        let id = approval_id
             .map(String::from)
-            .or_else(|| self.echo.pending_approval_id().map(String::from));
+            .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
         if let Some(id) = id {
             let signal = Signal::reject(&id, reason.clone(), self.input.principal().clone());
-            // Send to Echo component (which has internal HIL)
-            self.echo.on_signal(&signal);
+            // Broadcast to all runners (ChannelRunner delivers to Component)
+            self.engine.signal(signal);
             self.output.show_rejected(&id, reason.as_deref());
 
-            // Check if echo produced a result (rejection message)
-            if let Some(result) = self.echo.last_result() {
-                self.output.info(result);
+            // Clear pending approval after use
+            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(&id) {
+                self.pending_approval = None;
             }
         } else {
             self.output
@@ -310,13 +354,24 @@ impl OrcsAppBuilder {
     }
 
     /// Builds the application.
+    ///
+    /// Creates the World, Engine, and spawns the IO channel runner with
+    /// EchoWithHilComponent. All components are initialized at build time.
     pub fn build(self) -> Result<OrcsApp, AppError> {
-        // Create World with primary channel
+        // Create World with IO channel
         let mut world = World::new();
-        world.create_primary()?;
+        let io = world.create_channel(ChannelConfig::interactive());
 
-        // Create engine
-        let engine = OrcsEngine::new(world);
+        // Create engine with IO channel (required)
+        let mut engine = OrcsEngine::new(world, io);
+
+        // Spawn runner for IO channel with EchoWithHilComponent
+        let echo_component = Box::new(EchoWithHilComponent::new());
+        let io_handle = engine.spawn_runner(io, echo_component);
+        tracing::info!(
+            "IO channel runner spawned with EchoWithHilComponent: {}",
+            io
+        );
 
         // Create output sink
         let output: Arc<dyn OutputSink> = self.output.unwrap_or_else(|| {
@@ -330,15 +385,14 @@ impl OrcsAppBuilder {
         // Create input handler
         let input = HumanInput::new();
 
-        // Create Echo component with HIL integration
-        let echo = EchoWithHilComponent::new();
-        tracing::debug!("EchoWithHilComponent created");
+        tracing::debug!("OrcsApp created (fully initialized)");
 
         Ok(OrcsApp {
             engine,
             input,
             output,
-            echo,
+            io_handle,
+            pending_approval: None,
         })
     }
 }
@@ -353,44 +407,41 @@ impl Default for OrcsAppBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn builder_default() {
+    #[tokio::test]
+    async fn builder_default() {
         let app = OrcsApp::builder().build().unwrap();
-        // Echo component should be created
-        assert!(!app.echo().has_pending());
+        assert!(app.pending_approval_id().is_none());
     }
 
-    #[test]
-    fn builder_verbose() {
+    #[tokio::test]
+    async fn builder_verbose() {
         let app = OrcsApp::builder().verbose().build().unwrap();
-        assert!(!app.echo().has_pending());
+        assert!(app.pending_approval_id().is_none());
     }
 
-    #[test]
-    fn app_engine_access() {
+    #[tokio::test]
+    async fn app_engine_access() {
         let app = OrcsApp::builder().build().unwrap();
         // Engine is not running until run() is called
         assert!(!app.engine().is_running());
-        // But we can access the world
-        assert!(app.engine().world().primary().is_some());
     }
 
-    #[test]
-    fn app_echo_input_creates_pending() {
-        let mut app = OrcsApp::builder().build().unwrap();
+    #[tokio::test]
+    async fn app_engine_parallel_access() {
+        let app = OrcsApp::builder().build().unwrap();
+        // WorldManager starts immediately in new(), io_channel is always set
+        let io = app.engine().io_channel();
+        // Verify the channel exists in World
+        let world = app.engine().world_read();
+        let w = world.read().await;
+        assert!(w.get(&io).is_some());
+    }
 
-        // Simulate user input
-        let channel_id = app.engine().world().primary().unwrap();
-        let request = Request::new(
-            EventCategory::Echo,
-            "echo",
-            ComponentId::builtin("test"),
-            channel_id,
-            Value::String("hello".into()),
-        );
-
-        let result = app.echo.on_request(&request);
-        assert!(result.is_ok());
-        assert!(app.echo.has_pending());
+    #[tokio::test]
+    async fn app_io_handle_available() {
+        let app = OrcsApp::builder().build().unwrap();
+        // io_handle is set at build time (not Option)
+        let io_channel = app.engine().io_channel();
+        assert_eq!(app.io_handle().id, io_channel);
     }
 }

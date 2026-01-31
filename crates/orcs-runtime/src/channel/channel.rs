@@ -4,6 +4,13 @@
 //! system. Channels form a tree structure where child channels inherit
 //! context from their parents.
 //!
+//! # Configuration
+//!
+//! Channel behavior is controlled by [`ChannelConfig`]:
+//!
+//! - **priority**: Scheduling priority (0-255)
+//! - **can_spawn**: Whether child channels can be spawned
+//!
 //! # State Machine
 //!
 //! ```text
@@ -31,17 +38,19 @@
 //! # Example
 //!
 //! ```
-//! use orcs_runtime::{Channel, ChannelState};
+//! use orcs_runtime::{Channel, ChannelConfig, ChannelState};
 //! use orcs_types::ChannelId;
 //!
 //! let id = ChannelId::new();
-//! let mut channel = Channel::new(id, None);
+//! let mut channel = Channel::new(id, None, ChannelConfig::interactive());
 //!
 //! assert!(channel.is_running());
+//! assert_eq!(channel.priority(), 255);
 //! assert!(channel.complete());
 //! assert_eq!(channel.state(), &ChannelState::Completed);
 //! ```
 
+use super::config::ChannelConfig;
 use orcs_types::ChannelId;
 use std::collections::HashSet;
 
@@ -97,6 +106,7 @@ pub enum ChannelState {
 /// A `Channel` represents an isolated execution context that can:
 /// - Track its current state ([`ChannelState`])
 /// - Maintain parent-child relationships
+/// - Control behavior via [`ChannelConfig`]
 /// - Transition through its lifecycle
 ///
 /// # Parent-Child Relationships
@@ -106,24 +116,32 @@ pub enum ChannelState {
 /// - Child channels reference their parent
 /// - A channel tracks all its children
 ///
+/// # Configuration
+///
+/// Channel behavior is controlled by [`ChannelConfig`]:
+/// - **priority**: Determines scheduling order (0-255, higher = more priority)
+/// - **can_spawn**: Whether this channel can create children
+///
 /// # Example
 ///
 /// ```
-/// use orcs_runtime::{Channel, ChannelState};
+/// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
 /// use orcs_types::ChannelId;
 ///
 /// // Create a root channel
 /// let root_id = ChannelId::new();
-/// let mut root = Channel::new(root_id, None);
+/// let mut root = Channel::new(root_id, None, ChannelConfig::interactive());
+/// assert_eq!(root.priority(), 255);
+/// assert!(root.can_spawn());
 ///
-/// // Create a child channel
+/// // Create a background child channel
 /// let child_id = ChannelId::new();
-/// let child = Channel::new(child_id, Some(root_id));
+/// let child = Channel::new(child_id, Some(root_id), ChannelConfig::background());
+/// assert_eq!(child.priority(), 10);
+/// assert!(!child.can_spawn());
 ///
-/// // Register the child with parent
 /// root.add_child(child_id);
 /// assert!(root.has_children());
-/// assert_eq!(child.parent(), Some(root_id));
 /// ```
 #[derive(Debug)]
 pub struct Channel {
@@ -131,6 +149,7 @@ pub struct Channel {
     state: ChannelState,
     parent: Option<ChannelId>,
     children: HashSet<ChannelId>,
+    config: ChannelConfig,
 }
 
 impl Channel {
@@ -140,28 +159,52 @@ impl Channel {
     ///
     /// * `id` - Unique identifier for this channel
     /// * `parent` - Parent channel ID, or `None` for root channels
+    /// * `config` - Configuration controlling channel behavior
     ///
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::Channel;
+    /// use orcs_runtime::{Channel, ChannelConfig};
     /// use orcs_types::ChannelId;
     ///
-    /// // Root channel (no parent)
-    /// let root = Channel::new(ChannelId::new(), None);
+    /// // Primary channel (no parent, highest priority)
+    /// let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+    /// assert_eq!(root.priority(), 255);
     ///
-    /// // Child channel
+    /// // Background child channel
     /// let parent_id = ChannelId::new();
-    /// let child = Channel::new(ChannelId::new(), Some(parent_id));
+    /// let child = Channel::new(ChannelId::new(), Some(parent_id), ChannelConfig::background());
+    /// assert_eq!(child.priority(), 10);
     /// ```
     #[must_use]
-    pub fn new(id: ChannelId, parent: Option<ChannelId>) -> Self {
+    pub fn new(id: ChannelId, parent: Option<ChannelId>, config: ChannelConfig) -> Self {
         Self {
             id,
             state: ChannelState::Running,
             parent,
             children: HashSet::new(),
+            config,
         }
+    }
+
+    /// Returns the scheduling priority (0-255).
+    ///
+    /// Higher values indicate higher priority for scheduling.
+    #[must_use]
+    pub fn priority(&self) -> u8 {
+        self.config.priority()
+    }
+
+    /// Returns whether this channel can spawn children.
+    #[must_use]
+    pub fn can_spawn(&self) -> bool {
+        self.config.can_spawn()
+    }
+
+    /// Returns a reference to the channel's configuration.
+    #[must_use]
+    pub fn config(&self) -> &ChannelConfig {
+        &self.config
     }
 
     /// Returns the channel's unique identifier.
@@ -188,10 +231,10 @@ impl Channel {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{Channel, ChannelState};
+    /// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
     /// use orcs_types::ChannelId;
     ///
-    /// let mut channel = Channel::new(ChannelId::new(), None);
+    /// let mut channel = Channel::new(ChannelId::new(), None, ChannelConfig::default());
     /// assert!(channel.complete());
     /// assert!(!channel.complete()); // Already completed
     /// ```
@@ -222,10 +265,10 @@ impl Channel {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{Channel, ChannelState};
+    /// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
     /// use orcs_types::ChannelId;
     ///
-    /// let mut channel = Channel::new(ChannelId::new(), None);
+    /// let mut channel = Channel::new(ChannelId::new(), None, ChannelConfig::default());
     /// assert!(channel.abort("user cancelled".to_string()));
     ///
     /// if let ChannelState::Aborted { reason } = channel.state() {
@@ -244,7 +287,7 @@ impl Channel {
 
     /// Returns the parent channel's ID, if any.
     ///
-    /// Returns `None` for root/primary channels.
+    /// Returns `None` for root channels.
     #[must_use]
     pub fn parent(&self) -> Option<ChannelId> {
         self.parent
@@ -397,7 +440,7 @@ mod tests {
     #[test]
     fn channel_creation() {
         let id = ChannelId::new();
-        let channel = Channel::new(id, None);
+        let channel = Channel::new(id, None, ChannelConfig::interactive());
 
         assert_eq!(channel.id(), id);
         assert!(channel.is_running());
@@ -409,7 +452,7 @@ mod tests {
     fn channel_with_parent() {
         let parent_id = ChannelId::new();
         let child_id = ChannelId::new();
-        let channel = Channel::new(child_id, Some(parent_id));
+        let channel = Channel::new(child_id, Some(parent_id), ChannelConfig::default());
 
         assert_eq!(channel.parent(), Some(parent_id));
     }
@@ -417,7 +460,7 @@ mod tests {
     #[test]
     fn channel_state_transition() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.is_running());
 
@@ -433,7 +476,7 @@ mod tests {
     #[test]
     fn channel_abort_transition() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.abort("reason".into()));
         assert!(!channel.is_running());
@@ -449,7 +492,7 @@ mod tests {
         let child1 = ChannelId::new();
         let child2 = ChannelId::new();
 
-        let mut parent = Channel::new(parent_id, None);
+        let mut parent = Channel::new(parent_id, None, ChannelConfig::interactive());
         assert!(!parent.has_children());
 
         parent.add_child(child1);
@@ -461,12 +504,47 @@ mod tests {
         assert_eq!(parent.children().len(), 1);
     }
 
+    #[test]
+    fn channel_priority() {
+        let id = ChannelId::new();
+
+        let primary = Channel::new(id, None, ChannelConfig::interactive());
+        assert_eq!(primary.priority(), 255);
+
+        let background = Channel::new(ChannelId::new(), None, ChannelConfig::background());
+        assert_eq!(background.priority(), 10);
+
+        let tool = Channel::new(ChannelId::new(), None, ChannelConfig::tool());
+        assert_eq!(tool.priority(), 100);
+    }
+
+    #[test]
+    fn channel_can_spawn() {
+        let primary = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        assert!(primary.can_spawn());
+
+        let background = Channel::new(ChannelId::new(), None, ChannelConfig::background());
+        assert!(!background.can_spawn());
+
+        let tool = Channel::new(ChannelId::new(), None, ChannelConfig::tool());
+        assert!(tool.can_spawn());
+    }
+
+    #[test]
+    fn channel_config_access() {
+        let config = ChannelConfig::new(200, false);
+        let channel = Channel::new(ChannelId::new(), None, config);
+
+        assert_eq!(channel.config().priority(), 200);
+        assert!(!channel.config().can_spawn());
+    }
+
     // === M2 HIL State Tests ===
 
     #[test]
     fn channel_pause_resume() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.is_running());
         assert!(!channel.is_paused());
@@ -489,7 +567,7 @@ mod tests {
     #[test]
     fn channel_await_approval() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.await_approval("req-123"));
         assert!(channel.is_awaiting_approval());
@@ -508,7 +586,7 @@ mod tests {
     #[test]
     fn channel_resolve_approval() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.await_approval("req-123"));
 
@@ -523,7 +601,7 @@ mod tests {
     #[test]
     fn channel_abort_from_awaiting() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
 
         assert!(channel.await_approval("req-123"));
         assert!(channel.abort("rejected by user".to_string()));
@@ -539,24 +617,24 @@ mod tests {
     #[test]
     fn channel_terminal_state() {
         let id1 = ChannelId::new();
-        let mut ch1 = Channel::new(id1, None);
+        let mut ch1 = Channel::new(id1, None, ChannelConfig::default());
         ch1.complete();
         assert!(ch1.is_terminal());
 
         let id2 = ChannelId::new();
-        let mut ch2 = Channel::new(id2, None);
+        let mut ch2 = Channel::new(id2, None, ChannelConfig::default());
         ch2.abort("test".into());
         assert!(ch2.is_terminal());
 
         let id3 = ChannelId::new();
-        let ch3 = Channel::new(id3, None);
+        let ch3 = Channel::new(id3, None, ChannelConfig::default());
         assert!(!ch3.is_terminal());
     }
 
     #[test]
     fn channel_cannot_pause_from_terminal() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
         channel.complete();
 
         assert!(!channel.pause());
@@ -566,7 +644,7 @@ mod tests {
     #[test]
     fn channel_cannot_complete_from_paused() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None);
+        let mut channel = Channel::new(id, None, ChannelConfig::default());
         assert!(channel.pause());
 
         // Must resume first
