@@ -7,6 +7,8 @@ members = [
     "crates/orcs-component",
     # Runtime Layer (internal)
     "crates/orcs-runtime",
+    # Plugin Layer
+    "crates/orcs-lua",
     # Application Layer
     "crates/orcs-app",
     # Frontend Layer
@@ -26,6 +28,8 @@ orcs-event = { path = "crates/orcs-event" }
 orcs-component = { path = "crates/orcs-component" }
 # Runtime Layer
 orcs-runtime = { path = "crates/orcs-runtime" }
+# Plugin Layer
+orcs-lua = { path = "crates/orcs-lua" }
 # Application Layer
 orcs-app = { path = "crates/orcs-app" }
 
