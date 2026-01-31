@@ -91,6 +91,7 @@ pub mod channel;
 pub mod components;
 pub mod engine;
 pub mod io;
+pub mod session;
 
 // Re-exports for convenience
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
@@ -104,6 +105,9 @@ pub use components::{
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};
+pub use session::{
+    LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError, SyncState, SyncStatus,
+};
 
 // Re-export Principal from orcs_types (it's part of the public API)
 pub use orcs_types::Principal;
