@@ -139,6 +139,10 @@ pub trait ChannelMut: ChannelCore {
     /// Returns `true` if transition succeeded, `false` if not in Paused state.
     fn resume(&mut self) -> bool;
 
+    // TODO: Approval-related methods are HIL-specific. Consider extracting
+    // to a separate trait (e.g., `Approvable`) or moving state management
+    // to HilComponent with Event/Signal coordination.
+
     /// Transitions to AwaitingApproval state.
     ///
     /// Returns `true` if transition succeeded, `false` if not in Running state.

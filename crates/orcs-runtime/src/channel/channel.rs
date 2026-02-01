@@ -73,6 +73,10 @@ use std::collections::HashSet;
 /// | Paused | Running | [`ChannelMut::resume()`] |
 /// | AwaitingApproval | Running | [`ChannelMut::resolve_approval()`] |
 /// | AwaitingApproval | Aborted | [`ChannelMut::abort()`] (rejected) |
+// TODO: AwaitingApproval state is HIL-specific and tightly coupled to Channel.
+// Consider moving approval state management to HilComponent or a dedicated
+// ApprovalManager, using Event/Signal for state coordination instead of
+// embedding it directly in ChannelState.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Channel is actively running.
@@ -86,6 +90,10 @@ pub enum ChannelState {
     /// Channel is waiting for Human approval (HIL).
     ///
     /// Contains the request ID that needs approval.
+    ///
+    /// TODO: This variant couples HIL logic directly into Channel state.
+    /// Future refactor: manage approval state in HilComponent, use Signal
+    /// to notify Channel of blocking/unblocking.
     AwaitingApproval {
         /// ID of the approval request.
         request_id: String,
