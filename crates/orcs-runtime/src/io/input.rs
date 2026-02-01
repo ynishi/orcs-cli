@@ -137,6 +137,7 @@ pub struct HumanInput {
     principal: Principal,
 }
 
+#[allow(deprecated)]
 impl HumanInput {
     /// Creates a new HumanInput handler.
     #[must_use]
@@ -187,6 +188,7 @@ impl HumanInput {
     }
 }
 
+#[allow(deprecated)]
 impl Default for HumanInput {
     fn default() -> Self {
         Self::new()
@@ -194,6 +196,7 @@ impl Default for HumanInput {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use orcs_event::SignalKind;

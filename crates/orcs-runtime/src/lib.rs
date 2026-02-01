@@ -105,6 +105,7 @@ pub use components::{
     NoopComponent,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
+#[allow(deprecated)]
 pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};
 pub use session::{
     default_session_path, LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError,

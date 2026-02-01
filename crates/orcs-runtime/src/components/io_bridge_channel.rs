@@ -57,27 +57,24 @@
 //! ```
 
 use crate::io::{IOOutput, IOPort, InputCommand, InputParser};
-use orcs_component::{Component, ComponentError, EventCategory, Status};
-use orcs_event::{Request, Signal, SignalKind, SignalResponse};
-use orcs_types::{ChannelId, ComponentId, Principal, SignalScope};
-use serde_json::Value;
+use orcs_event::{Signal, SignalKind};
+use orcs_types::{ChannelId, Principal, SignalScope};
 
-/// IO Bridge Channel - Bridge between View and Model layers.
+/// IO Bridge Channel - Pure bridge between View and Model layers.
 ///
-/// Owns an IOPort and converts between IO types and internal events.
-/// This is a pure bridge - it does not manage HIL state like approval IDs.
+/// Converts between IO types (IOInput/IOOutput) and internal events (Signal).
+/// This is a stateless transformation layer - no Component implementation.
+///
+/// For Component-level behavior (HIL, lifecycle), use ClientComponent
+/// which owns this bridge.
 ///
 /// The parser can be injected for testing or customization.
 pub struct IOBridgeChannel {
-    /// Component identifier.
-    id: ComponentId,
-    /// Current status.
-    status: Status,
     /// IO port for communication with View layer.
     io_port: IOPort,
     /// Principal representing the Human user.
     principal: Principal,
-    /// Channel ID this component belongs to.
+    /// Channel ID this belongs to.
     channel_id: ChannelId,
     /// Input parser for converting text to commands.
     parser: InputParser,
@@ -102,26 +99,10 @@ impl IOBridgeChannel {
     pub fn with_parser(io_port: IOPort, principal: Principal, parser: InputParser) -> Self {
         let channel_id = io_port.channel_id();
         Self {
-            id: ComponentId::builtin("io-bridge-channel"),
-            status: Status::Idle,
             io_port,
             principal,
             channel_id,
             parser,
-        }
-    }
-
-    /// Creates a new IOBridgeChannel with a custom component ID.
-    #[must_use]
-    pub fn with_id(id: ComponentId, io_port: IOPort, principal: Principal) -> Self {
-        let channel_id = io_port.channel_id();
-        Self {
-            id,
-            status: Status::Idle,
-            io_port,
-            principal,
-            channel_id,
-            parser: InputParser,
         }
     }
 
@@ -326,123 +307,9 @@ impl IOBridgeChannel {
     }
 }
 
-impl Component for IOBridgeChannel {
-    fn id(&self) -> &ComponentId {
-        &self.id
-    }
-
-    fn subscriptions(&self) -> &[EventCategory] {
-        // Subscribe to Hil for approval notifications, Lifecycle for system events
-        &[EventCategory::Hil, EventCategory::Lifecycle]
-    }
-
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-        match request.operation.as_str() {
-            "display" => {
-                // Display a message (from other components)
-                let message = request
-                    .payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ComponentError::InvalidPayload("Missing message".into()))?;
-
-                let style = request
-                    .payload
-                    .get("style")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("info");
-
-                let output = match style {
-                    "error" => IOOutput::error(message),
-                    "warn" => IOOutput::warn(message),
-                    "success" => IOOutput::success(message),
-                    "debug" => IOOutput::debug(message),
-                    _ => IOOutput::info(message),
-                };
-
-                // Use try_send since we're in a sync context
-                self.io_port
-                    .try_send(output)
-                    .map_err(|e| ComponentError::ExecutionFailed(format!("Send failed: {}", e)))?;
-
-                Ok(Value::Null)
-            }
-            "prompt" => {
-                // Display a prompt
-                let message = request
-                    .payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ComponentError::InvalidPayload("Missing message".into()))?;
-
-                self.io_port
-                    .try_send(IOOutput::prompt(message))
-                    .map_err(|e| ComponentError::ExecutionFailed(format!("Send failed: {}", e)))?;
-
-                Ok(Value::Null)
-            }
-            _ => Err(ComponentError::NotSupported(request.operation.clone())),
-        }
-    }
-
-    fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        match &signal.kind {
-            SignalKind::Veto => {
-                self.abort();
-                SignalResponse::Abort
-            }
-            SignalKind::Cancel => {
-                if signal.affects_channel(self.channel_id) {
-                    self.abort();
-                    SignalResponse::Abort
-                } else {
-                    SignalResponse::Ignored
-                }
-            }
-            SignalKind::Pause => {
-                if signal.affects_channel(self.channel_id) {
-                    self.status = Status::Paused;
-                    SignalResponse::Handled
-                } else {
-                    SignalResponse::Ignored
-                }
-            }
-            SignalKind::Resume => {
-                if signal.affects_channel(self.channel_id) && matches!(self.status, Status::Paused)
-                {
-                    self.status = Status::Idle;
-                    SignalResponse::Handled
-                } else {
-                    SignalResponse::Ignored
-                }
-            }
-            _ => SignalResponse::Ignored,
-        }
-    }
-
-    fn abort(&mut self) {
-        self.status = Status::Aborted;
-    }
-
-    fn init(&mut self) -> Result<(), ComponentError> {
-        self.status = Status::Idle;
-        Ok(())
-    }
-
-    fn shutdown(&mut self) {
-        self.status = Status::Completed;
-    }
-}
-
 impl std::fmt::Debug for IOBridgeChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IOBridgeChannel")
-            .field("id", &self.id)
-            .field("status", &self.status)
             .field("channel_id", &self.channel_id)
             .finish_non_exhaustive()
     }
@@ -471,9 +338,11 @@ mod tests {
 
     #[test]
     fn io_bridge_channel_creation() {
-        let (channel, _, _) = setup();
-        assert_eq!(channel.id().name, "io-bridge-channel");
-        assert_eq!(channel.status(), Status::Idle);
+        let channel_id = ChannelId::new();
+        let (port, _, _) = IOPort::with_defaults(channel_id);
+        let channel = IOBridgeChannel::new(port, test_principal());
+        // Pure bridge - stores channel_id from port
+        assert_eq!(channel.channel_id(), channel_id);
     }
 
     #[test]
@@ -624,113 +493,10 @@ mod tests {
     }
 
     #[test]
-    fn on_signal_veto() {
-        let (mut channel, _, _) = setup();
-
-        let signal = Signal::veto(test_principal());
-        let response = channel.on_signal(&signal);
-
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(channel.status(), Status::Aborted);
-    }
-
-    #[test]
-    fn on_signal_cancel_own_channel() {
-        let (mut channel, _, _) = setup();
-        let channel_id = channel.channel_id();
-
-        let signal = Signal::cancel(channel_id, test_principal());
-        let response = channel.on_signal(&signal);
-
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(channel.status(), Status::Aborted);
-    }
-
-    #[test]
-    fn on_signal_cancel_other_channel() {
-        let (mut channel, _, _) = setup();
-        let other_channel = ChannelId::new();
-
-        let signal = Signal::cancel(other_channel, test_principal());
-        let response = channel.on_signal(&signal);
-
-        assert_eq!(response, SignalResponse::Ignored);
-        assert_eq!(channel.status(), Status::Idle);
-    }
-
-    #[test]
-    fn on_signal_pause_resume() {
-        let (mut channel, _, _) = setup();
-        let channel_id = channel.channel_id();
-
-        // Pause
-        let signal = Signal::pause(channel_id, test_principal());
-        let response = channel.on_signal(&signal);
-        assert_eq!(response, SignalResponse::Handled);
-        assert_eq!(channel.status(), Status::Paused);
-
-        // Resume
-        let signal = Signal::resume(channel_id, test_principal());
-        let response = channel.on_signal(&signal);
-        assert_eq!(response, SignalResponse::Handled);
-        assert_eq!(channel.status(), Status::Idle);
-    }
-
-    #[test]
-    fn on_request_display() {
-        let (mut channel, _, mut output_handle) = setup();
-
-        let request = Request::new(
-            EventCategory::Lifecycle,
-            "display",
-            ComponentId::builtin("test"),
-            channel.channel_id(),
-            serde_json::json!({ "message": "Hello", "style": "info" }),
-        );
-
-        let result = channel.on_request(&request);
-        assert!(result.is_ok());
-
-        let output = output_handle.try_recv();
-        assert!(output.is_some());
-    }
-
-    #[test]
-    fn on_request_prompt() {
-        let (mut channel, _, mut output_handle) = setup();
-
-        let request = Request::new(
-            EventCategory::Lifecycle,
-            "prompt",
-            ComponentId::builtin("test"),
-            channel.channel_id(),
-            serde_json::json!({ "message": "Enter value:" }),
-        );
-
-        let result = channel.on_request(&request);
-        assert!(result.is_ok());
-
-        let output = output_handle.try_recv();
-        assert!(output.is_some());
-        assert!(matches!(output.unwrap(), IOOutput::Prompt { .. }));
-    }
-
-    #[test]
-    fn init_shutdown() {
-        let (mut channel, _, _) = setup();
-
-        channel.init().unwrap();
-        assert_eq!(channel.status(), Status::Idle);
-
-        channel.shutdown();
-        assert_eq!(channel.status(), Status::Completed);
-    }
-
-    #[test]
     fn debug_impl() {
         let (channel, _, _) = setup();
         let debug_str = format!("{:?}", channel);
         assert!(debug_str.contains("IOBridgeChannel"));
-        assert!(debug_str.contains("io-bridge-channel"));
+        assert!(debug_str.contains("channel_id"));
     }
 }
