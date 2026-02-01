@@ -64,6 +64,7 @@
 //! ```
 
 use crate::AppError;
+use orcs_component::Component;
 use orcs_event::Signal;
 use orcs_lua::ScriptLoader;
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
@@ -663,11 +664,13 @@ impl OrcsAppBuilder {
         // Spawn ClientRunner for IO channel with LuaComponent (claude_cli)
         let lua_component = ScriptLoader::load_embedded("claude_cli")
             .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {}", e)))?;
+        let component_id = lua_component.id().clone();
         let _handle =
             engine.spawn_client_runner(io, Box::new(lua_component), io_port, principal.clone());
         tracing::info!(
-            "IO channel ClientRunner spawned with claude_cli LuaComponent: {}",
-            io
+            "ClientRunner spawned: channel={}, component={}",
+            io,
+            component_id.fqn()
         );
 
         // Load or create session

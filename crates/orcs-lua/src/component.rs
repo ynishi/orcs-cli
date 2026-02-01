@@ -12,8 +12,8 @@ use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Mutex;
+use tokio::process::Command;
 
 /// A component implemented in Lua.
 ///
@@ -225,14 +225,28 @@ impl LuaComponent {
         let orcs_table = lua.create_table()?;
 
         // orcs.exec(cmd) -> {ok, stdout, stderr, code}
+        // Uses tokio::process::Command for non-blocking execution.
+        // When called from spawn_blocking context, uses Handle::current() to run async code.
         let exec_fn = lua.create_function(|lua, cmd: String| {
             tracing::debug!("Lua exec: {}", cmd);
 
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+            // Try to get current tokio runtime handle for async execution.
+            // If running in spawn_blocking context, this will succeed.
+            let output = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    // We have a runtime handle - run async command
+                    handle.block_on(async { Command::new("sh").arg("-c").arg(&cmd).output().await })
+                }
+                Err(_) => {
+                    // No runtime available - fallback to sync execution
+                    tracing::warn!("No tokio runtime available, using sync execution");
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .output()
+                }
+            }
+            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
 
             let result = lua.create_table()?;
             result.set("ok", output.status.success())?;
@@ -497,5 +511,183 @@ mod tests {
 
         let result = LuaComponent::from_script(script);
         assert!(result.is_err());
+    }
+
+    // --- orcs.exec tests ---
+
+    mod exec_tests {
+        use super::*;
+
+        /// Helper to create a component that uses orcs.exec
+        fn create_exec_component(cmd: &str) -> LuaComponent {
+            let script = format!(
+                r#"
+                return {{
+                    id = "exec-test",
+                    subscriptions = {{"Echo"}},
+                    on_request = function(req)
+                        local result = orcs.exec("{}")
+                        -- Always return success=true so we can inspect the exec result
+                        return {{
+                            success = true,
+                            data = {{
+                                stdout = result.stdout,
+                                stderr = result.stderr,
+                                code = result.code,
+                                ok = result.ok
+                            }}
+                        }}
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }}
+            "#,
+                cmd
+            );
+            LuaComponent::from_script(&script).expect("load exec script")
+        }
+
+        #[test]
+        fn exec_echo_command_sync() {
+            // Test orcs.exec in sync context (no tokio runtime)
+            let mut component = create_exec_component("echo 'hello world'");
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(data["ok"].as_bool().unwrap_or(false));
+            assert!(data["stdout"].as_str().unwrap().contains("hello world"));
+            assert_eq!(data["code"].as_i64(), Some(0));
+        }
+
+        #[test]
+        fn exec_failing_command_sync() {
+            // Test orcs.exec with a failing command
+            let mut component = create_exec_component("exit 42");
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(!data["ok"].as_bool().unwrap_or(true));
+            assert_eq!(data["code"].as_i64(), Some(42));
+        }
+
+        #[test]
+        fn exec_stderr_captured() {
+            // Test that stderr is captured
+            let mut component = create_exec_component("echo 'error output' >&2");
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(data["stderr"].as_str().unwrap().contains("error output"));
+        }
+
+        #[tokio::test]
+        async fn exec_in_async_context() {
+            // Test orcs.exec when called from async context (via spawn_blocking)
+            let mut component = create_exec_component("echo 'async test'");
+
+            let req = create_test_request("test", JsonValue::Null);
+
+            // Simulate spawn_blocking context like ClientRunner does
+            let result = tokio::task::spawn_blocking(move || component.on_request(&req))
+                .await
+                .expect("spawn_blocking should succeed");
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(data["ok"].as_bool().unwrap_or(false));
+            assert!(data["stdout"].as_str().unwrap().contains("async test"));
+        }
+
+        #[tokio::test]
+        async fn exec_complex_command_in_async() {
+            // Test with a more complex command involving pipes
+            let mut component = create_exec_component("echo 'line1\\nline2' | wc -l");
+
+            let req = create_test_request("test", JsonValue::Null);
+
+            let result = tokio::task::spawn_blocking(move || component.on_request(&req))
+                .await
+                .expect("spawn_blocking should succeed");
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(data["ok"].as_bool().unwrap_or(false));
+            // wc -l should return "2" (with possible whitespace)
+            let stdout = data["stdout"].as_str().unwrap().trim();
+            assert!(stdout.contains('2') || stdout == "1"); // Different systems may count differently
+        }
+
+        #[test]
+        fn exec_with_special_characters() {
+            // Test command with special characters
+            let script = r#"
+                return {
+                    id = "exec-special",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        local result = orcs.exec("echo \"quotes and 'apostrophes'\"")
+                        return {
+                            success = result.ok,
+                            data = { stdout = result.stdout }
+                        }
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }
+            "#;
+
+            let mut component = LuaComponent::from_script(script).expect("load script");
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            let data = result.unwrap();
+            assert!(data["stdout"].as_str().unwrap().contains("quotes"));
+        }
+    }
+
+    // --- orcs.log tests ---
+
+    mod log_tests {
+        use super::*;
+
+        #[test]
+        fn log_levels_work() {
+            let script = r#"
+                return {
+                    id = "log-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        orcs.log("debug", "debug message")
+                        orcs.log("info", "info message")
+                        orcs.log("warn", "warn message")
+                        orcs.log("error", "error message")
+                        orcs.log("unknown", "unknown level")
+                        return { success = true }
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }
+            "#;
+
+            let mut component = LuaComponent::from_script(script).expect("load script");
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            // Should complete without error (log output goes to tracing)
+            assert!(result.is_ok());
+        }
     }
 }

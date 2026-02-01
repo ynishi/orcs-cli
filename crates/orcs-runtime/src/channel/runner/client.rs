@@ -39,9 +39,10 @@ use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::World;
 use crate::components::IOBridge;
 use crate::io::{IOPort, InputCommand};
-use orcs_component::Component;
+use orcs_component::{Component, ComponentError};
 use orcs_event::{EventCategory, Request, Signal, SignalKind};
 use orcs_types::{ChannelId, Principal};
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -52,6 +53,75 @@ const EVENT_BUFFER_SIZE: usize = 64;
 
 /// Maximum queue size for events received while paused.
 const PAUSED_QUEUE_MAX_SIZE: usize = 128;
+
+// --- Response handling ---
+
+/// JSON field names for component responses.
+mod response_fields {
+    pub const STATUS: &str = "status";
+    pub const PENDING_APPROVAL: &str = "pending_approval";
+    pub const APPROVAL_ID: &str = "approval_id";
+    pub const MESSAGE: &str = "message";
+    pub const RESPONSE: &str = "response";
+    pub const DATA: &str = "data";
+}
+
+/// Categorized component response for display routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentResponse<'a> {
+    /// Awaiting human approval with ID and description.
+    PendingApproval {
+        approval_id: &'a str,
+        description: &'a str,
+    },
+    /// Direct text response to display.
+    TextResponse(&'a str),
+    /// No displayable content.
+    Empty,
+}
+
+impl<'a> ComponentResponse<'a> {
+    /// Parses a JSON response into a categorized response.
+    ///
+    /// Supports multiple formats:
+    /// - `{ "status": "pending_approval", "approval_id": "...", "message": "..." }`
+    /// - `{ "response": "..." }`
+    /// - `{ "data": { "response": "..." } }`
+    #[must_use]
+    pub fn from_json(value: &'a Value) -> Self {
+        use response_fields::*;
+
+        // Check for pending_approval status
+        if value.get(STATUS).and_then(|v| v.as_str()) == Some(PENDING_APPROVAL) {
+            if let Some(approval_id) = value.get(APPROVAL_ID).and_then(|v| v.as_str()) {
+                let description = value
+                    .get(MESSAGE)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Awaiting approval");
+                return Self::PendingApproval {
+                    approval_id,
+                    description,
+                };
+            }
+        }
+
+        // Check for direct response field
+        if let Some(text) = value.get(RESPONSE).and_then(|v| v.as_str()) {
+            return Self::TextResponse(text);
+        }
+
+        // Check for nested data.response
+        if let Some(text) = value
+            .get(DATA)
+            .and_then(|d| d.get(RESPONSE))
+            .and_then(|v| v.as_str())
+        {
+            return Self::TextResponse(text);
+        }
+
+        Self::Empty
+    }
+}
 
 /// Configuration for creating a ClientRunner.
 ///
@@ -395,6 +465,10 @@ impl ClientRunner {
             return;
         }
 
+        // Clone values needed after spawn_blocking
+        let operation = event.operation.clone();
+        let payload = event.payload.clone();
+
         let request = Request::new(
             event.category,
             &event.operation,
@@ -403,43 +477,75 @@ impl ClientRunner {
             event.payload,
         );
 
-        let result = {
-            let mut comp = self.component.lock().await;
+        // Execute on_request in spawn_blocking to avoid blocking the async runtime.
+        // This is necessary because Component::on_request is a sync method that may
+        // perform blocking I/O (e.g., LuaComponent calling external CLIs).
+        let component = self.component.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut comp = component.blocking_lock();
             comp.on_request(&request)
-        };
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(ComponentError::ExecutionFailed(format!(
+                "task panicked: {}",
+                e
+            )))
+        });
 
+        self.handle_component_result(result, &operation, &payload)
+            .await;
+    }
+
+    /// Handles the result from Component::on_request.
+    ///
+    /// Routes the response to the appropriate IOBridge method based on content.
+    async fn handle_component_result(
+        &self,
+        result: Result<Value, ComponentError>,
+        operation: &str,
+        payload: &Value,
+    ) {
         match result {
             Ok(response) => {
                 debug!(
                     "ClientRunner {}: Component returned success: {:?}",
                     self.id, response
                 );
-
-                // Handle pending_approval response: send IOOutput to View
-                if response.get("status").and_then(|v| v.as_str()) == Some("pending_approval") {
-                    if let Some(approval_id) = response.get("approval_id").and_then(|v| v.as_str())
-                    {
-                        let description = response
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Awaiting approval");
-
-                        let _ = self
-                            .io_bridge
-                            .show_approval_request(&crate::components::ApprovalRequest::with_id(
-                                approval_id,
-                                &request.operation,
-                                description,
-                                request.payload.clone(),
-                            ))
-                            .await;
-                    }
-                }
+                self.display_component_response(&response, operation, payload)
+                    .await;
             }
             Err(e) => {
                 warn!("ClientRunner {}: Component returned error: {}", self.id, e);
-                // Show error to user via IO
                 let _ = self.io_bridge.error(&e.to_string()).await;
+            }
+        }
+    }
+
+    /// Displays a component response via IOBridge.
+    ///
+    /// Uses [`ComponentResponse`] to categorize and route the response.
+    async fn display_component_response(&self, response: &Value, operation: &str, payload: &Value) {
+        match ComponentResponse::from_json(response) {
+            ComponentResponse::PendingApproval {
+                approval_id,
+                description,
+            } => {
+                let _ = self
+                    .io_bridge
+                    .show_approval_request(&crate::components::ApprovalRequest::with_id(
+                        approval_id,
+                        operation,
+                        description,
+                        payload.clone(),
+                    ))
+                    .await;
+            }
+            ComponentResponse::TextResponse(text) => {
+                let _ = self.io_bridge.info(text).await;
+            }
+            ComponentResponse::Empty => {
+                // No displayable content - intentionally silent
             }
         }
     }
@@ -686,6 +792,287 @@ mod tests {
         // Runner should stop
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         assert!(result.is_ok());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    // --- ComponentResponse tests ---
+
+    mod component_response_tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn from_json_pending_approval() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-123",
+                "message": "Confirm action?"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-123",
+                    description: "Confirm action?"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_pending_approval_default_message() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-456"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-456",
+                    description: "Awaiting approval"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_pending_approval_missing_id_returns_empty() {
+            let json = json!({
+                "status": "pending_approval"
+                // Missing approval_id
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_direct_response() {
+            let json = json!({
+                "response": "Hello, world!"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Hello, world!"));
+        }
+
+        #[test]
+        fn from_json_nested_data_response() {
+            let json = json!({
+                "data": {
+                    "response": "Nested response",
+                    "source": "test"
+                }
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Nested response"));
+        }
+
+        #[test]
+        fn from_json_empty_object() {
+            let json = json!({});
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_unrelated_fields() {
+            let json = json!({
+                "status": "completed",
+                "result": 42
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_priority_pending_over_response() {
+            // pending_approval should take priority over response field
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-789",
+                "response": "This should be ignored"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-789",
+                    description: "Awaiting approval"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_response_priority_over_nested() {
+            // Direct response should take priority over nested data.response
+            let json = json!({
+                "response": "Direct",
+                "data": {
+                    "response": "Nested"
+                }
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Direct"));
+        }
+    }
+
+    // --- spawn_blocking integration tests ---
+
+    /// Mock component that returns a specific response format.
+    struct ResponseMockComponent {
+        id: ComponentId,
+        status: Status,
+        response: Value,
+    }
+
+    impl ResponseMockComponent {
+        fn with_response(response: Value) -> Self {
+            Self {
+                id: ComponentId::builtin("response_mock"),
+                status: Status::Idle,
+                response,
+            }
+        }
+    }
+
+    impl Component for ResponseMockComponent {
+        fn id(&self) -> &ComponentId {
+            &self.id
+        }
+
+        fn status(&self) -> Status {
+            self.status
+        }
+
+        fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+            Ok(self.response.clone())
+        }
+
+        fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+            if signal.is_veto() {
+                self.status = Status::Aborted;
+                SignalResponse::Abort
+            } else {
+                SignalResponse::Handled
+            }
+        }
+
+        fn abort(&mut self) {
+            self.status = Status::Aborted;
+        }
+    }
+
+    #[tokio::test]
+    async fn client_runner_displays_text_response() {
+        use crate::io::{IOInput, IOOutput, OutputStyle};
+        use serde_json::json;
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+
+        // Component that returns a text response
+        let component = Box::new(ResponseMockComponent::with_response(json!({
+            "response": "Test response from component"
+        })));
+
+        let (runner, _handle) =
+            ClientRunner::new(primary, config, component, port, test_principal());
+
+        let runner_task = tokio::spawn(runner.run());
+        tokio::task::yield_now().await;
+
+        // Send user message to trigger component
+        input_handle
+            .send(IOInput::line("test message"))
+            .await
+            .unwrap();
+
+        // Wait for response
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Check output was received
+        let mut found_response = false;
+        while let Some(output) = output_handle.try_recv() {
+            if let IOOutput::Print { text, style } = output {
+                if style == OutputStyle::Info && text.contains("Test response from component") {
+                    found_response = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_response, "Expected text response to be displayed");
+
+        // Cleanup
+        signal_tx.send(Signal::veto(Principal::System)).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn client_runner_displays_nested_response() {
+        use crate::io::{IOInput, IOOutput, OutputStyle};
+        use serde_json::json;
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+
+        // Component that returns nested data.response format (like claude_cli)
+        let component = Box::new(ResponseMockComponent::with_response(json!({
+            "data": {
+                "response": "Nested CLI response",
+                "source": "claude_cli"
+            }
+        })));
+
+        let (runner, _handle) =
+            ClientRunner::new(primary, config, component, port, test_principal());
+
+        let runner_task = tokio::spawn(runner.run());
+        tokio::task::yield_now().await;
+
+        // Send user message
+        input_handle.send(IOInput::line("hello")).await.unwrap();
+
+        // Wait for response
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Check output
+        let mut found_response = false;
+        while let Some(output) = output_handle.try_recv() {
+            if let IOOutput::Print { text, style } = output {
+                if style == OutputStyle::Info && text.contains("Nested CLI response") {
+                    found_response = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_response, "Expected nested response to be displayed");
+
+        // Cleanup
+        signal_tx.send(Signal::veto(Principal::System)).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
         teardown(manager_task, world_tx).await;
     }
