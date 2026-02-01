@@ -206,6 +206,7 @@ mod error;
 mod package;
 mod snapshot;
 mod status;
+pub mod testing;
 mod traits;
 
 // Re-export core traits

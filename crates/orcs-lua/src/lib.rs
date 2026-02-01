@@ -80,6 +80,7 @@ mod component;
 pub mod embedded;
 mod error;
 mod loader;
+pub mod testing;
 mod types;
 
 pub use child::LuaChild;
