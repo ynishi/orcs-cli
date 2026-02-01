@@ -82,9 +82,9 @@ pub fn determine_channel_action(kind: &SignalKind) -> SignalAction {
         SignalKind::Pause => SignalAction::Transition(StateTransition::Pause),
         SignalKind::Resume => SignalAction::Transition(StateTransition::Resume),
         SignalKind::Approve { .. } => SignalAction::Transition(StateTransition::ResolveApproval),
-        SignalKind::Reject { reason, .. } => SignalAction::Stop {
-            reason: reason.clone().unwrap_or_else(|| "rejected".to_string()),
-        },
+        // Reject clears the pending approval but does NOT stop the channel.
+        // Component handles rejection via on_signal and notifies via Emitter.
+        SignalKind::Reject { .. } => SignalAction::Continue,
         SignalKind::Steer { .. } | SignalKind::Modify { .. } => SignalAction::Continue,
     }
 }
@@ -253,11 +253,8 @@ mod tests {
             approval_id: "req-1".to_string(),
             reason: Some("denied".to_string()),
         });
-        if let SignalAction::Stop { reason } = action {
-            assert_eq!(reason, "denied");
-        } else {
-            panic!("Expected Stop");
-        }
+        // Reject should continue, not stop the channel
+        assert!(matches!(action, SignalAction::Continue));
     }
 
     #[test]

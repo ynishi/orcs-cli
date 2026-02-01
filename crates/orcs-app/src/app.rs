@@ -7,17 +7,48 @@
 //! - [`HumanInput`] - stdin command parsing
 //! - [`OutputSink`] - User output display
 //!
-//! # Flow
+//! # Input Flow
 //!
 //! ```text
-//! User Input → Event injection → ChannelRunner → EchoWithHilComponent
-//!           → HIL承認要求 → Y/N待ち → Echo出力
+//! stdin → handle_input() → InputCommand
+//!                            │
+//!          ┌─────────────────┴─────────────────┐
+//!          │                                   │
+//!          ▼                                   ▼
+//!    App-local                             IOInput
+//!    (Quit/Pause/Resume/Help)          (All other input)
+//!          │                                   │
+//!          │                                   ▼
+//!          │                            ClientRunner
+//!          │                       io_bridge.recv_input()
+//!          │                                   │
+//!          │                     ┌─────────────┴─────────────┐
+//!          │                     │                           │
+//!          │                     ▼                           ▼
+//!          │              Signal (y/n/veto)           User message
+//!          │                     │                   handle_user_message()
+//!          │                     │                           │
+//!          │                     ▼                           ▼
+//!          │            Signal broadcast          Component.on_request()
+//!          │                     │                           │
+//!          └─────────────────────┴───────────────────────────┘
+//!                                │
+//!                                ▼
+//!                    IOOutput → handle_io_output()
 //! ```
 //!
 //! # Architecture
 //!
-//! The EchoWithHilComponent runs inside ChannelRunner (parallel tokio task).
-//! App manages approval state locally - Component communicates via Event/Signal only.
+//! The EchoWithHilComponent runs inside ClientRunner (parallel tokio task).
+//! App manages UI state (pending_approval) locally, updated via IOOutput.
+//!
+//! ## Input Routing
+//!
+//! | Input Type | Route | Handler |
+//! |------------|-------|---------|
+//! | Quit/Pause/Resume/Help | App-local | LoopControl |
+//! | Approve/Reject/Veto | IOInput → ClientRunner | Signal broadcast |
+//! | User message (Unknown) | IOInput → ClientRunner | Component.on_request() |
 //!
 //! # Example
 //!
@@ -33,13 +64,13 @@
 //! ```
 
 use crate::AppError;
-use orcs_event::{EventCategory, Signal};
+use orcs_event::Signal;
 use orcs_runtime::{
-    default_session_path, ChannelConfig, ChannelHandle, ConsoleOutput, EchoWithHilComponent, Event,
-    HumanInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, LocalFileStore,
+    default_session_path, ChannelConfig, ConsoleOutput, EchoWithHilComponent, HumanInput, IOInput,
+    IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext, LocalFileStore,
     OrcsEngine, OutputSink, SessionAsset, World,
 };
-use orcs_types::{ComponentId, Principal, PrincipalId};
+use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -71,15 +102,10 @@ pub struct OrcsApp {
     engine: OrcsEngine,
     input: HumanInput,
     output: Arc<dyn OutputSink>,
-    /// Handle for injecting events into the IO channel.
+    /// Handle for sending input to ClientRunner via IOPort.
     ///
-    /// This is always available after construction (not Option).
-    io_handle: ChannelHandle,
-    /// Handle for sending input to ClientRunner.
-    ///
-    /// Kept alive to prevent IOPort channel from closing.
-    /// Will be used for IO-based input flow in future.
-    #[allow(dead_code)]
+    /// Primary input channel for View → ClientRunner communication.
+    /// All user input flows through this channel.
     io_input: IOInputHandle,
     /// Handle for receiving IO output from ClientRunner.
     io_output: IOOutputHandle,
@@ -117,14 +143,6 @@ impl OrcsApp {
     #[must_use]
     pub fn output(&self) -> &Arc<dyn OutputSink> {
         &self.output
-    }
-
-    /// Returns the IO channel handle for event injection.
-    ///
-    /// The IO handle is always available after construction.
-    #[must_use]
-    pub fn io_handle(&self) -> &ChannelHandle {
-        &self.io_handle
     }
 
     /// Returns the pending approval ID.
@@ -275,6 +293,12 @@ impl OrcsApp {
 
     /// Handles a single line of input.
     ///
+    /// # Input Routing
+    ///
+    /// - **Control signals** (Approve/Reject/Veto): → IOInput経由でClientRunner
+    /// - **App-local commands** (Quit/Pause/Resume/Help): → App内で処理
+    /// - **User messages** (Unknown): → IOInput経由でClientRunner → Component
+    ///
     /// Returns control flow instruction for the main loop.
     fn handle_input(&mut self, line: &str) -> LoopControl {
         let cmd = self.input.parse_line(line);
@@ -286,19 +310,18 @@ impl OrcsApp {
             }
             InputCommand::Veto => {
                 tracing::warn!("Veto signal sent");
-                let signal = Signal::veto(self.input.principal().clone());
-                // Broadcast to all runners (including EchoWithHilComponent)
-                self.engine.signal(signal);
+                // Send via IOInput (ClientRunner will convert to Signal)
+                self.send_io_input(line);
                 return LoopControl::Exit;
             }
             InputCommand::Approve { approval_id } => {
-                self.handle_approve(approval_id.as_deref());
+                self.handle_approve_via_io(line, approval_id.as_deref());
             }
             InputCommand::Reject {
                 approval_id,
-                reason,
+                reason: _,
             } => {
-                self.handle_reject(approval_id.as_deref(), reason.clone());
+                self.handle_reject_via_io(line, approval_id.as_deref());
             }
             InputCommand::Pause => {
                 tracing::info!("Pause requested");
@@ -320,7 +343,7 @@ impl OrcsApp {
                 if input == "help" {
                     self.show_help();
                 } else if !input.is_empty() {
-                    // Send to Echo component via Event injection
+                    // Send user message to ClientRunner via IOInput
                     self.handle_echo_input(input);
                 }
             }
@@ -329,93 +352,126 @@ impl OrcsApp {
         LoopControl::Continue
     }
 
-    /// Handles user input by injecting an Event to the ChannelRunner.
+    /// Sends raw input to ClientRunner via IOInput.
     ///
-    /// App generates the approval_id and includes it in the Event payload.
-    /// This allows App to track pending approvals without accessing Component state.
-    fn handle_echo_input(&mut self, input: &str) {
-        // Generate approval_id in App (not Component)
-        let approval_id = uuid::Uuid::new_v4().to_string();
+    /// Used for control signals that ClientRunner should convert to Signal.
+    fn send_io_input(&self, line: &str) {
+        let context = self.build_input_context();
+        let io_input = IOInput::line_with_context(line, context);
 
-        // Create event with approval_id in payload
-        let event = Event {
-            category: EventCategory::Echo,
-            operation: "echo".to_string(),
-            source: ComponentId::builtin("app"),
-            payload: serde_json::json!({
-                "message": input,
-                "approval_id": approval_id
-            }),
-        };
-
-        // Try to inject event (non-blocking)
-        match self.io_handle.try_inject(event) {
-            Ok(()) => {
-                // Store for later use with "y" command
-                self.pending_approval = Some(PendingApproval {
-                    id: approval_id.clone(),
-                });
-
-                self.output.info(&format!(
-                    "Awaiting approval for: '{}' [id: {}]",
-                    input, approval_id
-                ));
-                self.output.info("Type 'y' to approve or 'n' to reject");
-            }
-            Err(e) => {
-                self.output
-                    .error(&format!("Failed to inject event: {:?}", e));
-            }
+        if let Err(e) = self.io_input.try_send(io_input) {
+            tracing::warn!("Failed to send IOInput: {:?}", e);
         }
     }
 
-    /// Handles an approve command.
+    /// Builds InputContext with current pending approval ID.
+    fn build_input_context(&self) -> InputContext {
+        match &self.pending_approval {
+            Some(pending) => InputContext::with_approval_id(&pending.id),
+            None => InputContext::empty(),
+        }
+    }
+
+    /// Handles user message input by sending to ClientRunner via IOInput.
     ///
-    /// Broadcasts an Approve signal via the engine.
-    /// Uses pending approval if no explicit ID provided.
-    fn handle_approve(&mut self, approval_id: Option<&str>) {
-        let id = approval_id
+    /// The message is sent to ClientRunner, which forwards it to the Component.
+    /// If the Component requires HIL approval, it will send back an approval
+    /// request via IOOutput, which App will receive and track.
+    fn handle_echo_input(&mut self, input: &str) {
+        // Send user message via IOInput (no context needed for messages)
+        let io_input = IOInput::line(input);
+
+        if let Err(e) = self.io_input.try_send(io_input) {
+            self.output
+                .error(&format!("Failed to send message: {:?}", e));
+        }
+    }
+
+    /// Handles an approve command via IOInput.
+    ///
+    /// Sends to ClientRunner via IOInput with approval ID in context.
+    /// ClientRunner will convert to Approve Signal and broadcast.
+    fn handle_approve_via_io(&mut self, line: &str, explicit_id: Option<&str>) {
+        // Determine approval ID: explicit > pending
+        let approval_id = explicit_id
             .map(String::from)
             .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
-        if let Some(id) = id {
-            let signal = Signal::approve(&id, self.input.principal().clone());
-            // Broadcast to all runners (ChannelRunner delivers to Component)
-            self.engine.signal(signal);
-            self.output.show_approved(&id);
+        if let Some(id) = approval_id {
+            // Build context with approval ID
+            let context = InputContext::with_approval_id(&id);
+            let io_input = IOInput::line_with_context(line, context);
 
-            // Clear pending approval after use
-            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(&id) {
-                self.pending_approval = None;
+            match self.io_input.try_send(io_input) {
+                Ok(()) => {
+                    tracing::debug!("Sent approve via IOInput: {}", id);
+                    // Clear pending approval after sending
+                    if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
+                        self.pending_approval = None;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send approve via IOInput: {:?}", e);
+                    // Fallback: broadcast directly via engine
+                    self.handle_approve_fallback(&id);
+                }
             }
         } else {
             self.output.warn("No pending approval. Use: y <id>");
         }
     }
 
-    /// Handles a reject command.
+    /// Handles a reject command via IOInput.
     ///
-    /// Broadcasts a Reject signal via the engine.
-    /// Uses pending approval if no explicit ID provided.
-    fn handle_reject(&mut self, approval_id: Option<&str>, reason: Option<String>) {
-        let id = approval_id
+    /// Sends to ClientRunner via IOInput with approval ID in context.
+    /// ClientRunner will convert to Reject Signal and broadcast.
+    fn handle_reject_via_io(&mut self, line: &str, explicit_id: Option<&str>) {
+        // Determine approval ID: explicit > pending
+        let approval_id = explicit_id
             .map(String::from)
             .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
-        if let Some(id) = id {
-            let signal = Signal::reject(&id, reason.clone(), self.input.principal().clone());
-            // Broadcast to all runners (ChannelRunner delivers to Component)
-            self.engine.signal(signal);
-            self.output.show_rejected(&id, reason.as_deref());
+        if let Some(id) = approval_id {
+            // Build context with approval ID
+            let context = InputContext::with_approval_id(&id);
+            let io_input = IOInput::line_with_context(line, context);
 
-            // Clear pending approval after use
-            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(&id) {
-                self.pending_approval = None;
+            match self.io_input.try_send(io_input) {
+                Ok(()) => {
+                    tracing::debug!("Sent reject via IOInput: {}", id);
+                    // Clear pending approval after sending
+                    if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
+                        self.pending_approval = None;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send reject via IOInput: {:?}", e);
+                    // Fallback: broadcast directly via engine
+                    self.handle_reject_fallback(&id, None);
+                }
             }
         } else {
             self.output
                 .warn("No pending approval. Use: n <id> [reason]");
         }
+    }
+
+    /// Fallback: Broadcast approve signal directly via engine.
+    ///
+    /// Used when IOInput channel is full/closed.
+    fn handle_approve_fallback(&mut self, approval_id: &str) {
+        let signal = Signal::approve(approval_id, self.input.principal().clone());
+        self.engine.signal(signal);
+        self.output.show_approved(approval_id);
+    }
+
+    /// Fallback: Broadcast reject signal directly via engine.
+    ///
+    /// Used when IOInput channel is full/closed.
+    fn handle_reject_fallback(&mut self, approval_id: &str, reason: Option<String>) {
+        let signal = Signal::reject(approval_id, reason.clone(), self.input.principal().clone());
+        self.engine.signal(signal);
+        self.output.show_rejected(approval_id, reason.as_deref());
     }
 
     /// Shows help text.
@@ -434,7 +490,9 @@ impl OrcsApp {
     }
 
     /// Handles IO output from ClientRunner.
-    fn handle_io_output(&self, io_out: IOOutput) {
+    ///
+    /// Updates pending_approval when an approval request is received.
+    fn handle_io_output(&mut self, io_out: IOOutput) {
         match io_out {
             IOOutput::Print { text, style } => {
                 use orcs_runtime::OutputStyle;
@@ -451,8 +509,9 @@ impl OrcsApp {
                 description,
             } => {
                 // Store as pending approval for "y" / "n" without ID
-                // Note: self is &self, so we can't mutate pending_approval here
-                // For now, just display the request
+                self.pending_approval = Some(PendingApproval { id: id.clone() });
+
+                // Display the request
                 self.output
                     .show_approval_request(&orcs_runtime::ApprovalRequest::with_id(
                         &id,
@@ -554,7 +613,7 @@ impl OrcsAppBuilder {
 
         // Spawn ClientRunner for IO channel with EchoWithHilComponent
         let echo_component = Box::new(EchoWithHilComponent::new());
-        let io_handle = engine.spawn_client_runner(io, echo_component, io_port, principal);
+        let _handle = engine.spawn_client_runner(io, echo_component, io_port, principal);
         tracing::info!(
             "IO channel ClientRunner spawned with EchoWithHilComponent: {}",
             io
@@ -589,7 +648,6 @@ impl OrcsAppBuilder {
             engine,
             input,
             output,
-            io_handle,
             io_input,
             io_output,
             pending_approval: None,
@@ -639,14 +697,6 @@ mod tests {
         let world = app.engine().world_read();
         let w = world.read().await;
         assert!(w.get(&io).is_some());
-    }
-
-    #[tokio::test]
-    async fn app_io_handle_available() {
-        let app = OrcsApp::builder().build().await.unwrap();
-        // io_handle is set at build time (not Option)
-        let io_channel = app.engine().io_channel();
-        assert_eq!(app.io_handle().id, io_channel);
     }
 
     #[tokio::test]

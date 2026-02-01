@@ -242,6 +242,14 @@ impl ClientRunner {
     }
 
     /// Handles IO commands that don't map to Signals.
+    ///
+    /// # Command Routing
+    ///
+    /// | Command | Action |
+    /// |---------|--------|
+    /// | Quit | Abort channel |
+    /// | Unknown | Forward to Component as user message |
+    /// | Empty | Ignore |
     async fn handle_io_command(&mut self, cmd: InputCommand) -> bool {
         match cmd {
             InputCommand::Quit => {
@@ -250,10 +258,8 @@ impl ClientRunner {
                 false
             }
             InputCommand::Unknown { input } => {
-                let _ = self
-                    .io_bridge
-                    .warn(&format!("Unknown command: {}", input))
-                    .await;
+                // Forward user message to Component as Echo request
+                self.handle_user_message(&input).await;
                 true
             }
             InputCommand::Empty => {
@@ -262,6 +268,31 @@ impl ClientRunner {
             }
             _ => true,
         }
+    }
+
+    /// Handles user message input by forwarding to Component.
+    ///
+    /// Creates an Echo Event and delivers to Component via on_request().
+    async fn handle_user_message(&self, message: &str) {
+        debug!("ClientRunner {}: user message: {}", self.id, message);
+
+        // Get component ID for event source
+        let source_id = {
+            let comp = self.component.lock().await;
+            comp.id().clone()
+        };
+
+        // Create Echo event for Component
+        let event = Event {
+            category: EventCategory::Echo,
+            operation: "echo".to_string(),
+            source: source_id,
+            payload: serde_json::json!({
+                "message": message
+            }),
+        };
+
+        self.process_event(event).await;
     }
 
     /// Handles an incoming signal.
@@ -383,6 +414,27 @@ impl ClientRunner {
                     "ClientRunner {}: Component returned success: {:?}",
                     self.id, response
                 );
+
+                // Handle pending_approval response: send IOOutput to View
+                if response.get("status").and_then(|v| v.as_str()) == Some("pending_approval") {
+                    if let Some(approval_id) = response.get("approval_id").and_then(|v| v.as_str())
+                    {
+                        let description = response
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Awaiting approval");
+
+                        let _ = self
+                            .io_bridge
+                            .show_approval_request(&crate::components::ApprovalRequest::with_id(
+                                approval_id,
+                                &request.operation,
+                                description,
+                                request.payload.clone(),
+                            ))
+                            .await;
+                    }
+                }
             }
             Err(e) => {
                 warn!("ClientRunner {}: Component returned error: {}", self.id, e);
