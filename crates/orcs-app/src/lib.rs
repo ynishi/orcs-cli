@@ -82,3 +82,8 @@ pub use orcs_runtime::{
     PermissionChecker, PrivilegeLevel, Session, StateTransition, World, WorldCommand,
     WorldCommandSender, WorldManager,
 };
+
+// Re-export configuration types
+pub use orcs_runtime::{
+    ConfigError, ConfigLoader, HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig,
+};

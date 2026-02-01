@@ -65,11 +65,11 @@
 
 use crate::AppError;
 use orcs_event::Signal;
+use orcs_lua::ScriptLoader;
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::{
-    default_session_path, ChannelConfig, EchoWithHilComponent, IOInput, IOInputHandle, IOOutput,
-    IOOutputHandle, IOPort, InputCommand, InputContext, LocalFileStore, OrcsEngine, SessionAsset,
-    World,
+    ChannelConfig, ConfigLoader, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
+    InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset, World,
 };
 use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
@@ -99,6 +99,8 @@ enum LoopControl {
 ///
 /// Integrates the engine with HIL, input handling, and output display.
 pub struct OrcsApp {
+    /// Loaded configuration (merged from all sources).
+    config: OrcsConfig,
     engine: OrcsEngine,
     /// Principal for signal creation.
     principal: Principal,
@@ -139,6 +141,12 @@ impl OrcsApp {
     /// Returns a mutable reference to the engine.
     pub fn engine_mut(&mut self) -> &mut OrcsEngine {
         &mut self.engine
+    }
+
+    /// Returns a reference to the loaded configuration.
+    #[must_use]
+    pub fn config(&self) -> &OrcsConfig {
+        &self.config
     }
 
     /// Returns the console renderer.
@@ -523,10 +531,35 @@ impl OrcsApp {
 }
 
 /// Builder for [`OrcsApp`].
+///
+/// # Configuration Loading
+///
+/// Configuration is loaded from multiple sources with priority:
+///
+/// 1. CLI overrides (via builder methods like `verbose()`)
+/// 2. Environment variables (`ORCS_*`)
+/// 3. Project config (`.orcs/config.toml`)
+/// 4. Global config (`~/.orcs/config.toml`)
+/// 5. Default values
+///
+/// # Example
+///
+/// ```ignore
+/// let app = OrcsApp::builder()
+///     .with_project_root("/path/to/project")
+///     .verbose()  // CLI override
+///     .build()
+///     .await?;
+/// ```
 pub struct OrcsAppBuilder {
-    verbose: bool,
-    session_path: Option<PathBuf>,
+    /// Project root directory for project-local config.
+    project_root: Option<PathBuf>,
+    /// Session ID to resume from.
     resume_session_id: Option<String>,
+    /// CLI overrides (applied after config loading).
+    cli_verbose: Option<bool>,
+    cli_debug: Option<bool>,
+    cli_session_path: Option<PathBuf>,
 }
 
 impl OrcsAppBuilder {
@@ -534,23 +567,41 @@ impl OrcsAppBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            verbose: false,
-            session_path: None,
+            project_root: None,
             resume_session_id: None,
+            cli_verbose: None,
+            cli_debug: None,
+            cli_session_path: None,
         }
     }
 
-    /// Enables verbose output.
+    /// Sets the project root directory.
+    ///
+    /// Project config will be loaded from `<project_root>/.orcs/config.toml`.
     #[must_use]
-    pub fn verbose(mut self) -> Self {
-        self.verbose = true;
+    pub fn with_project_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.project_root = Some(path.into());
         self
     }
 
-    /// Sets a custom session storage path.
+    /// Enables verbose output (CLI override).
+    #[must_use]
+    pub fn verbose(mut self) -> Self {
+        self.cli_verbose = Some(true);
+        self
+    }
+
+    /// Enables debug mode (CLI override).
+    #[must_use]
+    pub fn debug(mut self) -> Self {
+        self.cli_debug = Some(true);
+        self
+    }
+
+    /// Sets a custom session storage path (CLI override).
     #[must_use]
     pub fn with_session_path(mut self, path: PathBuf) -> Self {
-        self.session_path = Some(path);
+        self.cli_session_path = Some(path);
         self
     }
 
@@ -563,14 +614,38 @@ impl OrcsAppBuilder {
 
     /// Builds the application.
     ///
-    /// Creates the World, Engine, and spawns the IO channel runner with
-    /// EchoWithHilComponent. All components are initialized at build time.
+    /// Loads configuration from all sources, creates the World, Engine,
+    /// and spawns the IO channel runner with EchoWithHilComponent.
     ///
-    /// If `resume` was called, loads the specified session and restores
-    /// component state.
+    /// # Configuration Priority
+    ///
+    /// CLI overrides > Environment > Project > Global > Default
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Config`] if configuration loading fails.
     pub async fn build(self) -> Result<OrcsApp, AppError> {
+        // Load configuration with hierarchical merging
+        let mut loader = ConfigLoader::new();
+        if let Some(ref project_root) = self.project_root {
+            loader = loader.with_project_root(project_root);
+        }
+
+        let mut config = loader.load().map_err(|e| AppError::Config(e.to_string()))?;
+
+        // Apply CLI overrides (highest priority)
+        if let Some(verbose) = self.cli_verbose {
+            config.ui.verbose = verbose;
+        }
+        if let Some(debug) = self.cli_debug {
+            config.debug = debug;
+        }
+        if let Some(ref path) = self.cli_session_path {
+            config.paths.session_dir = Some(path.clone());
+        }
+
         // Create session store
-        let session_path = self.session_path.unwrap_or_else(default_session_path);
+        let session_path = config.paths.session_dir_or_default();
         let store = LocalFileStore::new(session_path)
             .map_err(|e| AppError::Config(format!("Failed to create session store: {}", e)))?;
 
@@ -585,11 +660,13 @@ impl OrcsAppBuilder {
         let (io_port, io_input, io_output) = IOPort::with_defaults(io);
         let principal = Principal::User(PrincipalId::new());
 
-        // Spawn ClientRunner for IO channel with EchoWithHilComponent
-        let echo_component = Box::new(EchoWithHilComponent::new());
-        let _handle = engine.spawn_client_runner(io, echo_component, io_port, principal.clone());
+        // Spawn ClientRunner for IO channel with LuaComponent (claude_cli)
+        let lua_component = ScriptLoader::load_embedded("claude_cli")
+            .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {}", e)))?;
+        let _handle =
+            engine.spawn_client_runner(io, Box::new(lua_component), io_port, principal.clone());
         tracing::info!(
-            "IO channel ClientRunner spawned with EchoWithHilComponent: {}",
+            "IO channel ClientRunner spawned with claude_cli LuaComponent: {}",
             io
         );
 
@@ -604,16 +681,17 @@ impl OrcsAppBuilder {
                 (SessionAsset::new(), false, 0)
             };
 
-        // Create console renderer
-        let renderer = if self.verbose {
+        // Create console renderer based on config
+        let renderer = if config.ui.verbose {
             ConsoleRenderer::verbose()
         } else {
             ConsoleRenderer::new()
         };
 
-        tracing::debug!("OrcsApp created (fully initialized)");
+        tracing::debug!("OrcsApp created with config: debug={}", config.debug);
 
         Ok(OrcsApp {
+            config,
             engine,
             principal,
             renderer,

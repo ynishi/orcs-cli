@@ -77,6 +77,22 @@
 //! - [`InputParser`](io::InputParser): stdin command parsing
 //! - [`ConsoleRenderer`](io::ConsoleRenderer): console output rendering
 //!
+//! ## [`config`] - Configuration Management
+//!
+//! Hierarchical configuration with layered merging:
+//!
+//! - [`OrcsConfig`](config::OrcsConfig): Unified configuration type
+//! - [`ConfigLoader`](config::ConfigLoader): Multi-source config loader
+//!
+//! Configuration priority: Environment > Project > Global > Default
+//!
+//! ## [`session`] - Session Persistence
+//!
+//! Session data storage (separate from config):
+//!
+//! - [`SessionAsset`](session::SessionAsset): Conversation history, snapshots
+//! - [`SessionStore`](session::SessionStore): Storage abstraction
+//!
 //! # Why This Separation?
 //!
 //! The runtime layer is intentionally separate from the Plugin SDK because:
@@ -89,6 +105,7 @@
 pub mod auth;
 pub mod channel;
 pub mod components;
+pub mod config;
 pub mod engine;
 pub mod io;
 pub mod session;
@@ -103,6 +120,10 @@ pub use channel::{
 pub use components::{
     ApprovalRequest, ApprovalResult, DecoratorConfig, EchoWithHilComponent, HilComponent,
     NoopComponent,
+};
+pub use config::{
+    default_config_dir, default_config_path, save_global_config, ConfigError, ConfigLoader,
+    HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{
