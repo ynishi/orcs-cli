@@ -123,6 +123,15 @@ impl InputCommand {
 /// Human input parser and handler.
 ///
 /// Parses text input from stdin into [`InputCommand`]s.
+///
+/// # Deprecated
+///
+/// Use [`super::IOBridgeChannel`] instead, which integrates the parser
+/// and provides proper View-Bridge layer separation.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use IOBridgeChannel instead, which integrates InputParser"
+)]
 pub struct HumanInput {
     /// Principal representing the Human user.
     principal: Principal,
@@ -165,7 +174,7 @@ impl HumanInput {
     /// not used; this method exists for backward compatibility.
     #[must_use]
     pub fn parse_line(&self, line: &str) -> InputCommand {
-        InputParser::parse(line)
+        InputParser.parse(line)
     }
 
     /// Parses input and converts to a Signal if applicable.

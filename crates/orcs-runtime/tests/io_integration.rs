@@ -4,7 +4,7 @@
 
 use orcs_event::SignalKind;
 use orcs_runtime::components::{ApprovalRequest, IOBridgeChannel};
-use orcs_runtime::io::{ConsoleRenderer, IOInput, IOOutput, IOPort};
+use orcs_runtime::io::{ConsoleRenderer, IOInput, IOOutput, IOPort, InputContext};
 use orcs_types::{ChannelId, Principal, PrincipalId};
 
 fn test_principal() -> Principal {
@@ -18,12 +18,18 @@ async fn view_to_bridge_input_flow() {
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
     let mut bridge = IOBridgeChannel::new(port, test_principal());
 
-    // Set default approval ID for HIL responses
-    bridge.set_default_approval_id(Some("pending-approval-1".to_string()));
+    // View layer passes approval ID via InputContext
+    let ctx = InputContext::with_approval_id("pending-approval-1");
 
-    // View layer sends input
-    input_handle.send(IOInput::line("y")).await.unwrap();
-    input_handle.send(IOInput::line("veto")).await.unwrap();
+    // View layer sends input with context
+    input_handle
+        .send(IOInput::line_with_context("y", ctx.clone()))
+        .await
+        .unwrap();
+    input_handle
+        .send(IOInput::line_with_context("veto", ctx))
+        .await
+        .unwrap();
 
     // Small delay to ensure messages are buffered
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -75,7 +81,6 @@ async fn approval_request_flow() {
     );
 
     bridge.show_approval_request(&request).await.unwrap();
-    bridge.set_default_approval_id(Some("req-integration-test".to_string()));
 
     // View receives the approval request display
     let output = output_handle.recv().await.unwrap();
@@ -92,8 +97,12 @@ async fn approval_request_flow() {
         panic!("Expected ShowApprovalRequest");
     }
 
-    // User approves
-    input_handle.send(IOInput::line("y")).await.unwrap();
+    // User approves - View layer attaches approval ID via context
+    let ctx = InputContext::with_approval_id("req-integration-test");
+    input_handle
+        .send(IOInput::line_with_context("y", ctx))
+        .await
+        .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals();
@@ -119,10 +128,9 @@ async fn rejection_flow_with_reason() {
     let (port, input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
     let mut bridge = IOBridgeChannel::new(port, test_principal());
 
-    // Set default approval ID
-    bridge.set_default_approval_id(Some("req-reject-test".to_string()));
-
-    // User rejects with ID and reason
+    // User rejects with explicit ID and reason in the input
+    // Note: When approval_id is explicitly provided in input, it takes precedence
+    // over context. Format: "n <approval_id> <reason>"
     input_handle
         .send(IOInput::line("n req-reject-test too-dangerous"))
         .await
@@ -205,12 +213,15 @@ async fn async_recv_input() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
     let mut bridge = IOBridgeChannel::new(port, test_principal());
-    bridge.set_default_approval_id(Some("async-test".to_string()));
 
     // Spawn a task to send input after a delay
     let handle = tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        input_handle.send(IOInput::line("y")).await.unwrap();
+        let ctx = InputContext::with_approval_id("async-test");
+        input_handle
+            .send(IOInput::line_with_context("y", ctx))
+            .await
+            .unwrap();
     });
 
     // Wait for input
@@ -267,14 +278,20 @@ async fn multiple_input_sources() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
     let mut bridge = IOBridgeChannel::new(port, test_principal());
-    bridge.set_default_approval_id(Some("multi-source".to_string()));
 
     // Clone the input handle (simulating multiple input sources)
     let input_handle2 = input_handle.clone();
+    let ctx = InputContext::with_approval_id("multi-source");
 
-    // Both handles send input
-    input_handle.send(IOInput::line("y")).await.unwrap();
-    input_handle2.send(IOInput::line("veto")).await.unwrap();
+    // Both handles send input with context
+    input_handle
+        .send(IOInput::line_with_context("y", ctx.clone()))
+        .await
+        .unwrap();
+    input_handle2
+        .send(IOInput::line_with_context("veto", ctx))
+        .await
+        .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals();

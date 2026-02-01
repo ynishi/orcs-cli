@@ -12,8 +12,8 @@
 //! ```
 //!
 //! Then type commands:
-//! - `y` or `y <id>` - Approve (shows as Signal)
-//! - `n` or `n <id>` - Reject (shows as Signal)
+//! - `y <id>` - Approve with ID (shows as Signal)
+//! - `n <id>` - Reject with ID (shows as Signal)
 //! - `veto` - Emergency stop
 //! - `q` or `quit` - Exit
 //! - Any other text - Shows as Unknown command
@@ -33,11 +33,12 @@ async fn main() {
     println!("=== Console I/O Example ===\n");
     println!("This demonstrates the IO abstraction layer.\n");
     println!("Commands:");
-    println!("  y [id]     - Approve (converts to Signal)");
-    println!("  n [id]     - Reject (converts to Signal)");
+    println!("  y <id>     - Approve with ID (converts to Signal)");
+    println!("  n <id>     - Reject with ID (converts to Signal)");
     println!("  veto       - Emergency stop (Veto Signal)");
     println!("  q / quit   - Exit");
     println!("  Ctrl+C     - Send Veto signal");
+    println!("\nExample: 'y request-1' to approve request-1");
     println!("\nType a command and press Enter:\n");
 
     // Create channel and principal
@@ -52,9 +53,6 @@ async fn main() {
 
     // Create IOBridgeChannel (Bridge layer)
     let mut bridge = IOBridgeChannel::new(port, principal);
-
-    // Set a default approval ID for demo
-    bridge.set_default_approval_id(Some("demo-request-1".to_string()));
 
     // Create Console (View layer)
     let console = Console::new(input_handle, output_handle);

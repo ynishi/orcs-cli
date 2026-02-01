@@ -65,6 +65,9 @@ use serde_json::Value;
 /// IO Bridge Channel - Bridge between View and Model layers.
 ///
 /// Owns an IOPort and converts between IO types and internal events.
+/// This is a pure bridge - it does not manage HIL state like approval IDs.
+///
+/// The parser can be injected for testing or customization.
 pub struct IOBridgeChannel {
     /// Component identifier.
     id: ComponentId,
@@ -76,12 +79,12 @@ pub struct IOBridgeChannel {
     principal: Principal,
     /// Channel ID this component belongs to.
     channel_id: ChannelId,
-    /// Default approval ID for HIL responses without explicit ID.
-    default_approval_id: Option<String>,
+    /// Input parser for converting text to commands.
+    parser: InputParser,
 }
 
 impl IOBridgeChannel {
-    /// Creates a new IOBridgeChannel.
+    /// Creates a new IOBridgeChannel with default parser.
     ///
     /// # Arguments
     ///
@@ -89,6 +92,14 @@ impl IOBridgeChannel {
     /// * `principal` - Principal representing the Human user
     #[must_use]
     pub fn new(io_port: IOPort, principal: Principal) -> Self {
+        Self::with_parser(io_port, principal, InputParser)
+    }
+
+    /// Creates a new IOBridgeChannel with a custom parser.
+    ///
+    /// This allows injecting a custom parser for testing or customization.
+    #[must_use]
+    pub fn with_parser(io_port: IOPort, principal: Principal, parser: InputParser) -> Self {
         let channel_id = io_port.channel_id();
         Self {
             id: ComponentId::builtin("io-bridge-channel"),
@@ -96,7 +107,7 @@ impl IOBridgeChannel {
             io_port,
             principal,
             channel_id,
-            default_approval_id: None,
+            parser,
         }
     }
 
@@ -110,7 +121,7 @@ impl IOBridgeChannel {
             io_port,
             principal,
             channel_id,
-            default_approval_id: None,
+            parser: InputParser,
         }
     }
 
@@ -126,32 +137,35 @@ impl IOBridgeChannel {
         &self.principal
     }
 
-    /// Sets the default approval ID for HIL responses.
-    ///
-    /// When user types "y" or "n" without an ID, this ID will be used.
-    pub fn set_default_approval_id(&mut self, id: Option<String>) {
-        self.default_approval_id = id;
-    }
-
-    /// Returns the default approval ID.
-    #[must_use]
-    pub fn default_approval_id(&self) -> Option<&str> {
-        self.default_approval_id.as_deref()
-    }
-
     /// Converts an InputCommand to a Signal.
     ///
-    /// Uses the parser's to_signal method with the default approval ID.
+    /// # Arguments
+    ///
+    /// * `cmd` - The parsed input command
+    /// * `default_approval_id` - Fallback approval ID if command has none
     #[must_use]
-    pub fn command_to_signal(&self, cmd: &InputCommand) -> Option<Signal> {
-        cmd.to_signal(self.principal.clone(), self.default_approval_id.as_deref())
+    pub fn command_to_signal(
+        &self,
+        cmd: &InputCommand,
+        default_approval_id: Option<&str>,
+    ) -> Option<Signal> {
+        cmd.to_signal(self.principal.clone(), default_approval_id)
     }
 
     /// Parses a line of input and converts to Signal.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - Raw input line
+    /// * `default_approval_id` - Fallback approval ID for HIL responses
     #[must_use]
-    pub fn parse_line_to_signal(&self, line: &str) -> Option<Signal> {
-        let cmd = InputParser::parse(line);
-        self.command_to_signal(&cmd)
+    pub fn parse_line_to_signal(
+        &self,
+        line: &str,
+        default_approval_id: Option<&str>,
+    ) -> Option<Signal> {
+        let cmd = self.parser.parse(line);
+        self.command_to_signal(&cmd, default_approval_id)
     }
 
     /// Drains all available input and converts to Signals.
@@ -159,15 +173,19 @@ impl IOBridgeChannel {
     /// Returns a vector of Signals ready to be dispatched to EventBus.
     /// Also returns any InputCommands that couldn't be converted
     /// (e.g., Quit, Unknown) for the caller to handle.
+    ///
+    /// Approval IDs are extracted from the input context provided by View layer.
     pub fn drain_input_to_signals(&mut self) -> (Vec<Signal>, Vec<InputCommand>) {
         let mut signals = Vec::new();
         let mut other_commands = Vec::new();
 
         for input in self.io_port.drain_input() {
             match input {
-                crate::io::IOInput::Line(line) => {
-                    let cmd = InputParser::parse(&line);
-                    if let Some(signal) = self.command_to_signal(&cmd) {
+                crate::io::IOInput::Line { text, context } => {
+                    let cmd = self.parser.parse(&text);
+                    // Use approval_id from context (provided by View layer)
+                    let approval_id = context.approval_id.as_deref();
+                    if let Some(signal) = self.command_to_signal(&cmd, approval_id) {
                         signals.push(signal);
                     } else {
                         // Commands that don't map to signals (Quit, Unknown, etc.)
@@ -196,7 +214,10 @@ impl IOBridgeChannel {
     ///
     /// Async version - waits for input.
     ///
-    /// Returns:
+    /// Approval IDs are extracted from the input context provided by View layer.
+    ///
+    /// # Returns
+    ///
     /// - `Some(Ok(signal))` - Input converted to signal
     /// - `Some(Err(cmd))` - Input is a command that doesn't map to signal
     /// - `None` - IO port closed
@@ -204,9 +225,11 @@ impl IOBridgeChannel {
         let input = self.io_port.recv().await?;
 
         match input {
-            crate::io::IOInput::Line(line) => {
-                let cmd = InputParser::parse(&line);
-                if let Some(signal) = self.command_to_signal(&cmd) {
+            crate::io::IOInput::Line { text, context } => {
+                let cmd = self.parser.parse(&text);
+                // Use approval_id from context (provided by View layer)
+                let approval_id = context.approval_id.as_deref();
+                if let Some(signal) = self.command_to_signal(&cmd, approval_id) {
                     Some(Ok(signal))
                 } else {
                     Some(Err(cmd))
@@ -362,17 +385,6 @@ impl Component for IOBridgeChannel {
 
                 Ok(Value::Null)
             }
-            "set_default_approval" => {
-                // Set the default approval ID
-                let id = request
-                    .payload
-                    .get("approval_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                self.set_default_approval_id(id);
-                Ok(Value::Null)
-            }
             _ => Err(ComponentError::NotSupported(request.operation.clone())),
         }
     }
@@ -469,21 +481,21 @@ mod tests {
         let (channel, _, _) = setup();
 
         // Without default approval ID, approve without ID returns None
-        let signal = channel.parse_line_to_signal("y");
+        let signal = channel.parse_line_to_signal("y", None);
         assert!(signal.is_none());
 
-        // With explicit ID
-        let signal = channel.parse_line_to_signal("y req-123");
+        // With explicit ID in input
+        let signal = channel.parse_line_to_signal("y req-123", None);
         assert!(signal.is_some());
         assert!(signal.unwrap().is_approve());
     }
 
     #[test]
     fn parse_line_to_signal_with_default() {
-        let (mut channel, _, _) = setup();
-        channel.set_default_approval_id(Some("default-id".to_string()));
+        let (channel, _, _) = setup();
 
-        let signal = channel.parse_line_to_signal("y");
+        // With default approval ID passed as argument
+        let signal = channel.parse_line_to_signal("y", Some("default-id"));
         assert!(signal.is_some());
 
         let signal = signal.unwrap();
@@ -497,7 +509,7 @@ mod tests {
     fn parse_line_to_signal_veto() {
         let (channel, _, _) = setup();
 
-        let signal = channel.parse_line_to_signal("veto");
+        let signal = channel.parse_line_to_signal("veto", None);
         assert!(signal.is_some());
         assert!(signal.unwrap().is_veto());
     }
@@ -507,20 +519,31 @@ mod tests {
         let (channel, _, _) = setup();
 
         // Quit doesn't map to a signal
-        let signal = channel.parse_line_to_signal("q");
+        let signal = channel.parse_line_to_signal("q", None);
         assert!(signal.is_none());
     }
 
     #[tokio::test]
     async fn drain_input_to_signals() {
-        let (mut channel, input_handle, _output_handle) = setup();
-        channel.set_default_approval_id(Some("pending-1".to_string()));
+        use crate::io::InputContext;
 
-        // Send various inputs
-        input_handle.send(IOInput::line("y")).await.unwrap();
-        input_handle.send(IOInput::line("n")).await.unwrap();
-        input_handle.send(IOInput::line("veto")).await.unwrap();
-        input_handle.send(IOInput::line("q")).await.unwrap(); // Quit
+        let (mut channel, input_handle, _output_handle) = setup();
+        let ctx = InputContext::with_approval_id("pending-1");
+
+        // Send various inputs with context
+        input_handle
+            .send(IOInput::line_with_context("y", ctx.clone()))
+            .await
+            .unwrap();
+        input_handle
+            .send(IOInput::line_with_context("n", ctx.clone()))
+            .await
+            .unwrap();
+        input_handle
+            .send(IOInput::line_with_context("veto", ctx.clone()))
+            .await
+            .unwrap();
+        input_handle.send(IOInput::line("q")).await.unwrap(); // Quit (no context needed)
         input_handle.send(IOInput::line("unknown")).await.unwrap(); // Unknown
 
         // Small delay to ensure messages are received
@@ -542,10 +565,15 @@ mod tests {
 
     #[tokio::test]
     async fn recv_input_signal() {
-        let (mut channel, input_handle, _output_handle) = setup();
-        channel.set_default_approval_id(Some("req-1".to_string()));
+        use crate::io::InputContext;
 
-        input_handle.send(IOInput::line("y")).await.unwrap();
+        let (mut channel, input_handle, _output_handle) = setup();
+        let ctx = InputContext::with_approval_id("req-1");
+
+        input_handle
+            .send(IOInput::line_with_context("y", ctx))
+            .await
+            .unwrap();
 
         let result = channel.recv_input().await;
         assert!(result.is_some());
@@ -685,24 +713,6 @@ mod tests {
         let output = output_handle.try_recv();
         assert!(output.is_some());
         assert!(matches!(output.unwrap(), IOOutput::Prompt { .. }));
-    }
-
-    #[test]
-    fn on_request_set_default_approval() {
-        let (mut channel, _, _) = setup();
-        assert!(channel.default_approval_id().is_none());
-
-        let request = Request::new(
-            EventCategory::Lifecycle,
-            "set_default_approval",
-            ComponentId::builtin("test"),
-            channel.channel_id(),
-            serde_json::json!({ "approval_id": "new-default" }),
-        );
-
-        let result = channel.on_request(&request);
-        assert!(result.is_ok());
-        assert_eq!(channel.default_approval_id(), Some("new-default"));
     }
 
     #[test]

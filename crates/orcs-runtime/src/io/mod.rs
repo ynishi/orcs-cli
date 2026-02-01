@@ -66,7 +66,7 @@ mod renderer;
 mod types;
 
 // Types (View layer contract)
-pub use types::{IOInput, IOOutput, OutputStyle};
+pub use types::{IOInput, IOOutput, InputContext, OutputStyle};
 
 // Port (Bridge layer)
 pub use port::{IOInputHandle, IOOutputHandle, IOPort, DEFAULT_BUFFER_SIZE};
@@ -75,10 +75,13 @@ pub use port::{IOInputHandle, IOOutputHandle, IOPort, DEFAULT_BUFFER_SIZE};
 pub use console::{setup_ctrlc_handler, Console, ConsoleInputReader};
 pub use renderer::ConsoleRenderer;
 
-// Input parsing (stateless)
+// Input parsing
 pub use input::InputCommand;
-pub use parser::InputParser;
 
-// Legacy/compatibility (to be migrated)
+// Internal: Parser is injected into IOBridgeChannel
+pub(crate) use parser::InputParser;
+
+// Legacy/compatibility (deprecated, to be removed)
+#[allow(deprecated)]
 pub use input::HumanInput;
 pub use output::{ConsoleOutput, OutputSink};

@@ -2,17 +2,8 @@
 //!
 //! Pure function for parsing user input into [`InputCommand`].
 //!
-//! # Example
-//!
-//! ```
-//! use orcs_runtime::io::{InputParser, InputCommand};
-//!
-//! let cmd = InputParser::parse("y");
-//! assert!(matches!(cmd, InputCommand::Approve { .. }));
-//!
-//! let cmd = InputParser::parse("n req-123 too dangerous");
-//! assert!(matches!(cmd, InputCommand::Reject { .. }));
-//! ```
+//! This is an internal module. Use [`super::super::components::IOBridgeChannel`]
+//! which integrates the parser.
 
 use super::InputCommand;
 
@@ -23,10 +14,17 @@ const MAX_INPUT_PARTS: usize = 3;
 /// Stateless input parser.
 ///
 /// Converts raw text input into [`InputCommand`].
-/// This is a pure function with no internal state.
+/// Stateless - can be injected into IOBridgeChannel for testing.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct InputParser;
 
 impl InputParser {
+    /// Creates a new input parser.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
     /// Parses a line of input into a command.
     ///
     /// This is a pure function - the same input always produces the same output.
@@ -53,7 +51,7 @@ impl InputParser {
     /// | `q` or `quit` | Quit | Graceful shutdown |
     /// | `veto` | Veto | Emergency stop |
     #[must_use]
-    pub fn parse(line: &str) -> InputCommand {
+    pub fn parse(&self, line: &str) -> InputCommand {
         let line = line.trim();
 
         if line.is_empty() {
@@ -119,19 +117,19 @@ mod tests {
 
     #[test]
     fn parse_approve_simple() {
-        let cmd = InputParser::parse("y");
+        let cmd = InputParser.parse("y");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
 
-        let cmd = InputParser::parse("yes");
+        let cmd = InputParser.parse("yes");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
 
-        let cmd = InputParser::parse("approve");
+        let cmd = InputParser.parse("approve");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
     }
 
     #[test]
     fn parse_approve_with_id() {
-        let cmd = InputParser::parse("y req-123");
+        let cmd = InputParser.parse("y req-123");
         assert!(matches!(
             cmd,
             InputCommand::Approve {
@@ -142,7 +140,7 @@ mod tests {
 
     #[test]
     fn parse_reject_simple() {
-        let cmd = InputParser::parse("n");
+        let cmd = InputParser.parse("n");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -154,7 +152,7 @@ mod tests {
 
     #[test]
     fn parse_reject_with_id() {
-        let cmd = InputParser::parse("n req-456");
+        let cmd = InputParser.parse("n req-456");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -166,7 +164,7 @@ mod tests {
 
     #[test]
     fn parse_reject_with_reason() {
-        let cmd = InputParser::parse("n req-789 too dangerous");
+        let cmd = InputParser.parse("n req-789 too dangerous");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -178,15 +176,15 @@ mod tests {
 
     #[test]
     fn parse_pause_resume() {
-        assert!(matches!(InputParser::parse("p"), InputCommand::Pause));
-        assert!(matches!(InputParser::parse("pause"), InputCommand::Pause));
-        assert!(matches!(InputParser::parse("r"), InputCommand::Resume));
-        assert!(matches!(InputParser::parse("resume"), InputCommand::Resume));
+        assert!(matches!(InputParser.parse("p"), InputCommand::Pause));
+        assert!(matches!(InputParser.parse("pause"), InputCommand::Pause));
+        assert!(matches!(InputParser.parse("r"), InputCommand::Resume));
+        assert!(matches!(InputParser.parse("resume"), InputCommand::Resume));
     }
 
     #[test]
     fn parse_steer() {
-        let cmd = InputParser::parse("s focus on error handling");
+        let cmd = InputParser.parse("s focus on error handling");
         assert!(matches!(
             cmd,
             InputCommand::Steer { ref message } if message == "focus on error handling"
@@ -195,56 +193,56 @@ mod tests {
 
     #[test]
     fn parse_steer_empty_is_unknown() {
-        let cmd = InputParser::parse("s");
+        let cmd = InputParser.parse("s");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
 
-        let cmd = InputParser::parse("steer");
+        let cmd = InputParser.parse("steer");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
     }
 
     #[test]
     fn parse_quit() {
-        assert!(matches!(InputParser::parse("q"), InputCommand::Quit));
-        assert!(matches!(InputParser::parse("quit"), InputCommand::Quit));
-        assert!(matches!(InputParser::parse("exit"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("q"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("quit"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("exit"), InputCommand::Quit));
     }
 
     #[test]
     fn parse_veto() {
-        assert!(matches!(InputParser::parse("veto"), InputCommand::Veto));
-        assert!(matches!(InputParser::parse("stop"), InputCommand::Veto));
-        assert!(matches!(InputParser::parse("abort"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("veto"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("stop"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("abort"), InputCommand::Veto));
     }
 
     #[test]
     fn parse_unknown() {
-        let cmd = InputParser::parse("foobar");
+        let cmd = InputParser.parse("foobar");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
     }
 
     #[test]
     fn parse_empty() {
-        let cmd = InputParser::parse("");
+        let cmd = InputParser.parse("");
         assert!(matches!(cmd, InputCommand::Empty));
 
-        let cmd = InputParser::parse("   ");
+        let cmd = InputParser.parse("   ");
         assert!(matches!(cmd, InputCommand::Empty));
     }
 
     #[test]
     fn case_insensitive() {
         assert!(matches!(
-            InputParser::parse("Y"),
+            InputParser.parse("Y"),
             InputCommand::Approve { .. }
         ));
         assert!(matches!(
-            InputParser::parse("YES"),
+            InputParser.parse("YES"),
             InputCommand::Approve { .. }
         ));
         assert!(matches!(
-            InputParser::parse("N"),
+            InputParser.parse("N"),
             InputCommand::Reject { .. }
         ));
-        assert!(matches!(InputParser::parse("QUIT"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("QUIT"), InputCommand::Quit));
     }
 }

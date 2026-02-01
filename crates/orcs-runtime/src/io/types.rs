@@ -19,22 +19,55 @@ use crate::components::ApprovalRequest;
 use orcs_event::SignalKind;
 use serde::{Deserialize, Serialize};
 
+/// Context attached to input by the View layer.
+///
+/// This allows the View layer to pass UI state (like which approval
+/// is currently being displayed) along with the user's input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InputContext {
+    /// The approval ID currently being displayed/awaited.
+    ///
+    /// When the user types "y" or "n", this provides the target approval ID.
+    pub approval_id: Option<String>,
+}
+
+impl InputContext {
+    /// Creates an empty context.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Creates a context with an approval ID.
+    #[must_use]
+    pub fn with_approval_id(approval_id: impl Into<String>) -> Self {
+        Self {
+            approval_id: Some(approval_id.into()),
+        }
+    }
+}
+
 /// Input from View layer to Bridge layer.
 ///
 /// Represents raw user input before conversion to internal events.
 ///
 /// # Variants
 ///
-/// - `Line`: Raw text input (will be parsed by HumanChannel)
+/// - `Line`: Raw text input with context from View layer
 /// - `Signal`: Pre-parsed control signal (e.g., Ctrl+C → Veto)
 /// - `Eof`: End of input stream (disconnect, stdin closed)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IOInput {
-    /// Raw text line from user.
+    /// Raw text line from user with View context.
     ///
     /// The line is trimmed but not parsed.
-    /// HumanChannel will parse it into commands.
-    Line(String),
+    /// The context contains UI state from the View layer.
+    Line {
+        /// The input text.
+        text: String,
+        /// Context from View layer (e.g., current approval ID).
+        context: InputContext,
+    },
 
     /// Pre-parsed signal from View layer.
     ///
@@ -49,10 +82,22 @@ pub enum IOInput {
 }
 
 impl IOInput {
-    /// Creates a Line input.
+    /// Creates a Line input with empty context.
     #[must_use]
     pub fn line(text: impl Into<String>) -> Self {
-        Self::Line(text.into())
+        Self::Line {
+            text: text.into(),
+            context: InputContext::empty(),
+        }
+    }
+
+    /// Creates a Line input with context.
+    #[must_use]
+    pub fn line_with_context(text: impl Into<String>, context: InputContext) -> Self {
+        Self::Line {
+            text: text.into(),
+            context,
+        }
     }
 
     /// Creates a Signal input.
@@ -70,16 +115,31 @@ impl IOInput {
     /// Returns `true` if this is a line input.
     #[must_use]
     pub fn is_line(&self) -> bool {
-        matches!(self, Self::Line(_))
+        matches!(self, Self::Line { .. })
     }
 
     /// Returns the line content if this is a Line input.
     #[must_use]
     pub fn as_line(&self) -> Option<&str> {
         match self {
-            Self::Line(s) => Some(s),
+            Self::Line { text, .. } => Some(text),
             _ => None,
         }
+    }
+
+    /// Returns the context if this is a Line input.
+    #[must_use]
+    pub fn context(&self) -> Option<&InputContext> {
+        match self {
+            Self::Line { context, .. } => Some(context),
+            _ => None,
+        }
+    }
+
+    /// Returns the approval ID from context if available.
+    #[must_use]
+    pub fn approval_id(&self) -> Option<&str> {
+        self.context().and_then(|ctx| ctx.approval_id.as_deref())
     }
 }
 
@@ -280,6 +340,17 @@ mod tests {
         assert!(input.is_line());
         assert!(!input.is_eof());
         assert_eq!(input.as_line(), Some("hello"));
+        assert!(input.context().is_some());
+        assert!(input.approval_id().is_none());
+    }
+
+    #[test]
+    fn io_input_line_with_context() {
+        let ctx = InputContext::with_approval_id("req-123");
+        let input = IOInput::line_with_context("y", ctx);
+        assert!(input.is_line());
+        assert_eq!(input.as_line(), Some("y"));
+        assert_eq!(input.approval_id(), Some("req-123"));
     }
 
     #[test]
@@ -288,6 +359,7 @@ mod tests {
         assert!(!input.is_line());
         assert!(!input.is_eof());
         assert!(input.as_line().is_none());
+        assert!(input.context().is_none());
     }
 
     #[test]
@@ -295,6 +367,18 @@ mod tests {
         let input = IOInput::Eof;
         assert!(input.is_eof());
         assert!(!input.is_line());
+    }
+
+    #[test]
+    fn input_context_empty() {
+        let ctx = InputContext::empty();
+        assert!(ctx.approval_id.is_none());
+    }
+
+    #[test]
+    fn input_context_with_approval() {
+        let ctx = InputContext::with_approval_id("test-id");
+        assert_eq!(ctx.approval_id, Some("test-id".to_string()));
     }
 
     #[test]
