@@ -4,8 +4,8 @@
 //!
 //! - [`OrcsEngine`] - Core execution engine
 //! - [`EchoWithHilComponent`] - Echo with HIL integration (via ChannelRunner)
-//! - [`HumanInput`] - stdin command parsing
-//! - [`OutputSink`] - User output display
+//! - [`InputParser`] - stdin command parsing
+//! - [`ConsoleRenderer`] - User output display
 //!
 //! # Input Flow
 //!
@@ -65,14 +65,14 @@
 
 use crate::AppError;
 use orcs_event::Signal;
+use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::{
-    default_session_path, ChannelConfig, ConsoleOutput, EchoWithHilComponent, HumanInput, IOInput,
-    IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext, LocalFileStore,
-    OrcsEngine, OutputSink, SessionAsset, World,
+    default_session_path, ChannelConfig, EchoWithHilComponent, IOInput, IOInputHandle, IOOutput,
+    IOOutputHandle, IOPort, InputCommand, InputContext, LocalFileStore, OrcsEngine, SessionAsset,
+    World,
 };
 use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// Pending approval state.
@@ -100,8 +100,10 @@ enum LoopControl {
 /// Integrates the engine with HIL, input handling, and output display.
 pub struct OrcsApp {
     engine: OrcsEngine,
-    input: HumanInput,
-    output: Arc<dyn OutputSink>,
+    /// Principal for signal creation.
+    principal: Principal,
+    /// Console renderer for output display.
+    renderer: ConsoleRenderer,
     /// Handle for sending input to ClientRunner via IOPort.
     ///
     /// Primary input channel for View → ClientRunner communication.
@@ -139,10 +141,10 @@ impl OrcsApp {
         &mut self.engine
     }
 
-    /// Returns the output sink.
+    /// Returns the console renderer.
     #[must_use]
-    pub fn output(&self) -> &Arc<dyn OutputSink> {
-        &self.output
+    pub fn renderer(&self) -> &ConsoleRenderer {
+        &self.renderer
     }
 
     /// Returns the pending approval ID.
@@ -214,18 +216,19 @@ impl OrcsApp {
         tracing::info!("Starting interactive mode (IO channel: {})", io_id);
 
         self.engine.start();
-        self.output
-            .info("Interactive mode started. Type 'q' to quit, 'help' for commands.");
+        self.renderer.render_output(&IOOutput::info(
+            "Interactive mode started. Type 'q' to quit, 'help' for commands.",
+        ));
 
         // Display session status with restore information
         if self.is_resumed {
-            self.output.info(&format!(
+            self.renderer.render_output(&IOOutput::info(format!(
                 "Resumed session: {} ({} component(s) restored)",
                 self.session.id, self.restored_count
-            ));
+            )));
         } else {
-            self.output
-                .info(&format!("Session ID: {}", self.session.id));
+            self.renderer
+                .render_output(&IOOutput::info(format!("Session ID: {}", self.session.id)));
         }
 
         let stdin = tokio::io::stdin();
@@ -279,15 +282,21 @@ impl OrcsApp {
 
         // Save session if paused
         if should_save {
-            self.output.info("Saving session...");
+            self.renderer
+                .render_output(&IOOutput::info("Saving session..."));
             self.save_session().await?;
-            self.output
-                .info(&format!("Session saved: {}", self.session.id));
-            self.output
-                .info(&format!("Resume with: orcs --resume {}", self.session.id));
+            self.renderer.render_output(&IOOutput::info(format!(
+                "Session saved: {}",
+                self.session.id
+            )));
+            self.renderer.render_output(&IOOutput::info(format!(
+                "Resume with: orcs --resume {}",
+                self.session.id
+            )));
         }
 
-        self.output.info("Shutting down...");
+        self.renderer
+            .render_output(&IOOutput::info("Shutting down..."));
         Ok(())
     }
 
@@ -301,7 +310,7 @@ impl OrcsApp {
     ///
     /// Returns control flow instruction for the main loop.
     fn handle_input(&mut self, line: &str) -> LoopControl {
-        let cmd = self.input.parse_line(line);
+        let cmd = InputParser.parse(line);
 
         match &cmd {
             InputCommand::Quit => {
@@ -329,11 +338,13 @@ impl OrcsApp {
             }
             InputCommand::Resume => {
                 // Resume is handled at startup via --resume flag, not during interactive mode
-                self.output
-                    .info("Resume is handled at startup. Use: orcs --resume");
+                self.renderer.render_output(&IOOutput::info(
+                    "Resume is handled at startup. Use: orcs --resume",
+                ));
             }
             InputCommand::Steer { message } => {
-                self.output.info(&format!("Steer: {}", message));
+                self.renderer
+                    .render_output(&IOOutput::info(format!("Steer: {}", message)));
                 // TODO: Implement steer
             }
             InputCommand::Empty => {
@@ -344,7 +355,7 @@ impl OrcsApp {
                     self.show_help();
                 } else if !input.is_empty() {
                     // Send user message to ClientRunner via IOInput
-                    self.handle_echo_input(input);
+                    self.handle_echo_input(input.as_str());
                 }
             }
         }
@@ -382,8 +393,8 @@ impl OrcsApp {
         let io_input = IOInput::line(input);
 
         if let Err(e) = self.io_input.try_send(io_input) {
-            self.output
-                .error(&format!("Failed to send message: {:?}", e));
+            self.renderer
+                .render_output(&IOOutput::error(format!("Failed to send message: {:?}", e)));
         }
     }
 
@@ -417,7 +428,8 @@ impl OrcsApp {
                 }
             }
         } else {
-            self.output.warn("No pending approval. Use: y <id>");
+            self.renderer
+                .render_output(&IOOutput::warn("No pending approval. Use: y <id>"));
         }
     }
 
@@ -451,8 +463,8 @@ impl OrcsApp {
                 }
             }
         } else {
-            self.output
-                .warn("No pending approval. Use: n <id> [reason]");
+            self.renderer
+                .render_output(&IOOutput::warn("No pending approval. Use: n <id> [reason]"));
         }
     }
 
@@ -460,88 +472,58 @@ impl OrcsApp {
     ///
     /// Used when IOInput channel is full/closed.
     fn handle_approve_fallback(&mut self, approval_id: &str) {
-        let signal = Signal::approve(approval_id, self.input.principal().clone());
+        let signal = Signal::approve(approval_id, self.principal.clone());
         self.engine.signal(signal);
-        self.output.show_approved(approval_id);
+        self.renderer
+            .render_output(&IOOutput::approved(approval_id));
     }
 
     /// Fallback: Broadcast reject signal directly via engine.
     ///
     /// Used when IOInput channel is full/closed.
     fn handle_reject_fallback(&mut self, approval_id: &str, reason: Option<String>) {
-        let signal = Signal::reject(approval_id, reason.clone(), self.input.principal().clone());
+        let signal = Signal::reject(approval_id, reason.clone(), self.principal.clone());
         self.engine.signal(signal);
-        self.output.show_rejected(approval_id, reason.as_deref());
+        self.renderer
+            .render_output(&IOOutput::rejected(approval_id, reason));
     }
 
     /// Shows help text.
     fn show_help(&self) {
-        self.output.info("Commands:");
-        self.output
-            .info("  y [id]         - Approve pending request");
-        self.output
-            .info("  n [id] [reason]- Reject pending request");
-        self.output.info("  p / pause      - Pause execution");
-        self.output.info("  r / resume     - Resume execution");
-        self.output
-            .info("  s <message>    - Steer with instruction");
-        self.output.info("  q / quit       - Quit application");
-        self.output.info("  veto / stop    - Emergency stop");
+        self.renderer.render_output(&IOOutput::info("Commands:"));
+        self.renderer.render_output(&IOOutput::info(
+            "  y [id]         - Approve pending request",
+        ));
+        self.renderer
+            .render_output(&IOOutput::info("  n [id] [reason]- Reject pending request"));
+        self.renderer
+            .render_output(&IOOutput::info("  p / pause      - Pause execution"));
+        self.renderer
+            .render_output(&IOOutput::info("  r / resume     - Resume execution"));
+        self.renderer
+            .render_output(&IOOutput::info("  s <message>    - Steer with instruction"));
+        self.renderer
+            .render_output(&IOOutput::info("  q / quit       - Quit application"));
+        self.renderer
+            .render_output(&IOOutput::info("  veto / stop    - Emergency stop"));
     }
 
     /// Handles IO output from ClientRunner.
     ///
     /// Updates pending_approval when an approval request is received.
     fn handle_io_output(&mut self, io_out: IOOutput) {
-        match io_out {
-            IOOutput::Print { text, style } => {
-                use orcs_runtime::OutputStyle;
-                match style {
-                    OutputStyle::Warn => self.output.warn(&text),
-                    OutputStyle::Error => self.output.error(&text),
-                    OutputStyle::Info => self.output.info(&text),
-                    _ => self.output.info(&text),
-                }
-            }
-            IOOutput::ShowApprovalRequest {
-                id,
-                operation,
-                description,
-            } => {
-                // Store as pending approval for "y" / "n" without ID
-                self.pending_approval = Some(PendingApproval { id: id.clone() });
-
-                // Display the request
-                self.output
-                    .show_approval_request(&orcs_runtime::ApprovalRequest::with_id(
-                        &id,
-                        &operation,
-                        &description,
-                        serde_json::json!({}),
-                    ));
-            }
-            IOOutput::ShowApproved { approval_id } => {
-                self.output.show_approved(&approval_id);
-            }
-            IOOutput::ShowRejected {
-                approval_id,
-                reason,
-            } => {
-                self.output.show_rejected(&approval_id, reason.as_deref());
-            }
-            IOOutput::Prompt { message } => {
-                self.output.info(&message);
-            }
-            IOOutput::Clear => {
-                // No-op for console output
-            }
+        // Store as pending approval for "y" / "n" without ID
+        if let IOOutput::ShowApprovalRequest { ref id, .. } = io_out {
+            self.pending_approval = Some(PendingApproval { id: id.clone() });
         }
+
+        // Delegate rendering to ConsoleRenderer
+        self.renderer.render_output(&io_out);
     }
 }
 
 /// Builder for [`OrcsApp`].
 pub struct OrcsAppBuilder {
-    output: Option<Arc<dyn OutputSink>>,
     verbose: bool,
     session_path: Option<PathBuf>,
     resume_session_id: Option<String>,
@@ -552,18 +534,10 @@ impl OrcsAppBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            output: None,
             verbose: false,
             session_path: None,
             resume_session_id: None,
         }
-    }
-
-    /// Sets a custom output sink.
-    #[must_use]
-    pub fn with_output(mut self, output: Arc<dyn OutputSink>) -> Self {
-        self.output = Some(output);
-        self
     }
 
     /// Enables verbose output.
@@ -613,7 +587,7 @@ impl OrcsAppBuilder {
 
         // Spawn ClientRunner for IO channel with EchoWithHilComponent
         let echo_component = Box::new(EchoWithHilComponent::new());
-        let _handle = engine.spawn_client_runner(io, echo_component, io_port, principal);
+        let _handle = engine.spawn_client_runner(io, echo_component, io_port, principal.clone());
         tracing::info!(
             "IO channel ClientRunner spawned with EchoWithHilComponent: {}",
             io
@@ -630,24 +604,19 @@ impl OrcsAppBuilder {
                 (SessionAsset::new(), false, 0)
             };
 
-        // Create output sink
-        let output: Arc<dyn OutputSink> = self.output.unwrap_or_else(|| {
-            if self.verbose {
-                Arc::new(ConsoleOutput::verbose())
-            } else {
-                Arc::new(ConsoleOutput::new())
-            }
-        });
-
-        // Create input handler
-        let input = HumanInput::new();
+        // Create console renderer
+        let renderer = if self.verbose {
+            ConsoleRenderer::verbose()
+        } else {
+            ConsoleRenderer::new()
+        };
 
         tracing::debug!("OrcsApp created (fully initialized)");
 
         Ok(OrcsApp {
             engine,
-            input,
-            output,
+            principal,
+            renderer,
             io_input,
             io_output,
             pending_approval: None,

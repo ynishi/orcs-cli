@@ -45,7 +45,7 @@
 //!     input_handle.send(IOInput::line("y")).await.unwrap();
 //!
 //!     // Bridge layer receives and processes
-//!     // (in HumanChannel)
+//!     // (in ClientRunner)
 //!
 //!     // Bridge layer sends output
 //!     port.send(IOOutput::info("Approved")).await.unwrap();
@@ -65,7 +65,7 @@ pub const DEFAULT_BUFFER_SIZE: usize = 64;
 /// IO Port for Bridge layer.
 ///
 /// Holds the receiving end of input channel and sending end of output channel.
-/// Owned by HumanChannel.
+/// Owned by ClientRunner.
 pub struct IOPort {
     /// Channel identifier this port belongs to.
     channel_id: ChannelId,
@@ -79,7 +79,7 @@ impl IOPort {
     /// Creates a new IOPort with associated handles.
     ///
     /// Returns a tuple of:
-    /// - `IOPort`: For the Bridge layer (HumanChannel)
+    /// - `IOPort`: For the Bridge layer (ClientRunner)
     /// - `IOInputHandle`: For the View layer to send input
     /// - `IOOutputHandle`: For the View layer to receive output
     ///

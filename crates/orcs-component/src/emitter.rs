@@ -59,9 +59,7 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Clone)]
-    struct MockEmitter {
-        name: String,
-    }
+    struct MockEmitter;
 
     impl Emitter for MockEmitter {
         fn emit_output(&self, _message: &str) {
@@ -79,18 +77,14 @@ mod tests {
 
     #[test]
     fn mock_emitter_works() {
-        let emitter: Box<dyn Emitter> = Box::new(MockEmitter {
-            name: "test".to_string(),
-        });
+        let emitter: Box<dyn Emitter> = Box::new(MockEmitter);
         emitter.emit_output("hello");
         emitter.emit_output_with_level("warning", "warn");
     }
 
     #[test]
     fn emitter_clone() {
-        let emitter: Box<dyn Emitter> = Box::new(MockEmitter {
-            name: "test".to_string(),
-        });
+        let emitter: Box<dyn Emitter> = Box::new(MockEmitter);
         let cloned = emitter.clone();
         cloned.emit_output("from clone");
     }

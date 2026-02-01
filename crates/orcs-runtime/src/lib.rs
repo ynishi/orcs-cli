@@ -74,8 +74,8 @@
 //!
 //! Input/output for Human interaction:
 //!
-//! - [`HumanInput`](io::HumanInput): stdin command parsing
-//! - [`OutputSink`](io::OutputSink): output display trait
+//! - [`InputParser`](io::InputParser): stdin command parsing
+//! - [`ConsoleRenderer`](io::ConsoleRenderer): console output rendering
 //!
 //! # Why This Separation?
 //!
@@ -105,10 +105,9 @@ pub use components::{
     NoopComponent,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
-#[allow(deprecated)]
 pub use io::{
-    ConsoleOutput, HumanInput, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
-    InputCommand, InputContext, OutputSink, OutputStyle,
+    IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext,
+    OutputStyle,
 };
 pub use session::{
     default_session_path, LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError,

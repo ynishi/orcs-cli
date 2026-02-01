@@ -24,7 +24,7 @@
 //! │  │  output_tx ──► IOOutput                                  │  │
 //! │  └─────────────────────────────────────────────────────────┘  │
 //! │                              │                                  │
-//! │                  IOBridge (Component)                    │
+//! │                  IOBridge (Bridge)                              │
 //! │                              │                                  │
 //! │                    Signal / Request                             │
 //! └───────────────────────────────────────────────────────────────┘
@@ -40,8 +40,10 @@
 //!
 //! - [`types`] - IO types ([`IOInput`], [`IOOutput`], [`OutputStyle`])
 //! - [`port`] - IO port and handles ([`IOPort`], [`IOInputHandle`], [`IOOutputHandle`])
-//! - [`input`] - Input parsing ([`HumanInput`], [`InputCommand`])
-//! - [`output`] - Output rendering ([`OutputSink`], [`ConsoleOutput`])
+//! - [`input`] - Input commands ([`InputCommand`])
+//! - [`parser`] - Input parsing ([`InputParser`])
+//! - [`console`] - Console I/O ([`Console`], [`ConsoleInputReader`])
+//! - [`renderer`] - Console rendering ([`ConsoleRenderer`])
 //!
 //! # Example
 //!
@@ -54,12 +56,11 @@
 //! let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 //!
 //! // View layer uses handles
-//! // Bridge layer (HumanChannel) uses port
+//! // Bridge layer (IOBridge) uses port
 //! ```
 
 mod console;
 mod input;
-mod output;
 mod parser;
 mod port;
 mod renderer;
@@ -77,11 +78,4 @@ pub use renderer::ConsoleRenderer;
 
 // Input parsing
 pub use input::InputCommand;
-
-// Internal: Parser is injected into IOBridge
-pub(crate) use parser::InputParser;
-
-// Legacy/compatibility (deprecated, to be removed)
-#[allow(deprecated)]
-pub use input::HumanInput;
-pub use output::{ConsoleOutput, OutputSink};
+pub use parser::InputParser;

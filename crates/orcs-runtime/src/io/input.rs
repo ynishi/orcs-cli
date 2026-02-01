@@ -1,22 +1,10 @@
-//! Human input handling (legacy compatibility layer).
+//! Input command types.
 //!
-//! This module provides backward compatibility for `HumanInput`.
-//! New code should use [`super::InputParser`] directly.
-//!
-//! # Migration
-//!
-//! ```ignore
-//! // Old (deprecated)
-//! let input = HumanInput::new();
-//! let cmd = input.parse_line("y");
-//!
-//! // New (preferred)
-//! let cmd = InputParser::parse("y");
-//! ```
+//! Defines [`InputCommand`] enum representing parsed user input.
+//! Use [`super::InputParser`] to parse text into commands.
 
-use super::parser::InputParser;
 use orcs_event::Signal;
-use orcs_types::{Principal, PrincipalId};
+use orcs_types::Principal;
 
 /// Parsed input command from Human.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,94 +108,28 @@ impl InputCommand {
     }
 }
 
-/// Human input parser and handler.
-///
-/// Parses text input from stdin into [`InputCommand`]s.
-pub struct HumanInput {
-    /// Principal representing the Human user.
-    principal: Principal,
-}
-
-impl HumanInput {
-    /// Creates a new HumanInput handler.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            principal: Principal::User(PrincipalId::new()),
-        }
-    }
-
-    /// Creates a HumanInput with a specific principal.
-    #[must_use]
-    pub fn with_principal(principal: Principal) -> Self {
-        Self { principal }
-    }
-
-    /// Returns the Human principal.
-    #[must_use]
-    pub fn principal(&self) -> &Principal {
-        &self.principal
-    }
-
-    /// Parses a line of input into a command.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - The input line (trimmed)
-    ///
-    /// # Returns
-    ///
-    /// The parsed [`InputCommand`].
-    ///
-    /// # Note
-    ///
-    /// This delegates to [`InputParser::parse`]. The `&self` parameter is
-    /// not used; this method exists for backward compatibility.
-    #[must_use]
-    pub fn parse_line(&self, line: &str) -> InputCommand {
-        InputParser.parse(line)
-    }
-
-    /// Parses input and converts to a Signal if applicable.
-    ///
-    /// Convenience method combining `parse_line` and `to_signal`.
-    #[must_use]
-    pub fn parse_to_signal(&self, line: &str, default_approval_id: Option<&str>) -> Option<Signal> {
-        let cmd = self.parse_line(line);
-        cmd.to_signal(self.principal.clone(), default_approval_id)
-    }
-}
-
-impl Default for HumanInput {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::InputParser;
     use orcs_event::SignalKind;
-
-    fn input() -> HumanInput {
-        HumanInput::new()
-    }
+    use orcs_types::PrincipalId;
 
     #[test]
     fn parse_approve_simple() {
-        let cmd = input().parse_line("y");
+        let cmd = InputParser.parse("y");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
 
-        let cmd = input().parse_line("yes");
+        let cmd = InputParser.parse("yes");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
 
-        let cmd = input().parse_line("approve");
+        let cmd = InputParser.parse("approve");
         assert!(matches!(cmd, InputCommand::Approve { approval_id: None }));
     }
 
     #[test]
     fn parse_approve_with_id() {
-        let cmd = input().parse_line("y req-123");
+        let cmd = InputParser.parse("y req-123");
         assert!(matches!(
             cmd,
             InputCommand::Approve {
@@ -218,7 +140,7 @@ mod tests {
 
     #[test]
     fn parse_reject_simple() {
-        let cmd = input().parse_line("n");
+        let cmd = InputParser.parse("n");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -230,7 +152,7 @@ mod tests {
 
     #[test]
     fn parse_reject_with_id() {
-        let cmd = input().parse_line("n req-456");
+        let cmd = InputParser.parse("n req-456");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -242,7 +164,7 @@ mod tests {
 
     #[test]
     fn parse_reject_with_reason() {
-        let cmd = input().parse_line("n req-789 too dangerous");
+        let cmd = InputParser.parse("n req-789 too dangerous");
         assert!(matches!(
             cmd,
             InputCommand::Reject {
@@ -254,15 +176,15 @@ mod tests {
 
     #[test]
     fn parse_pause_resume() {
-        assert!(matches!(input().parse_line("p"), InputCommand::Pause));
-        assert!(matches!(input().parse_line("pause"), InputCommand::Pause));
-        assert!(matches!(input().parse_line("r"), InputCommand::Resume));
-        assert!(matches!(input().parse_line("resume"), InputCommand::Resume));
+        assert!(matches!(InputParser.parse("p"), InputCommand::Pause));
+        assert!(matches!(InputParser.parse("pause"), InputCommand::Pause));
+        assert!(matches!(InputParser.parse("r"), InputCommand::Resume));
+        assert!(matches!(InputParser.parse("resume"), InputCommand::Resume));
     }
 
     #[test]
     fn parse_steer() {
-        let cmd = input().parse_line("s focus on error handling");
+        let cmd = InputParser.parse("s focus on error handling");
         assert!(matches!(
             cmd,
             InputCommand::Steer { ref message } if message == "focus on error handling"
@@ -271,40 +193,39 @@ mod tests {
 
     #[test]
     fn parse_steer_empty_is_unknown() {
-        // Empty steer message should be treated as unknown
-        let cmd = input().parse_line("s");
+        let cmd = InputParser.parse("s");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
 
-        let cmd = input().parse_line("steer");
+        let cmd = InputParser.parse("steer");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
     }
 
     #[test]
     fn parse_quit() {
-        assert!(matches!(input().parse_line("q"), InputCommand::Quit));
-        assert!(matches!(input().parse_line("quit"), InputCommand::Quit));
-        assert!(matches!(input().parse_line("exit"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("q"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("quit"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("exit"), InputCommand::Quit));
     }
 
     #[test]
     fn parse_veto() {
-        assert!(matches!(input().parse_line("veto"), InputCommand::Veto));
-        assert!(matches!(input().parse_line("stop"), InputCommand::Veto));
-        assert!(matches!(input().parse_line("abort"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("veto"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("stop"), InputCommand::Veto));
+        assert!(matches!(InputParser.parse("abort"), InputCommand::Veto));
     }
 
     #[test]
     fn parse_unknown() {
-        let cmd = input().parse_line("foobar");
+        let cmd = InputParser.parse("foobar");
         assert!(matches!(cmd, InputCommand::Unknown { .. }));
     }
 
     #[test]
     fn parse_empty() {
-        let cmd = input().parse_line("");
+        let cmd = InputParser.parse("");
         assert!(matches!(cmd, InputCommand::Empty));
 
-        let cmd = input().parse_line("   ");
+        let cmd = InputParser.parse("   ");
         assert!(matches!(cmd, InputCommand::Empty));
     }
 
@@ -401,17 +322,17 @@ mod tests {
     #[test]
     fn case_insensitive() {
         assert!(matches!(
-            input().parse_line("Y"),
+            InputParser.parse("Y"),
             InputCommand::Approve { .. }
         ));
         assert!(matches!(
-            input().parse_line("YES"),
+            InputParser.parse("YES"),
             InputCommand::Approve { .. }
         ));
         assert!(matches!(
-            input().parse_line("N"),
+            InputParser.parse("N"),
             InputCommand::Reject { .. }
         ));
-        assert!(matches!(input().parse_line("QUIT"), InputCommand::Quit));
+        assert!(matches!(InputParser.parse("QUIT"), InputCommand::Quit));
     }
 }
