@@ -31,12 +31,11 @@
 //! ```no_run
 //! use orcs_runtime::io::{Console, IOPort};
 //! use orcs_runtime::components::IOBridge;
-//! use orcs_types::{ChannelId, Principal, PrincipalId};
+//! use orcs_types::ChannelId;
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let channel_id = ChannelId::new();
-//!     let principal = Principal::User(PrincipalId::new());
 //!
 //!     // Create IO port and handles
 //!     let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
@@ -44,8 +43,8 @@
 //!     // Create console with handles
 //!     let console = Console::new(input_handle, output_handle);
 //!
-//!     // Create IOBridge (Bridge)
-//!     let bridge = IOBridge::new(port, principal);
+//!     // Create IOBridge (Bridge) - principal is now provided when calling methods
+//!     let bridge = IOBridge::new(port);
 //!
 //!     // Run console (spawns input reader and renderer tasks)
 //!     console.run().await;

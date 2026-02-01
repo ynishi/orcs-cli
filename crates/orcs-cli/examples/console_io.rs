@@ -51,8 +51,8 @@ async fn main() {
     // Setup Ctrl+C handler
     setup_ctrlc_handler(input_handle.clone());
 
-    // Create IOBridge (Bridge layer)
-    let mut bridge = IOBridge::new(port, principal);
+    // Create IOBridge (Bridge layer) - principal passed to methods, not constructor
+    let mut bridge = IOBridge::new(port);
 
     // Create Console (View layer)
     let console = Console::new(input_handle, output_handle);
@@ -74,8 +74,8 @@ async fn main() {
     println!("Waiting for input...\n");
 
     loop {
-        // Wait for input
-        match bridge.recv_input().await {
+        // Wait for input (pass principal for Signal creation)
+        match bridge.recv_input(&principal).await {
             Some(Ok(signal)) => {
                 // Input converted to Signal
                 println!("\n[Signal received]");

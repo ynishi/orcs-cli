@@ -147,6 +147,7 @@
 
 #[allow(clippy::module_inception)]
 mod channel;
+mod client;
 mod command;
 mod config;
 mod error;
@@ -156,6 +157,7 @@ mod traits;
 mod world;
 
 pub use channel::{BaseChannel, Channel, ChannelState};
+pub use client::ClientChannel;
 pub use command::{StateTransition, WorldCommand};
 pub use config::{priority, ChannelConfig, MaxPrivilege};
 pub use error::ChannelError;
