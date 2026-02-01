@@ -317,7 +317,9 @@ mod tests {
     #[test]
     fn console_split() {
         let channel_id = ChannelId::new();
-        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        // NOTE: `_port` must be kept alive. Using `_` would drop IOPort immediately,
+        // closing the channel and causing `input_reader.is_closed()` to return true.
+        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let console = Console::new(input_handle, output_handle);
         let (input_reader, renderer, _) = console.split();

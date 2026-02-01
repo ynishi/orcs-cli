@@ -300,6 +300,9 @@ impl OrcsApp {
                 self.output.info(&format!("Steer: {}", message));
                 // TODO: Implement steer
             }
+            InputCommand::Empty => {
+                // Blank line - ignore
+            }
             InputCommand::Unknown { input } => {
                 if input == "help" {
                     self.show_help();
