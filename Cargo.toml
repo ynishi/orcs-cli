@@ -46,6 +46,7 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

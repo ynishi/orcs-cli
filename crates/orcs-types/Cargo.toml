@@ -9,5 +9,12 @@ license.workspace = true
 uuid = { workspace = true }
 serde = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "principal_clone"
+harness = false
+
 [lints]
 workspace = true
