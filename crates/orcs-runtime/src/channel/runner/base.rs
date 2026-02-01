@@ -35,6 +35,7 @@ use super::common::{
     determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
     send_abort, send_transition, SignalAction,
 };
+use super::EventEmitter;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
@@ -142,6 +143,58 @@ impl ChannelRunner {
         component: Box<dyn Component>,
     ) -> (Self, ChannelHandle) {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
+
+        let runner = Self {
+            id,
+            event_rx,
+            signal_rx,
+            world_tx,
+            world,
+            component: Arc::new(Mutex::new(component)),
+            paused_queue: VecDeque::new(),
+        };
+
+        let handle = ChannelHandle::new(id, event_tx);
+
+        (runner, handle)
+    }
+
+    /// Creates a new ChannelRunner with an EventEmitter injected into the Component.
+    ///
+    /// This ensures the Emitter's `event_tx` is the same channel that the Runner
+    /// listens on (`event_rx`), enabling proper event delivery.
+    ///
+    /// Use this for IO-less (event-only) Components that need to emit output
+    /// via `orcs.output()` in Lua scripts.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Channel ID
+    /// * `world_tx` - World command sender
+    /// * `world` - Read-only World access
+    /// * `signal_rx` - Signal receiver (broadcast)
+    /// * `signal_tx` - Signal sender (for Emitter to broadcast)
+    /// * `component` - Component to bind (will receive the emitter)
+    #[must_use]
+    pub fn new_with_emitter(
+        id: ChannelId,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_rx: broadcast::Receiver<Signal>,
+        signal_tx: broadcast::Sender<Signal>,
+        mut component: Box<dyn Component>,
+    ) -> (Self, ChannelHandle) {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
+
+        // Create emitter with the SAME event_tx that runner will receive on
+        let component_id = component.id().clone();
+        let emitter = EventEmitter::new(event_tx.clone(), signal_tx, component_id.clone());
+        component.set_emitter(Box::new(emitter));
+
+        info!(
+            "ChannelRunner::new_with_emitter: injected emitter for {}",
+            component_id.fqn()
+        );
 
         let runner = Self {
             id,
@@ -632,6 +685,126 @@ mod tests {
         let (runner, handle) = factory.create(primary, mock_component());
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn runner_with_emitter_creation() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::new_with_emitter(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            signal_tx.clone(),
+            mock_component(),
+        );
+
+        assert_eq!(runner.id(), primary);
+        assert_eq!(handle.id, primary);
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn runner_with_emitter_receives_emitted_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        // Component that uses emitter to emit output
+        struct EmittingComponent {
+            id: ComponentId,
+            emitter: Option<Box<dyn orcs_component::Emitter>>,
+            call_count: StdArc<AtomicUsize>,
+        }
+
+        impl EmittingComponent {
+            fn new(call_count: StdArc<AtomicUsize>) -> Self {
+                Self {
+                    id: ComponentId::builtin("emitting"),
+                    emitter: None,
+                    call_count,
+                }
+            }
+        }
+
+        impl Component for EmittingComponent {
+            fn id(&self) -> &ComponentId {
+                &self.id
+            }
+
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+
+            fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                // Emit output via emitter when receiving a request
+                if let Some(emitter) = &self.emitter {
+                    emitter.emit_output("Response from component");
+                }
+                Ok(request.payload.clone())
+            }
+
+            fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+                if signal.is_veto() {
+                    SignalResponse::Abort
+                } else {
+                    SignalResponse::Handled
+                }
+            }
+
+            fn abort(&mut self) {}
+
+            fn set_emitter(&mut self, emitter: Box<dyn orcs_component::Emitter>) {
+                self.emitter = Some(emitter);
+            }
+        }
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let call_count = StdArc::new(AtomicUsize::new(0));
+        let component = Box::new(EmittingComponent::new(StdArc::clone(&call_count)));
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::new_with_emitter(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            signal_tx.clone(),
+            component,
+        );
+
+        let runner_task = tokio::spawn(runner.run());
+
+        // Inject an event
+        let event = Event {
+            category: EventCategory::Echo,
+            operation: "test".to_string(),
+            source: ComponentId::builtin("test"),
+            payload: serde_json::json!({"trigger": true}),
+        };
+        handle.inject(event).await.unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Component should have been called
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 1,
+            "Component should have received the event"
+        );
+
+        // Stop runner
+        signal_tx
+            .send(Signal::cancel(primary, Principal::System))
+            .unwrap();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
         teardown(manager_task, world_tx).await;
     }

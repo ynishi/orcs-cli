@@ -213,6 +213,62 @@ impl OrcsEngine {
         handle
     }
 
+    /// Spawn a channel runner with an EventEmitter injected into the Component.
+    ///
+    /// This enables IO-less (event-only) execution for Components that support
+    /// the Emitter trait. The Component can emit output via `emit_output()`.
+    ///
+    /// Use this for ChannelRunner-based execution instead of ClientRunner.
+    /// The Component receives events via `on_request()` and emits output via Emitter.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind (must implement `set_emitter`)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Lua scripts can use orcs.output() after emitter is set
+    /// let lua_component = LuaComponent::from_script("...")?;
+    /// let handle = engine.spawn_runner_with_emitter(channel_id, Box::new(lua_component));
+    /// ```
+    pub fn spawn_runner_with_emitter(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+    ) -> ChannelHandle {
+        let signal_rx = self.signal_tx.subscribe();
+        let component_id = component.id().clone();
+
+        // Use new_with_emitter to ensure event_tx/event_rx consistency
+        let (runner, handle) = ChannelRunner::new_with_emitter(
+            channel_id,
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            signal_rx,
+            self.signal_tx.clone(),
+            component,
+        );
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!(
+            "Spawned runner with emitter for channel {} (component={})",
+            channel_id,
+            component_id.fqn()
+        );
+        handle
+    }
+
     /// Spawn a ClientRunner for an IO channel with a bound Component.
     ///
     /// ClientRunner provides IO bridging for Human-interactive channels.
