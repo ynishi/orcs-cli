@@ -32,6 +32,7 @@
 //! 4. Cleanup on drop
 
 use super::command::{StateTransition, WorldCommand};
+use super::traits::ChannelCore;
 use super::{ChannelConfig, World};
 use orcs_component::Component;
 use orcs_event::{EventCategory, Request, Signal, SignalKind, SignalResponse};

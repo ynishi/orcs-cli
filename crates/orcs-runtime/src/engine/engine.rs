@@ -808,7 +808,7 @@ impl OrcsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::WorldCommand;
+    use crate::channel::{ChannelCore, WorldCommand};
     use crate::Principal;
     use orcs_component::ComponentError;
     use orcs_event::Request;

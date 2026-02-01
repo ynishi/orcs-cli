@@ -80,7 +80,7 @@
 //! # Example: Basic Usage
 //!
 //! ```
-//! use orcs_runtime::{World, ChannelConfig, ChannelState};
+//! use orcs_runtime::{World, ChannelConfig, ChannelCore, ChannelState};
 //!
 //! // Create World
 //! let mut world = World::new();
@@ -152,12 +152,14 @@ mod config;
 mod error;
 mod manager;
 mod runner;
+mod traits;
 mod world;
 
-pub use channel::{Channel, ChannelState};
+pub use channel::{BaseChannel, Channel, ChannelState};
 pub use command::{StateTransition, WorldCommand};
 pub use config::{priority, ChannelConfig, MaxPrivilege};
 pub use error::ChannelError;
 pub use manager::{WorldCommandSender, WorldManager};
 pub use runner::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
+pub use traits::{ChannelCore, ChannelMut};
 pub use world::World;

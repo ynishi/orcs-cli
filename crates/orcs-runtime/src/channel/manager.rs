@@ -43,6 +43,7 @@
 //! ```
 
 use super::command::{StateTransition, WorldCommand};
+use super::traits::{ChannelCore, ChannelMut};
 use super::World;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};

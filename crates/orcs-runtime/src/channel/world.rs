@@ -32,7 +32,8 @@
 
 use super::channel::Channel;
 use super::config::ChannelConfig;
-use orcs_types::ChannelId;
+use super::traits::{ChannelCore, ChannelMut};
+use orcs_types::{ChannelId, Principal};
 use std::collections::HashMap;
 
 /// Central manager for all [`Channel`]s.
@@ -63,7 +64,7 @@ use std::collections::HashMap;
 /// # Example
 ///
 /// ```
-/// use orcs_runtime::{World, ChannelConfig, ChannelState};
+/// use orcs_runtime::{World, ChannelConfig, ChannelCore, ChannelState};
 ///
 /// let mut world = World::new();
 ///
@@ -120,7 +121,7 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelConfig};
+    /// use orcs_runtime::{World, ChannelConfig, ChannelCore};
     ///
     /// let mut world = World::new();
     ///
@@ -135,8 +136,23 @@ impl World {
     /// ```
     #[must_use]
     pub fn create_channel(&mut self, config: ChannelConfig) -> ChannelId {
+        self.create_channel_with_principal(config, Principal::System)
+    }
+
+    /// Creates a root channel with a specific principal.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration for the new channel
+    /// * `principal` - Principal for scope resolution
+    #[must_use]
+    pub fn create_channel_with_principal(
+        &mut self,
+        config: ChannelConfig,
+        principal: Principal,
+    ) -> ChannelId {
         let id = ChannelId::new();
-        let channel = Channel::new(id, None, config);
+        let channel = Channel::new(id, None, config, principal);
         self.channels.insert(id, channel);
         id
     }
@@ -161,7 +177,7 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelConfig};
+    /// use orcs_runtime::{World, ChannelConfig, ChannelCore};
     ///
     /// let mut world = World::new();
     /// let root = world.create_channel(ChannelConfig::interactive());
@@ -196,7 +212,7 @@ impl World {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{World, ChannelConfig, MaxPrivilege};
+    /// use orcs_runtime::{World, ChannelConfig, ChannelCore, MaxPrivilege};
     ///
     /// let mut world = World::new();
     /// let root = world.create_channel(ChannelConfig::interactive());
@@ -222,6 +238,7 @@ impl World {
         // Get parent channel for inheritance
         let parent_channel = self.channels.get(&parent)?;
         let parent_config = *parent_channel.config();
+        let parent_principal = parent_channel.principal().clone();
 
         // Build ancestor path: [parent, ...parent's ancestors]
         let mut ancestor_path = Vec::with_capacity(parent_channel.depth() + 1);
@@ -232,7 +249,13 @@ impl World {
         let inherited_config = config.inherit_from(&parent_config);
 
         let id = ChannelId::new();
-        let channel = Channel::new_with_ancestors(id, parent, inherited_config, ancestor_path);
+        let channel = Channel::new_with_ancestors(
+            id,
+            parent,
+            inherited_config,
+            parent_principal,
+            ancestor_path,
+        );
         self.channels.insert(id, channel);
 
         // Register with parent

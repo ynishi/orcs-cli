@@ -1,6 +1,6 @@
 //! Channel - unit of parallel execution.
 //!
-//! A [`Channel`] represents an isolated execution context within the ORCS
+//! A [`BaseChannel`] represents an isolated execution context within the ORCS
 //! system. Channels form a tree structure where child channels inherit
 //! context from their parents.
 //!
@@ -38,11 +38,12 @@
 //! # Example
 //!
 //! ```
-//! use orcs_runtime::{Channel, ChannelConfig, ChannelState};
-//! use orcs_types::ChannelId;
+//! use orcs_runtime::{BaseChannel, ChannelConfig, ChannelCore, ChannelMut, ChannelState};
+//! use orcs_types::{ChannelId, Principal};
 //!
 //! let id = ChannelId::new();
-//! let mut channel = Channel::new(id, None, ChannelConfig::interactive());
+//! let principal = Principal::System;
+//! let mut channel = BaseChannel::new(id, None, ChannelConfig::interactive(), principal);
 //!
 //! assert!(channel.is_running());
 //! assert_eq!(channel.priority(), 255);
@@ -51,10 +52,11 @@
 //! ```
 
 use super::config::ChannelConfig;
-use orcs_types::ChannelId;
+use super::traits::{ChannelCore, ChannelMut};
+use orcs_types::{ChannelId, Principal};
 use std::collections::HashSet;
 
-/// State of a [`Channel`].
+/// State of a channel.
 ///
 /// Channels start in [`Running`](ChannelState::Running) state and can
 /// transition through various states. Terminal states are
@@ -64,13 +66,13 @@ use std::collections::HashSet;
 ///
 /// | From | To | Method |
 /// |------|----|--------|
-/// | Running | Completed | [`Channel::complete()`] |
-/// | Running | Aborted | [`Channel::abort()`] |
-/// | Running | Paused | [`Channel::pause()`] |
-/// | Running | AwaitingApproval | [`Channel::await_approval()`] |
-/// | Paused | Running | [`Channel::resume()`] |
-/// | AwaitingApproval | Running | [`Channel::resolve_approval()`] |
-/// | AwaitingApproval | Aborted | [`Channel::abort()`] (rejected) |
+/// | Running | Completed | [`ChannelMut::complete()`] |
+/// | Running | Aborted | [`ChannelMut::abort()`] |
+/// | Running | Paused | [`ChannelMut::pause()`] |
+/// | Running | AwaitingApproval | [`ChannelMut::await_approval()`] |
+/// | Paused | Running | [`ChannelMut::resume()`] |
+/// | AwaitingApproval | Running | [`ChannelMut::resolve_approval()`] |
+/// | AwaitingApproval | Aborted | [`ChannelMut::abort()`] (rejected) |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Channel is actively running.
@@ -78,7 +80,7 @@ pub enum ChannelState {
 
     /// Channel is paused.
     ///
-    /// Can be resumed with [`Channel::resume()`].
+    /// Can be resumed with [`ChannelMut::resume()`].
     Paused,
 
     /// Channel is waiting for Human approval (HIL).
@@ -101,13 +103,14 @@ pub enum ChannelState {
     },
 }
 
-/// Unit of parallel execution.
+/// Base channel implementation.
 ///
-/// A `Channel` represents an isolated execution context that can:
+/// A `BaseChannel` represents an isolated execution context that can:
 /// - Track its current state ([`ChannelState`])
 /// - Maintain parent-child relationships
 /// - Control behavior via [`ChannelConfig`]
 /// - Transition through its lifecycle
+/// - Hold a [`Principal`] for scope resolution
 ///
 /// # Parent-Child Relationships
 ///
@@ -130,18 +133,18 @@ pub enum ChannelState {
 /// # Example
 ///
 /// ```
-/// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
-/// use orcs_types::ChannelId;
+/// use orcs_runtime::{BaseChannel, ChannelConfig, ChannelCore, ChannelMut, ChannelState};
+/// use orcs_types::{ChannelId, Principal};
 ///
 /// // Create a root channel
 /// let root_id = ChannelId::new();
-/// let mut root = Channel::new(root_id, None, ChannelConfig::interactive());
+/// let mut root = BaseChannel::new(root_id, None, ChannelConfig::interactive(), Principal::System);
 /// assert_eq!(root.priority(), 255);
 /// assert!(root.can_spawn());
 ///
 /// // Create a background child channel
 /// let child_id = ChannelId::new();
-/// let child = Channel::new(child_id, Some(root_id), ChannelConfig::background());
+/// let child = BaseChannel::new(child_id, Some(root_id), ChannelConfig::background(), Principal::System);
 /// assert_eq!(child.priority(), 10);
 /// assert!(!child.can_spawn());
 ///
@@ -149,18 +152,20 @@ pub enum ChannelState {
 /// assert!(root.has_children());
 /// ```
 #[derive(Debug)]
-pub struct Channel {
+pub struct BaseChannel {
     id: ChannelId,
     state: ChannelState,
     parent: Option<ChannelId>,
     children: HashSet<ChannelId>,
     config: ChannelConfig,
+    /// Principal for scope resolution.
+    principal: Principal,
     /// Cached ancestor path for O(1) descendant checks.
     /// Ordered: [parent, grandparent, ..., root]
     ancestor_path: Vec<ChannelId>,
 }
 
-impl Channel {
+impl BaseChannel {
     /// Creates a new channel in [`Running`](ChannelState::Running) state.
     ///
     /// # Arguments
@@ -168,6 +173,7 @@ impl Channel {
     /// * `id` - Unique identifier for this channel
     /// * `parent` - Parent channel ID, or `None` for root channels
     /// * `config` - Configuration controlling channel behavior
+    /// * `principal` - Principal for scope resolution
     ///
     /// # Note
     ///
@@ -177,26 +183,32 @@ impl Channel {
     /// # Example
     ///
     /// ```
-    /// use orcs_runtime::{Channel, ChannelConfig};
-    /// use orcs_types::ChannelId;
+    /// use orcs_runtime::{BaseChannel, ChannelConfig, ChannelCore};
+    /// use orcs_types::{ChannelId, Principal};
     ///
     /// // Primary channel (no parent, highest priority)
-    /// let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+    /// let root = BaseChannel::new(ChannelId::new(), None, ChannelConfig::interactive(), Principal::System);
     /// assert_eq!(root.priority(), 255);
     ///
     /// // Background child channel
     /// let parent_id = ChannelId::new();
-    /// let child = Channel::new(ChannelId::new(), Some(parent_id), ChannelConfig::background());
+    /// let child = BaseChannel::new(ChannelId::new(), Some(parent_id), ChannelConfig::background(), Principal::System);
     /// assert_eq!(child.priority(), 10);
     /// ```
     #[must_use]
-    pub fn new(id: ChannelId, parent: Option<ChannelId>, config: ChannelConfig) -> Self {
+    pub fn new(
+        id: ChannelId,
+        parent: Option<ChannelId>,
+        config: ChannelConfig,
+        principal: Principal,
+    ) -> Self {
         Self {
             id,
             state: ChannelState::Running,
             parent,
             children: HashSet::new(),
             config,
+            principal,
             ancestor_path: Vec::new(),
         }
     }
@@ -211,12 +223,14 @@ impl Channel {
     /// * `id` - Unique identifier for this channel
     /// * `parent` - Parent channel ID
     /// * `config` - Configuration controlling channel behavior
+    /// * `principal` - Principal for scope resolution
     /// * `ancestor_path` - Pre-computed path: [parent, grandparent, ..., root]
     #[must_use]
     pub fn new_with_ancestors(
         id: ChannelId,
         parent: ChannelId,
         config: ChannelConfig,
+        principal: Principal,
         ancestor_path: Vec<ChannelId>,
     ) -> Self {
         Self {
@@ -225,62 +239,48 @@ impl Channel {
             parent: Some(parent),
             children: HashSet::new(),
             config,
+            principal,
             ancestor_path,
         }
     }
+}
 
-    /// Returns the scheduling priority (0-255).
-    ///
-    /// Higher values indicate higher priority for scheduling.
-    #[must_use]
-    pub fn priority(&self) -> u8 {
-        self.config.priority()
-    }
+// === ChannelCore trait implementation ===
 
-    /// Returns whether this channel can spawn children.
-    #[must_use]
-    pub fn can_spawn(&self) -> bool {
-        self.config.can_spawn()
-    }
-
-    /// Returns a reference to the channel's configuration.
-    #[must_use]
-    pub fn config(&self) -> &ChannelConfig {
-        &self.config
-    }
-
-    /// Returns the channel's unique identifier.
-    #[must_use]
-    pub fn id(&self) -> ChannelId {
+impl ChannelCore for BaseChannel {
+    fn id(&self) -> ChannelId {
         self.id
     }
 
-    /// Returns a reference to the current state.
-    #[must_use]
-    pub fn state(&self) -> &ChannelState {
+    fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    fn state(&self) -> &ChannelState {
         &self.state
     }
 
-    /// Transitions to [`Completed`](ChannelState::Completed) state.
-    ///
-    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the transition succeeded
-    /// - `false` if already in a terminal state
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
-    /// use orcs_types::ChannelId;
-    ///
-    /// let mut channel = Channel::new(ChannelId::new(), None, ChannelConfig::default());
-    /// assert!(channel.complete());
-    /// assert!(!channel.complete()); // Already completed
-    /// ```
-    pub fn complete(&mut self) -> bool {
+    fn config(&self) -> &ChannelConfig {
+        &self.config
+    }
+
+    fn parent(&self) -> Option<ChannelId> {
+        self.parent
+    }
+
+    fn children(&self) -> &HashSet<ChannelId> {
+        &self.children
+    }
+
+    fn ancestor_path(&self) -> &[ChannelId] {
+        &self.ancestor_path
+    }
+}
+
+// === ChannelMut trait implementation ===
+
+impl ChannelMut for BaseChannel {
+    fn complete(&mut self) -> bool {
         if matches!(self.state, ChannelState::Running) {
             self.state = ChannelState::Completed;
             true
@@ -289,36 +289,7 @@ impl Channel {
         }
     }
 
-    /// Transitions to [`Aborted`](ChannelState::Aborted) state.
-    ///
-    /// Can be called from [`Running`](ChannelState::Running),
-    /// [`Paused`](ChannelState::Paused), or
-    /// [`AwaitingApproval`](ChannelState::AwaitingApproval) states.
-    ///
-    /// # Arguments
-    ///
-    /// * `reason` - Explanation of why the channel was aborted
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the transition succeeded
-    /// - `false` if already in a terminal state
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use orcs_runtime::{Channel, ChannelConfig, ChannelState};
-    /// use orcs_types::ChannelId;
-    ///
-    /// let mut channel = Channel::new(ChannelId::new(), None, ChannelConfig::default());
-    /// assert!(channel.abort("user cancelled".to_string()));
-    ///
-    /// if let ChannelState::Aborted { reason } = channel.state() {
-    ///     assert_eq!(reason, "user cancelled");
-    /// }
-    /// ```
-    pub fn abort(&mut self, reason: String) -> bool {
-        // Can abort from any non-terminal state
+    fn abort(&mut self, reason: String) -> bool {
         if !self.is_terminal() {
             self.state = ChannelState::Aborted { reason };
             true
@@ -327,51 +298,7 @@ impl Channel {
         }
     }
 
-    /// Returns the parent channel's ID, if any.
-    ///
-    /// Returns `None` for root channels.
-    #[must_use]
-    pub fn parent(&self) -> Option<ChannelId> {
-        self.parent
-    }
-
-    /// Returns `true` if the channel is in [`Running`](ChannelState::Running) state.
-    #[must_use]
-    pub fn is_running(&self) -> bool {
-        matches!(self.state, ChannelState::Running)
-    }
-
-    /// Returns `true` if the channel is in [`Paused`](ChannelState::Paused) state.
-    #[must_use]
-    pub fn is_paused(&self) -> bool {
-        matches!(self.state, ChannelState::Paused)
-    }
-
-    /// Returns `true` if the channel is in [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
-    #[must_use]
-    pub fn is_awaiting_approval(&self) -> bool {
-        matches!(self.state, ChannelState::AwaitingApproval { .. })
-    }
-
-    /// Returns `true` if the channel is in a terminal state (Completed or Aborted).
-    #[must_use]
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            ChannelState::Completed | ChannelState::Aborted { .. }
-        )
-    }
-
-    /// Transitions to [`Paused`](ChannelState::Paused) state.
-    ///
-    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the transition succeeded
-    /// - `false` if not in Running state
-    #[must_use = "check if state transition succeeded"]
-    pub fn pause(&mut self) -> bool {
+    fn pause(&mut self) -> bool {
         if matches!(self.state, ChannelState::Running) {
             self.state = ChannelState::Paused;
             true
@@ -380,14 +307,7 @@ impl Channel {
         }
     }
 
-    /// Transitions from [`Paused`](ChannelState::Paused) back to [`Running`](ChannelState::Running).
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the transition succeeded
-    /// - `false` if not in Paused state
-    #[must_use = "check if state transition succeeded"]
-    pub fn resume(&mut self) -> bool {
+    fn resume(&mut self) -> bool {
         if matches!(self.state, ChannelState::Paused) {
             self.state = ChannelState::Running;
             true
@@ -396,39 +316,16 @@ impl Channel {
         }
     }
 
-    /// Transitions to [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
-    ///
-    /// Only succeeds if currently in [`Running`](ChannelState::Running) state.
-    ///
-    /// # Arguments
-    ///
-    /// * `request_id` - ID of the approval request
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the transition succeeded
-    /// - `false` if not in Running state
-    #[must_use = "check if state transition succeeded"]
-    pub fn await_approval(&mut self, request_id: impl Into<String>) -> bool {
+    fn await_approval(&mut self, request_id: String) -> bool {
         if matches!(self.state, ChannelState::Running) {
-            self.state = ChannelState::AwaitingApproval {
-                request_id: request_id.into(),
-            };
+            self.state = ChannelState::AwaitingApproval { request_id };
             true
         } else {
             false
         }
     }
 
-    /// Resolves an approval and transitions back to [`Running`](ChannelState::Running).
-    ///
-    /// Only succeeds if currently in [`AwaitingApproval`](ChannelState::AwaitingApproval) state.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(request_id)` if the transition succeeded
-    /// - `None` if not in AwaitingApproval state
-    pub fn resolve_approval(&mut self) -> Option<String> {
+    fn resolve_approval(&mut self) -> Option<String> {
         if let ChannelState::AwaitingApproval { request_id } = &self.state {
             let id = request_id.clone();
             self.state = ChannelState::Running;
@@ -438,99 +335,34 @@ impl Channel {
         }
     }
 
-    /// Registers a child channel.
-    ///
-    /// This should be called by [`World`](crate::World) when spawning
-    /// a new channel to maintain the parent-child relationship.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The child channel's ID
-    pub fn add_child(&mut self, id: ChannelId) {
+    fn add_child(&mut self, id: ChannelId) {
         self.children.insert(id);
     }
 
-    /// Unregisters a child channel.
-    ///
-    /// This should be called by [`World`](crate::World) when killing
-    /// or completing a child channel.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The child channel's ID to remove
-    pub fn remove_child(&mut self, id: &ChannelId) {
+    fn remove_child(&mut self, id: &ChannelId) {
         self.children.remove(id);
     }
-
-    /// Returns a reference to the set of child channel IDs.
-    #[must_use]
-    pub fn children(&self) -> &HashSet<ChannelId> {
-        &self.children
-    }
-
-    /// Returns `true` if this channel has any children.
-    #[must_use]
-    pub fn has_children(&self) -> bool {
-        !self.children.is_empty()
-    }
-
-    /// Returns the cached ancestor path.
-    ///
-    /// The path is ordered: `[parent, grandparent, ..., root]`.
-    /// Empty for root channels.
-    #[must_use]
-    pub fn ancestor_path(&self) -> &[ChannelId] {
-        &self.ancestor_path
-    }
-
-    /// Returns the depth of this channel in the tree.
-    ///
-    /// Root channels have depth 0.
-    #[must_use]
-    pub fn depth(&self) -> usize {
-        self.ancestor_path.len()
-    }
-
-    /// Returns `true` if this channel is a descendant of the given ancestor.
-    ///
-    /// Uses the cached ancestor path for O(1) lookup.
-    /// A channel is NOT its own descendant.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use orcs_runtime::{Channel, ChannelConfig};
-    /// use orcs_types::ChannelId;
-    ///
-    /// let root_id = ChannelId::new();
-    /// let root = Channel::new(root_id, None, ChannelConfig::interactive());
-    ///
-    /// // Child with ancestor path
-    /// let child_id = ChannelId::new();
-    /// let child = Channel::new_with_ancestors(
-    ///     child_id,
-    ///     root_id,
-    ///     ChannelConfig::default(),
-    ///     vec![root_id],
-    /// );
-    ///
-    /// assert!(child.is_descendant_of(root_id));
-    /// assert!(!root.is_descendant_of(child_id));
-    /// ```
-    #[must_use]
-    pub fn is_descendant_of(&self, ancestor: ChannelId) -> bool {
-        self.ancestor_path.contains(&ancestor)
-    }
 }
+
+/// Type alias for backward compatibility.
+///
+/// New code should use [`BaseChannel`] directly or work with the
+/// [`ChannelCore`] / [`ChannelMut`] traits.
+pub type Channel = BaseChannel;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_types::PrincipalId;
+
+    fn test_principal() -> Principal {
+        Principal::User(PrincipalId::new())
+    }
 
     #[test]
     fn channel_creation() {
         let id = ChannelId::new();
-        let channel = Channel::new(id, None, ChannelConfig::interactive());
+        let channel = BaseChannel::new(id, None, ChannelConfig::interactive(), test_principal());
 
         assert_eq!(channel.id(), id);
         assert!(channel.is_running());
@@ -542,15 +374,33 @@ mod tests {
     fn channel_with_parent() {
         let parent_id = ChannelId::new();
         let child_id = ChannelId::new();
-        let channel = Channel::new(child_id, Some(parent_id), ChannelConfig::default());
+        let channel = BaseChannel::new(
+            child_id,
+            Some(parent_id),
+            ChannelConfig::default(),
+            test_principal(),
+        );
 
         assert_eq!(channel.parent(), Some(parent_id));
     }
 
     #[test]
+    fn channel_principal() {
+        let principal = Principal::System;
+        let channel = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::default(),
+            principal.clone(),
+        );
+
+        assert_eq!(channel.principal(), &principal);
+    }
+
+    #[test]
     fn channel_state_transition() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
         assert!(channel.is_running());
 
@@ -566,7 +416,7 @@ mod tests {
     #[test]
     fn channel_abort_transition() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
         assert!(channel.abort("reason".into()));
         assert!(!channel.is_running());
@@ -582,7 +432,12 @@ mod tests {
         let child1 = ChannelId::new();
         let child2 = ChannelId::new();
 
-        let mut parent = Channel::new(parent_id, None, ChannelConfig::interactive());
+        let mut parent = BaseChannel::new(
+            parent_id,
+            None,
+            ChannelConfig::interactive(),
+            test_principal(),
+        );
         assert!(!parent.has_children());
 
         parent.add_child(child1);
@@ -598,32 +453,57 @@ mod tests {
     fn channel_priority() {
         let id = ChannelId::new();
 
-        let primary = Channel::new(id, None, ChannelConfig::interactive());
+        let primary = BaseChannel::new(id, None, ChannelConfig::interactive(), test_principal());
         assert_eq!(primary.priority(), 255);
 
-        let background = Channel::new(ChannelId::new(), None, ChannelConfig::background());
+        let background = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::background(),
+            test_principal(),
+        );
         assert_eq!(background.priority(), 10);
 
-        let tool = Channel::new(ChannelId::new(), None, ChannelConfig::tool());
+        let tool = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::tool(),
+            test_principal(),
+        );
         assert_eq!(tool.priority(), 100);
     }
 
     #[test]
     fn channel_can_spawn() {
-        let primary = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        let primary = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::interactive(),
+            test_principal(),
+        );
         assert!(primary.can_spawn());
 
-        let background = Channel::new(ChannelId::new(), None, ChannelConfig::background());
+        let background = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::background(),
+            test_principal(),
+        );
         assert!(!background.can_spawn());
 
-        let tool = Channel::new(ChannelId::new(), None, ChannelConfig::tool());
+        let tool = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::tool(),
+            test_principal(),
+        );
         assert!(tool.can_spawn());
     }
 
     #[test]
     fn channel_config_access() {
         let config = ChannelConfig::new(200, false);
-        let channel = Channel::new(ChannelId::new(), None, config);
+        let channel = BaseChannel::new(ChannelId::new(), None, config, test_principal());
 
         assert_eq!(channel.config().priority(), 200);
         assert!(!channel.config().can_spawn());
@@ -634,7 +514,7 @@ mod tests {
     #[test]
     fn channel_pause_resume() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
         assert!(channel.is_running());
         assert!(!channel.is_paused());
@@ -657,14 +537,14 @@ mod tests {
     #[test]
     fn channel_await_approval() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
-        assert!(channel.await_approval("req-123"));
+        assert!(channel.await_approval("req-123".to_string()));
         assert!(channel.is_awaiting_approval());
         assert!(!channel.is_running());
 
         // Cannot await approval when already awaiting
-        assert!(!channel.await_approval("req-456"));
+        assert!(!channel.await_approval("req-456".to_string()));
 
         if let ChannelState::AwaitingApproval { request_id } = channel.state() {
             assert_eq!(request_id, "req-123");
@@ -676,9 +556,9 @@ mod tests {
     #[test]
     fn channel_resolve_approval() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
-        assert!(channel.await_approval("req-123"));
+        assert!(channel.await_approval("req-123".to_string()));
 
         let resolved_id = channel.resolve_approval();
         assert_eq!(resolved_id, Some("req-123".to_string()));
@@ -691,9 +571,9 @@ mod tests {
     #[test]
     fn channel_abort_from_awaiting() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
 
-        assert!(channel.await_approval("req-123"));
+        assert!(channel.await_approval("req-123".to_string()));
         assert!(channel.abort("rejected by user".to_string()));
 
         assert!(channel.is_terminal());
@@ -707,34 +587,34 @@ mod tests {
     #[test]
     fn channel_terminal_state() {
         let id1 = ChannelId::new();
-        let mut ch1 = Channel::new(id1, None, ChannelConfig::default());
+        let mut ch1 = BaseChannel::new(id1, None, ChannelConfig::default(), test_principal());
         ch1.complete();
         assert!(ch1.is_terminal());
 
         let id2 = ChannelId::new();
-        let mut ch2 = Channel::new(id2, None, ChannelConfig::default());
+        let mut ch2 = BaseChannel::new(id2, None, ChannelConfig::default(), test_principal());
         ch2.abort("test".into());
         assert!(ch2.is_terminal());
 
         let id3 = ChannelId::new();
-        let ch3 = Channel::new(id3, None, ChannelConfig::default());
+        let ch3 = BaseChannel::new(id3, None, ChannelConfig::default(), test_principal());
         assert!(!ch3.is_terminal());
     }
 
     #[test]
     fn channel_cannot_pause_from_terminal() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
         channel.complete();
 
         assert!(!channel.pause());
-        assert!(!channel.await_approval("req"));
+        assert!(!channel.await_approval("req".to_string()));
     }
 
     #[test]
     fn channel_cannot_complete_from_paused() {
         let id = ChannelId::new();
-        let mut channel = Channel::new(id, None, ChannelConfig::default());
+        let mut channel = BaseChannel::new(id, None, ChannelConfig::default(), test_principal());
         assert!(channel.pause());
 
         // Must resume first
@@ -747,7 +627,12 @@ mod tests {
 
     #[test]
     fn channel_root_has_empty_ancestor_path() {
-        let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        let root = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::interactive(),
+            test_principal(),
+        );
         assert!(root.ancestor_path().is_empty());
         assert_eq!(root.depth(), 0);
     }
@@ -757,10 +642,11 @@ mod tests {
         let root_id = ChannelId::new();
         let parent_id = ChannelId::new();
 
-        let child = Channel::new_with_ancestors(
+        let child = BaseChannel::new_with_ancestors(
             ChannelId::new(),
             parent_id,
             ChannelConfig::default(),
+            test_principal(),
             vec![parent_id, root_id],
         );
 
@@ -774,10 +660,11 @@ mod tests {
         let parent_id = ChannelId::new();
         let other_id = ChannelId::new();
 
-        let child = Channel::new_with_ancestors(
+        let child = BaseChannel::new_with_ancestors(
             ChannelId::new(),
             parent_id,
             ChannelConfig::default(),
+            test_principal(),
             vec![parent_id, root_id],
         );
 
@@ -789,7 +676,12 @@ mod tests {
 
     #[test]
     fn channel_root_not_descendant_of_anything() {
-        let root = Channel::new(ChannelId::new(), None, ChannelConfig::interactive());
+        let root = BaseChannel::new(
+            ChannelId::new(),
+            None,
+            ChannelConfig::interactive(),
+            test_principal(),
+        );
         let other_id = ChannelId::new();
 
         assert!(!root.is_descendant_of(other_id));
