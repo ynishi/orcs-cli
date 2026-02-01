@@ -339,16 +339,13 @@ mod tests {
         assert!(matches!(approved, IOOutput::ShowApproved { .. }));
 
         let rejected = IOOutput::rejected("req-456", Some("too dangerous".to_string()));
-        if let IOOutput::ShowRejected {
-            approval_id,
-            reason,
-        } = rejected
-        {
-            assert_eq!(approval_id, "req-456");
-            assert_eq!(reason, Some("too dangerous".to_string()));
-        } else {
-            panic!("Expected ShowRejected");
-        }
+        assert!(matches!(
+            rejected,
+            IOOutput::ShowRejected {
+                ref approval_id,
+                reason: Some(ref r)
+            } if approval_id == "req-456" && r == "too dangerous"
+        ));
     }
 
     #[test]

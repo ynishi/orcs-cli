@@ -119,7 +119,9 @@ impl ConsoleInputReader {
     ///
     /// Called when Ctrl+C is detected.
     pub async fn send_veto(&self) -> Result<(), mpsc::error::SendError<IOInput>> {
-        self.input_handle.send(IOInput::Signal(SignalKind::Veto)).await
+        self.input_handle
+            .send(IOInput::Signal(SignalKind::Veto))
+            .await
     }
 
     /// Returns `true` if the channel is closed.
@@ -185,10 +187,7 @@ impl Console {
         let output_handle = self.output_handle;
 
         // Run input reader and renderer concurrently
-        tokio::join!(
-            input_reader.run(),
-            renderer.run(output_handle),
-        );
+        tokio::join!(input_reader.run(), renderer.run(output_handle),);
     }
 
     /// Spawns the console as background tasks.
@@ -288,7 +287,7 @@ mod tests {
     #[test]
     fn console_creation() {
         let channel_id = ChannelId::new();
-        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let console = Console::new(input_handle, output_handle);
         assert!(!console.renderer.is_verbose());
@@ -297,7 +296,7 @@ mod tests {
     #[test]
     fn console_verbose() {
         let channel_id = ChannelId::new();
-        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let console = Console::verbose(input_handle, output_handle);
         assert!(console.renderer.is_verbose());
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn console_set_verbose() {
         let channel_id = ChannelId::new();
-        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let mut console = Console::new(input_handle, output_handle);
         assert!(!console.renderer.is_verbose());
@@ -318,10 +317,10 @@ mod tests {
     #[test]
     fn console_split() {
         let channel_id = ChannelId::new();
-        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let console = Console::new(input_handle, output_handle);
-        let (input_reader, renderer, _output_handle) = console.split();
+        let (input_reader, renderer, _) = console.split();
 
         assert!(!input_reader.is_closed());
         assert!(!renderer.is_verbose());
@@ -330,7 +329,7 @@ mod tests {
     #[test]
     fn console_debug() {
         let channel_id = ChannelId::new();
-        let (_port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
+        let (_, input_handle, output_handle) = IOPort::with_defaults(channel_id);
 
         let console = Console::new(input_handle, output_handle);
         let debug_str = format!("{:?}", console);

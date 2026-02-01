@@ -72,6 +72,11 @@ pub enum InputCommand {
     /// Emergency stop (Veto).
     Veto,
 
+    /// Empty input (blank line).
+    ///
+    /// Distinct from Unknown - indicates user pressed Enter without input.
+    Empty,
+
     /// Unknown or invalid input.
     Unknown {
         /// The original input line.
@@ -111,7 +116,7 @@ impl InputCommand {
                 // These require a channel ID which we don't have here
                 None
             }
-            Self::Quit | Self::Unknown { .. } => None,
+            Self::Quit | Self::Empty | Self::Unknown { .. } => None,
         }
     }
 
@@ -177,9 +182,7 @@ impl HumanInput {
         let line = line.trim();
 
         if line.is_empty() {
-            return InputCommand::Unknown {
-                input: line.to_string(),
-            };
+            return InputCommand::Empty;
         }
 
         let parts: Vec<&str> = line.splitn(MAX_INPUT_PARTS, ' ').collect();
@@ -274,11 +277,12 @@ mod tests {
     #[test]
     fn parse_approve_with_id() {
         let cmd = input().parse_line("y req-123");
-        if let InputCommand::Approve { approval_id } = cmd {
-            assert_eq!(approval_id, Some("req-123".to_string()));
-        } else {
-            panic!("Expected Approve");
-        }
+        assert!(matches!(
+            cmd,
+            InputCommand::Approve {
+                approval_id: Some(ref id)
+            } if id == "req-123"
+        ));
     }
 
     #[test]
@@ -296,31 +300,25 @@ mod tests {
     #[test]
     fn parse_reject_with_id() {
         let cmd = input().parse_line("n req-456");
-        if let InputCommand::Reject {
-            approval_id,
-            reason,
-        } = cmd
-        {
-            assert_eq!(approval_id, Some("req-456".to_string()));
-            assert!(reason.is_none());
-        } else {
-            panic!("Expected Reject");
-        }
+        assert!(matches!(
+            cmd,
+            InputCommand::Reject {
+                approval_id: Some(ref id),
+                reason: None
+            } if id == "req-456"
+        ));
     }
 
     #[test]
     fn parse_reject_with_reason() {
         let cmd = input().parse_line("n req-789 too dangerous");
-        if let InputCommand::Reject {
-            approval_id,
-            reason,
-        } = cmd
-        {
-            assert_eq!(approval_id, Some("req-789".to_string()));
-            assert_eq!(reason, Some("too dangerous".to_string()));
-        } else {
-            panic!("Expected Reject");
-        }
+        assert!(matches!(
+            cmd,
+            InputCommand::Reject {
+                approval_id: Some(ref id),
+                reason: Some(ref r)
+            } if id == "req-789" && r == "too dangerous"
+        ));
     }
 
     #[test]
@@ -334,11 +332,10 @@ mod tests {
     #[test]
     fn parse_steer() {
         let cmd = input().parse_line("s focus on error handling");
-        if let InputCommand::Steer { message } = cmd {
-            assert_eq!(message, "focus on error handling");
-        } else {
-            panic!("Expected Steer");
-        }
+        assert!(matches!(
+            cmd,
+            InputCommand::Steer { ref message } if message == "focus on error handling"
+        ));
     }
 
     #[test]
@@ -374,10 +371,10 @@ mod tests {
     #[test]
     fn parse_empty() {
         let cmd = input().parse_line("");
-        assert!(matches!(cmd, InputCommand::Unknown { .. }));
+        assert!(matches!(cmd, InputCommand::Empty));
 
         let cmd = input().parse_line("   ");
-        assert!(matches!(cmd, InputCommand::Unknown { .. }));
+        assert!(matches!(cmd, InputCommand::Empty));
     }
 
     #[test]

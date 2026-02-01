@@ -153,7 +153,11 @@ async fn rejection_flow_with_reason() {
         .await
         .unwrap();
     let output = output_handle.recv().await.unwrap();
-    if let IOOutput::ShowRejected { approval_id, reason } = output {
+    if let IOOutput::ShowRejected {
+        approval_id,
+        reason,
+    } = output
+    {
         assert_eq!(approval_id, "req-reject-test");
         assert_eq!(reason, Some("too-dangerous".to_string()));
     } else {
@@ -195,10 +199,7 @@ async fn eof_handling() {
     let (signals, commands) = human_channel.drain_input_to_signals();
     assert!(signals.is_empty());
     assert_eq!(commands.len(), 1);
-    assert!(matches!(
-        commands[0],
-        orcs_runtime::io::InputCommand::Quit
-    ));
+    assert!(matches!(commands[0], orcs_runtime::io::InputCommand::Quit));
 }
 
 /// Test async recv_input

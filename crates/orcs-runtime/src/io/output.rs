@@ -167,14 +167,14 @@ mod tests {
         fn show_approval_request(&self, request: &ApprovalRequest) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("approval_request:{}", request.id));
         }
 
         fn show_approved(&self, approval_id: &str) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("approved:{}", approval_id));
         }
 
@@ -183,34 +183,34 @@ mod tests {
                 Some(r) => format!("rejected:{}:{}", approval_id, r),
                 None => format!("rejected:{}", approval_id),
             };
-            self.messages.lock().unwrap().push(msg);
+            self.messages.lock().expect("mutex poisoned").push(msg);
         }
 
         fn info(&self, message: &str) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("info:{}", message));
         }
 
         fn warn(&self, message: &str) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("warn:{}", message));
         }
 
         fn error(&self, message: &str) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("error:{}", message));
         }
 
         fn debug(&self, message: &str) {
             self.messages
                 .lock()
-                .unwrap()
+                .expect("mutex poisoned")
                 .push(format!("debug:{}", message));
         }
     }
@@ -222,7 +222,7 @@ mod tests {
 
         output.show_approval_request(&req);
 
-        let msgs = messages.lock().unwrap();
+        let msgs = messages.lock().expect("mutex poisoned");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0], "approval_request:req-123");
     }
@@ -233,7 +233,7 @@ mod tests {
 
         output.show_approved("req-456");
 
-        let msgs = messages.lock().unwrap();
+        let msgs = messages.lock().expect("mutex poisoned");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0], "approved:req-456");
     }
@@ -244,7 +244,7 @@ mod tests {
 
         output.show_rejected("req-789", Some("not allowed"));
 
-        let msgs = messages.lock().unwrap();
+        let msgs = messages.lock().expect("mutex poisoned");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0], "rejected:req-789:not allowed");
     }
@@ -255,7 +255,7 @@ mod tests {
 
         output.show_rejected("req-abc", None);
 
-        let msgs = messages.lock().unwrap();
+        let msgs = messages.lock().expect("mutex poisoned");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0], "rejected:req-abc");
     }

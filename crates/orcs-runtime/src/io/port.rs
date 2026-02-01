@@ -223,7 +223,10 @@ impl IOInputHandle {
     /// # Errors
     ///
     /// Returns error if the IOPort has been dropped.
-    pub async fn send_line(&self, text: impl Into<String>) -> Result<(), mpsc::error::SendError<IOInput>> {
+    pub async fn send_line(
+        &self,
+        text: impl Into<String>,
+    ) -> Result<(), mpsc::error::SendError<IOInput>> {
         self.send(IOInput::line(text)).await
     }
 

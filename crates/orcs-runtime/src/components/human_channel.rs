@@ -246,9 +246,7 @@ impl HumanChannel {
         &self,
         request: &super::ApprovalRequest,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<IOOutput>> {
-        self.io_port
-            .send(IOOutput::approval_request(request))
-            .await
+        self.io_port.send(IOOutput::approval_request(request)).await
     }
 
     /// Displays approval confirmation.
@@ -406,8 +404,7 @@ impl Component for HumanChannel {
                 }
             }
             SignalKind::Resume => {
-                if signal.affects_channel(self.channel_id)
-                    && matches!(self.status, Status::Paused)
+                if signal.affects_channel(self.channel_id) && matches!(self.status, Status::Paused)
                 {
                     self.status = Status::Idle;
                     SignalResponse::Handled
@@ -453,7 +450,11 @@ mod tests {
         Principal::User(PrincipalId::new())
     }
 
-    fn setup() -> (HumanChannel, crate::io::IOInputHandle, crate::io::IOOutputHandle) {
+    fn setup() -> (
+        HumanChannel,
+        crate::io::IOInputHandle,
+        crate::io::IOOutputHandle,
+    ) {
         let channel_id = ChannelId::new();
         let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
         let channel = HumanChannel::new(port, test_principal());
