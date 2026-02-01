@@ -97,8 +97,8 @@ pub mod session;
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
 pub use channel::{
     priority, BaseChannel, Channel, ChannelConfig, ChannelCore, ChannelError, ChannelHandle,
-    ChannelMut, ChannelRunner, ChannelRunnerFactory, ChannelState, Event, MaxPrivilege,
-    StateTransition, World, WorldCommand, WorldCommandSender, WorldManager,
+    ChannelMut, ChannelRunner, ChannelRunnerFactory, ChannelState, ClientRunner, Event,
+    MaxPrivilege, StateTransition, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 pub use components::{
     ApprovalRequest, ApprovalResult, DecoratorConfig, EchoWithHilComponent, HilComponent,

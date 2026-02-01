@@ -39,7 +39,8 @@
 //! # Note
 //!
 //! IOBridge does not hold a Principal. The Principal is provided by the
-//! owning ClientChannel when converting input to Signals.
+//! owning [`ClientRunner`](crate::channel::ClientRunner) when converting
+//! input to Signals.
 //!
 //! # Example
 //!
@@ -53,7 +54,7 @@
 //! let bridge = IOBridge::new(port);
 //!
 //! // View layer sends input via input_handle
-//! // IOBridge converts to Signals (with Principal from ClientChannel)
+//! // IOBridge converts to Signals (with Principal from ClientRunner)
 //! // View layer receives output via output_handle
 //! ```
 
@@ -67,7 +68,8 @@ use orcs_types::{ChannelId, Principal, SignalScope};
 /// This is a stateless transformation layer.
 ///
 /// **Note**: IOBridge does not hold a Principal. The Principal is provided
-/// by the owning ClientChannel when converting input to Signals.
+/// by the owning [`ClientRunner`](crate::channel::ClientRunner) when
+/// converting input to Signals.
 ///
 /// The parser can be injected for testing or customization.
 pub struct IOBridge {

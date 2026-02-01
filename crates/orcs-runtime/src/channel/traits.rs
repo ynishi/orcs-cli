@@ -1,8 +1,11 @@
 //! Channel trait definitions.
 //!
 //! The [`ChannelCore`] trait defines the core interface for all channel types.
-//! This allows different channel implementations (e.g., `BaseChannel`, `ClientChannel`)
-//! to share a common interface while having different internal structures.
+//! This allows different channel implementations (e.g., `BaseChannel`) to share
+//! a common interface while having different internal structures.
+//!
+//! For Human-interactive channels, use [`ClientRunner`](super::ClientRunner) which
+//! combines `BaseChannel` with IO bridging capabilities.
 
 use super::{ChannelConfig, ChannelState};
 use orcs_types::{ChannelId, Principal};
@@ -17,7 +20,9 @@ use std::collections::HashSet;
 /// # Implementors
 ///
 /// - [`BaseChannel`](super::BaseChannel): Basic channel with state and tree management
-/// - `ClientChannel`: Channel with Human interaction capabilities (future)
+///
+/// For Human-interactive channels, use [`ClientRunner`](super::ClientRunner) which
+/// owns a `BaseChannel` internally.
 ///
 /// # Example
 ///

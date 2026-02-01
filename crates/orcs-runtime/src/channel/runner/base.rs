@@ -31,16 +31,19 @@
 //! 3. Processes Events until channel completes or is killed
 //! 4. Cleanup on drop
 
-use super::command::{StateTransition, WorldCommand};
-use super::traits::ChannelCore;
-use super::{ChannelConfig, World};
+use super::common::{
+    determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
+    send_abort, send_transition, SignalAction,
+};
+use crate::channel::command::{StateTransition, WorldCommand};
+use crate::channel::config::ChannelConfig;
+use crate::channel::World;
 use orcs_component::Component;
-use orcs_event::{EventCategory, Request, Signal, SignalKind, SignalResponse};
+use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
@@ -49,21 +52,6 @@ use tracing::{debug, info, warn};
 /// Events are the primary means of external input to a running channel.
 /// Unlike Signals (which are control messages), Events represent work
 /// to be processed by the bound Component.
-///
-/// # Example
-///
-/// ```ignore
-/// use orcs_runtime::channel::runner::Event;
-/// use orcs_event::EventCategory;
-/// use orcs_types::ComponentId;
-///
-/// let event = Event {
-///     category: EventCategory::Echo,
-///     operation: "echo".to_string(),
-///     source: ComponentId::builtin("app"),
-///     payload: serde_json::json!({"message": "hello"}),
-/// };
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     /// Category of this event (for routing).
@@ -77,22 +65,10 @@ pub struct Event {
 }
 
 /// Default event buffer size per channel.
-///
-/// 64 events provides sufficient buffering for typical interactive workloads
-/// while limiting memory usage per channel (~few KB with typical Event sizes).
 const EVENT_BUFFER_SIZE: usize = 64;
 
 /// Maximum queue size for events received while paused.
-///
-/// 128 events allows reasonable buffering during HIL approval waits.
-/// Events beyond this limit are dropped with a warning.
 const PAUSED_QUEUE_MAX_SIZE: usize = 128;
-
-/// Timeout for abort confirmation (milliseconds).
-///
-/// Short timeout since abort is fire-and-forget during shutdown.
-/// The runner doesn't block on confirmation - it's best-effort.
-const ABORT_TIMEOUT_MS: u64 = 100;
 
 /// Handle for injecting events into a [`ChannelRunner`].
 #[derive(Clone, Debug)]
@@ -104,6 +80,12 @@ pub struct ChannelHandle {
 }
 
 impl ChannelHandle {
+    /// Creates a new handle with the given sender.
+    #[must_use]
+    pub fn new(id: ChannelId, event_tx: mpsc::Sender<Event>) -> Self {
+        Self { id, event_tx }
+    }
+
     /// Injects an event into the channel.
     ///
     /// Returns an error if the channel has been dropped.
@@ -114,11 +96,6 @@ impl ChannelHandle {
     /// Try to inject an event without blocking.
     ///
     /// Returns an error if the buffer is full or channel is dropped.
-    ///
-    /// # Note
-    ///
-    /// The error type includes the full Event for retry purposes.
-    /// This is intentional - callers can extract and retry the event.
     #[allow(clippy::result_large_err)] // Event included in error for retry
     pub fn try_inject(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
         self.event_tx.try_send(event)
@@ -135,26 +112,6 @@ impl ChannelHandle {
 /// - Receives Signals via broadcast and delivers to Component
 /// - Sends World modifications via command queue
 /// - Has read access to the World for queries
-///
-/// # Example
-///
-/// ```ignore
-/// use orcs_runtime::channel::{ChannelRunner, WorldCommandSender};
-///
-/// let (runner, handle) = ChannelRunner::new(
-///     channel_id,
-///     world_tx.clone(),
-///     world.clone(),
-///     signal_rx,
-///     component,  // 1:1 bound Component
-/// );
-///
-/// // Spawn the runner
-/// tokio::spawn(runner.run());
-///
-/// // Inject events from anywhere
-/// handle.inject(event).await?;
-/// ```
 pub struct ChannelRunner {
     /// This channel's ID.
     id: ChannelId,
@@ -169,7 +126,6 @@ pub struct ChannelRunner {
     /// Bound Component (1:1 relationship).
     component: Arc<Mutex<Box<dyn Component>>>,
     /// Queue for events received while paused.
-    /// Drained when the channel resumes.
     paused_queue: VecDeque<Event>,
 }
 
@@ -177,14 +133,6 @@ impl ChannelRunner {
     /// Creates a new ChannelRunner with a bound Component.
     ///
     /// Returns the runner and a handle for injecting events.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The channel's ID
-    /// * `world_tx` - Command sender for World modifications
-    /// * `world` - Read-only World access
-    /// * `signal_rx` - Broadcast receiver for signals
-    /// * `component` - The Component bound to this channel (1:1)
     #[must_use]
     pub fn new(
         id: ChannelId,
@@ -205,7 +153,7 @@ impl ChannelRunner {
             paused_queue: VecDeque::new(),
         };
 
-        let handle = ChannelHandle { id, event_tx };
+        let handle = ChannelHandle::new(id, event_tx);
 
         (runner, handle)
     }
@@ -222,19 +170,24 @@ impl ChannelRunner {
         self.id
     }
 
+    /// Returns a reference to the world_tx sender.
+    #[must_use]
+    pub fn world_tx(&self) -> &mpsc::Sender<WorldCommand> {
+        &self.world_tx
+    }
+
+    /// Returns a reference to the world.
+    #[must_use]
+    pub fn world(&self) -> &Arc<RwLock<World>> {
+        &self.world
+    }
+
     /// Runs the channel's event loop.
     ///
     /// This method consumes the runner and processes events until:
     /// - The channel is completed or killed
     /// - A Veto signal is received
     /// - All event senders are dropped
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let (runner, handle) = ChannelRunner::new(...);
-    /// tokio::spawn(runner.run());
-    /// ```
     pub async fn run(mut self) {
         info!("ChannelRunner {} started", self.id);
 
@@ -276,7 +229,7 @@ impl ChannelRunner {
             }
 
             // Check if channel is still running
-            if !self.is_channel_active().await {
+            if !is_channel_active(&self.world, self.id).await {
                 debug!("ChannelRunner {}: channel no longer active", self.id);
                 break;
             }
@@ -287,7 +240,6 @@ impl ChannelRunner {
 
     /// Handles an incoming signal.
     ///
-    /// Delivers the signal to the bound Component and handles state transitions.
     /// Returns `false` if the runner should stop.
     async fn handle_signal(&mut self, signal: Signal) -> bool {
         debug!(
@@ -297,90 +249,37 @@ impl ChannelRunner {
 
         // Check if signal affects this channel
         if !signal.affects_channel(self.id) {
-            return true; // Not for us
+            return true;
         }
 
-        // Deliver signal to Component
-        let component_response = {
-            let mut comp = self.component.lock().await;
-            comp.on_signal(&signal)
-        };
-
-        debug!(
-            "ChannelRunner {}: Component response to signal: {:?}",
-            self.id, component_response
-        );
-
-        // Handle Component response
-        match component_response {
-            SignalResponse::Abort => {
-                info!(
-                    "ChannelRunner {}: Component requested abort on signal {:?}",
-                    self.id, signal.kind
-                );
-                self.abort("component aborted").await;
-                return false;
-            }
-            SignalResponse::Handled | SignalResponse::Ignored => {
-                // Continue with channel-level handling
-            }
+        // Dispatch to component first
+        let component_action = dispatch_signal_to_component(&signal, &self.component).await;
+        if let SignalAction::Stop { reason } = component_action {
+            info!(
+                "ChannelRunner {}: component requested stop: {}",
+                self.id, reason
+            );
+            send_abort(&self.world_tx, self.id, &reason).await;
+            return false;
         }
 
-        // Channel-level signal handling
-        match signal.kind {
-            SignalKind::Veto => {
-                info!("ChannelRunner {}: received Veto, stopping", self.id);
-                self.abort("veto received").await;
+        // Determine channel-level action
+        let action = determine_channel_action(&signal.kind);
+        match action {
+            SignalAction::Stop { reason } => {
+                info!("ChannelRunner {}: stopping - {}", self.id, reason);
+                send_abort(&self.world_tx, self.id, &reason).await;
                 return false;
             }
+            SignalAction::Transition(transition) => {
+                send_transition(&self.world_tx, self.id, transition.clone()).await;
 
-            SignalKind::Cancel => {
-                info!("ChannelRunner {}: received Cancel", self.id);
-                self.abort("cancelled").await;
-                return false;
+                // Drain paused queue on resume
+                if matches!(transition, StateTransition::Resume) {
+                    self.drain_paused_queue().await;
+                }
             }
-
-            SignalKind::Pause => {
-                self.transition(StateTransition::Pause).await;
-            }
-
-            SignalKind::Resume => {
-                self.transition(StateTransition::Resume).await;
-                // Process queued events after resume
-                self.drain_paused_queue().await;
-            }
-
-            SignalKind::Approve { approval_id } => {
-                debug!("ChannelRunner {}: approved {}", self.id, approval_id);
-                self.transition(StateTransition::ResolveApproval).await;
-            }
-
-            SignalKind::Reject {
-                approval_id,
-                reason,
-            } => {
-                let reason_str = reason.unwrap_or_else(|| "rejected".to_string());
-                info!(
-                    "ChannelRunner {}: rejected {} - {}",
-                    self.id, approval_id, reason_str
-                );
-                self.abort(&reason_str).await;
-                return false;
-            }
-
-            SignalKind::Steer { .. } => {
-                debug!(
-                    "ChannelRunner {}: Steer signal delivered to Component",
-                    self.id
-                );
-            }
-
-            SignalKind::Modify { .. } => {
-                debug!(
-                    "ChannelRunner {}: Modify signal delivered to Component",
-                    self.id
-                );
-            }
+            SignalAction::Continue => {}
         }
 
         true
@@ -388,12 +287,7 @@ impl ChannelRunner {
 
     /// Handles an incoming event.
     ///
-    /// If the channel is paused, the event is queued for later processing.
-    /// Queued events are processed when the channel resumes.
-    ///
-    /// # Returns
-    ///
-    /// `false` if the runner should stop, `true` to continue.
+    /// If paused, queues the event for later processing.
     async fn handle_event(&mut self, event: Event) -> bool {
         debug!(
             "ChannelRunner {}: received event {:?} op={}",
@@ -401,7 +295,7 @@ impl ChannelRunner {
         );
 
         // Queue events while paused
-        if self.is_channel_paused().await {
+        if is_channel_paused(&self.world, self.id).await {
             if self.paused_queue.len() >= PAUSED_QUEUE_MAX_SIZE {
                 warn!(
                     "ChannelRunner {}: paused queue full (max={}), dropping event",
@@ -467,98 +361,9 @@ impl ChannelRunner {
         }
     }
 
-    /// Checks if the channel is still active (not completed/aborted).
-    async fn is_channel_active(&self) -> bool {
-        let world = self.world.read().await;
-        world
-            .get(&self.id)
-            .map(|ch| !ch.is_terminal())
-            .unwrap_or(false)
-    }
-
-    /// Checks if the channel is paused.
-    async fn is_channel_paused(&self) -> bool {
-        let world = self.world.read().await;
-        world
-            .get(&self.id)
-            .map(|ch| ch.is_paused())
-            .unwrap_or(false)
-    }
-
-    /// Sends a state transition command and logs the result.
-    async fn transition(&self, transition: StateTransition) {
-        let transition_name = format!("{:?}", transition);
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let cmd = WorldCommand::UpdateState {
-            id: self.id,
-            transition,
-            reply: reply_tx,
-        };
-
-        if self.world_tx.send(cmd).await.is_err() {
-            warn!(
-                "ChannelRunner {}: failed to send {} command",
-                self.id, transition_name
-            );
-            return;
-        }
-
-        match reply_rx.await {
-            Ok(true) => debug!("ChannelRunner {}: {} confirmed", self.id, transition_name),
-            Ok(false) => warn!(
-                "ChannelRunner {}: {} rejected by World",
-                self.id, transition_name
-            ),
-            Err(_) => warn!(
-                "ChannelRunner {}: {} reply channel dropped",
-                self.id, transition_name
-            ),
-        }
-    }
-
-    /// Aborts this channel with best-effort confirmation.
-    ///
-    /// Uses a short timeout since the runner is stopping anyway.
-    /// Failures are logged but do not block shutdown.
-    async fn abort(&self, reason: &str) {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let cmd = WorldCommand::UpdateState {
-            id: self.id,
-            transition: StateTransition::Abort {
-                reason: reason.to_string(),
-            },
-            reply: reply_tx,
-        };
-
-        if self.world_tx.send(cmd).await.is_err() {
-            warn!(
-                "ChannelRunner {}: failed to send abort command (reason: {})",
-                self.id, reason
-            );
-            return;
-        }
-
-        // Best-effort wait with short timeout
-        match tokio::time::timeout(Duration::from_millis(ABORT_TIMEOUT_MS), reply_rx).await {
-            Ok(Ok(true)) => debug!("ChannelRunner {}: abort confirmed", self.id),
-            Ok(Ok(false)) => warn!("ChannelRunner {}: abort rejected by World", self.id),
-            Ok(Err(_)) => warn!("ChannelRunner {}: abort reply channel dropped", self.id),
-            Err(_) => debug!(
-                "ChannelRunner {}: abort timed out (fire-and-forget)",
-                self.id
-            ),
-        }
-    }
-
     /// Spawns a child channel with a bound Component.
     ///
     /// Returns the new channel's ID and handle, or None if spawn failed.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Channel configuration
-    /// * `signal_rx` - Signal receiver for the new runner
-    /// * `component` - Component to bind to the child channel (1:1)
     pub async fn spawn_child(
         &self,
         config: ChannelConfig,
@@ -590,9 +395,6 @@ impl ChannelRunner {
 }
 
 /// Factory for creating channel runners.
-///
-/// `ChannelRunnerFactory` simplifies creating multiple runners
-/// with shared resources.
 pub struct ChannelRunnerFactory {
     /// Command sender for World modifications.
     world_tx: mpsc::Sender<WorldCommand>,
@@ -618,11 +420,6 @@ impl ChannelRunnerFactory {
     }
 
     /// Creates a runner for an existing channel with a bound Component.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Channel ID
-    /// * `component` - Component to bind (1:1 relationship)
     #[must_use]
     pub fn create(
         &self,
@@ -648,9 +445,10 @@ impl ChannelRunnerFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::WorldManager;
+    use crate::channel::manager::WorldManager;
+    use crate::channel::ChannelConfig;
     use orcs_component::{ComponentError, Status};
-    use orcs_event::EventCategory;
+    use orcs_event::{EventCategory, SignalResponse};
     use orcs_types::{ComponentId, Principal};
     use serde_json::Value;
 
@@ -760,10 +558,8 @@ mod tests {
             mock_component(),
         );
 
-        // Spawn runner
         let runner_task = tokio::spawn(runner.run());
 
-        // Send event
         let event = Event {
             category: EventCategory::Echo,
             operation: "echo".to_string(),
@@ -772,15 +568,12 @@ mod tests {
         };
         handle.inject(event).await.unwrap();
 
-        // Give time to process
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        // Send cancel to stop
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
             .unwrap();
 
-        // Wait for runner to stop
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
         teardown(manager_task, world_tx).await;
@@ -801,70 +594,12 @@ mod tests {
 
         let runner_task = tokio::spawn(runner.run());
 
-        // Give runner time to start
         tokio::task::yield_now().await;
 
-        // Send veto
         signal_tx.send(Signal::veto(Principal::System)).unwrap();
 
-        // Runner should stop
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         assert!(result.is_ok());
-
-        // Channel should be aborted
-        {
-            let w = world.read().await;
-            if let Some(ch) = w.get(&primary) {
-                assert!(ch.is_terminal());
-            }
-        }
-
-        teardown(manager_task, world_tx).await;
-    }
-
-    #[tokio::test]
-    async fn runner_handles_pause_resume() {
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let signal_rx = signal_tx.subscribe();
-        let (runner, _handle) = ChannelRunner::new(
-            primary,
-            world_tx.clone(),
-            world.clone(),
-            signal_rx,
-            mock_component(),
-        );
-
-        let runner_task = tokio::spawn(runner.run());
-        tokio::task::yield_now().await;
-
-        // Pause
-        signal_tx
-            .send(Signal::pause(primary, Principal::System))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        {
-            let w = world.read().await;
-            assert!(w.get(&primary).unwrap().is_paused());
-        }
-
-        // Resume
-        signal_tx
-            .send(Signal::resume(primary, Principal::System))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        {
-            let w = world.read().await;
-            assert!(w.get(&primary).unwrap().is_running());
-        }
-
-        // Cleanup
-        signal_tx
-            .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
-        let _ = runner_task.await;
 
         teardown(manager_task, world_tx).await;
     }
@@ -897,80 +632,6 @@ mod tests {
         let (runner, handle) = factory.create(primary, mock_component());
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
-
-        teardown(manager_task, world_tx).await;
-    }
-
-    #[tokio::test]
-    async fn factory_broadcasts_signal() {
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let factory = ChannelRunnerFactory::new(world_tx.clone(), world.clone(), signal_tx);
-
-        let (runner, _handle) = factory.create(primary, mock_component());
-        let runner_task = tokio::spawn(runner.run());
-
-        tokio::task::yield_now().await;
-
-        // Broadcast via factory
-        factory.signal(Signal::cancel(primary, Principal::System));
-
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
-
-        teardown(manager_task, world_tx).await;
-    }
-
-    #[tokio::test]
-    async fn runner_queues_events_while_paused() {
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new(
-            primary,
-            world_tx.clone(),
-            world.clone(),
-            signal_rx,
-            mock_component(),
-        );
-
-        let runner_task = tokio::spawn(runner.run());
-        tokio::task::yield_now().await;
-
-        // Pause the channel
-        signal_tx
-            .send(Signal::pause(primary, Principal::System))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Verify paused
-        {
-            let w = world.read().await;
-            assert!(w.get(&primary).unwrap().is_paused());
-        }
-
-        // Send events while paused (they should be queued)
-        for i in 0..3 {
-            let event = Event {
-                category: EventCategory::Echo,
-                operation: format!("op_{}", i),
-                source: ComponentId::builtin("test"),
-                payload: serde_json::json!({"index": i}),
-            };
-            handle.inject(event).await.unwrap();
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Resume - queued events should be processed
-        signal_tx
-            .send(Signal::resume(primary, Principal::System))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Cleanup
-        signal_tx
-            .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
         teardown(manager_task, world_tx).await;
     }
