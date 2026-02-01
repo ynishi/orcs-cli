@@ -160,6 +160,9 @@ pub use command::{StateTransition, WorldCommand};
 pub use config::{priority, ChannelConfig, MaxPrivilege};
 pub use error::ChannelError;
 pub use manager::{WorldCommandSender, WorldManager};
-pub use runner::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner, Event};
+pub use runner::{
+    ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner, ClientRunnerConfig, Event,
+    EventEmitter,
+};
 pub use traits::{ChannelCore, ChannelMut};
 pub use world::World;

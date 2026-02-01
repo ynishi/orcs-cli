@@ -35,9 +35,10 @@
 use super::error::EngineError;
 use super::eventbus::{ComponentHandle, EventBus};
 use crate::channel::{
-    ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, World, WorldCommand,
-    WorldCommandSender, WorldManager,
+    ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner,
+    ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
 };
+use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
 use orcs_component::{Component, ComponentSnapshot, EventCategory, Package, PackageInfo};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
@@ -212,6 +213,46 @@ impl OrcsEngine {
         handle
     }
 
+    /// Spawn a ClientRunner for an IO channel with a bound Component.
+    ///
+    /// ClientRunner provides IO bridging for Human-interactive channels.
+    /// The Component receives an EventEmitter for emitting events.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind (1:1 relationship)
+    /// * `io_port` - IO port for View communication
+    /// * `principal` - Principal for signal creation from IO input
+    pub fn spawn_client_runner(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+        io_port: IOPort,
+        principal: orcs_types::Principal,
+    ) -> ChannelHandle {
+        let config = ClientRunnerConfig {
+            world_tx: self.world_tx.clone(),
+            world: Arc::clone(&self.world_read),
+            signal_rx: self.signal_tx.subscribe(),
+            signal_tx: self.signal_tx.clone(),
+        };
+        let (runner, handle) = ClientRunner::new(channel_id, config, component, io_port, principal);
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!("Spawned ClientRunner for channel {}", channel_id);
+        handle
+    }
+
     /// Spawn a child channel with configuration and bound Component.
     ///
     /// Creates a new channel in World and spawns its runner.
@@ -297,8 +338,14 @@ impl OrcsEngine {
     }
 
     /// Send signal (from external, e.g., human input)
+    ///
+    /// Broadcasts to both ChannelRunners (via signal_tx) and
+    /// registered components (via eventbus).
     pub fn signal(&self, signal: Signal) {
         info!("Signal dispatched: {:?}", signal.kind);
+        // Broadcast to ChannelRunners
+        let _ = self.signal_tx.send(signal.clone());
+        // Also send to component-level eventbus
         self.eventbus.signal(signal);
     }
 

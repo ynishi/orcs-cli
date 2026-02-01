@@ -30,8 +30,8 @@
 //! ```
 
 use orcs_component::{
-    Component, ComponentError, EventCategory, Package, PackageError, PackageInfo, Packageable,
-    Status,
+    Component, ComponentError, Emitter, EventCategory, Package, PackageError, PackageInfo,
+    Packageable, Status,
 };
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::ComponentId;
@@ -77,6 +77,8 @@ pub struct EchoWithHilComponent {
     installed_packages: Vec<PackageInfo>,
     /// Current decorator configuration.
     decorator: DecoratorConfig,
+    /// Emitter for outputting results to ClientRunner.
+    emitter: Option<Box<dyn Emitter>>,
 }
 
 impl EchoWithHilComponent {
@@ -90,6 +92,7 @@ impl EchoWithHilComponent {
             last_result: None,
             installed_packages: Vec::new(),
             decorator: DecoratorConfig::default(),
+            emitter: None,
         }
     }
 
@@ -166,8 +169,18 @@ impl EchoWithHilComponent {
 
         let message = pending.message.clone();
         self.pending = None;
-        self.execute_echo(&message);
+        let result = self.execute_echo(&message);
+
+        // Send result to ClientRunner via Event
+        self.send_result(&result);
         true
+    }
+
+    /// Sends the echo result via the emitter.
+    fn send_result(&self, result: &str) {
+        if let Some(emitter) = &self.emitter {
+            emitter.emit_output(result);
+        }
     }
 
     /// Handles a Reject signal.
@@ -182,8 +195,19 @@ impl EchoWithHilComponent {
 
         self.pending = None;
         self.status = Status::Idle;
-        self.last_result = Some(format!("Rejected: {}", reason.unwrap_or("No reason")));
+        let result = format!("Rejected: {}", reason.unwrap_or("No reason"));
+        self.last_result = Some(result.clone());
+
+        // Notify ClientRunner via emitter
+        self.send_result_with_level(&result, "warn");
         true
+    }
+
+    /// Sends a result with a specific level via the emitter.
+    fn send_result_with_level(&self, result: &str, level: &str) {
+        if let Some(emitter) = &self.emitter {
+            emitter.emit_output_with_level(result, level);
+        }
     }
 
     /// Handles a Modify signal.
@@ -204,7 +228,10 @@ impl EchoWithHilComponent {
             .to_string();
 
         self.pending = None;
-        self.execute_echo(&message);
+        let result = self.execute_echo(&message);
+
+        // Send result to ClientRunner via Event
+        self.send_result(&result);
         true
     }
 }
@@ -323,6 +350,10 @@ impl Component for EchoWithHilComponent {
     fn abort(&mut self) {
         self.status = Status::Aborted;
         self.pending = None;
+    }
+
+    fn set_emitter(&mut self, emitter: Box<dyn Emitter>) {
+        self.emitter = Some(emitter);
     }
 
     fn as_packageable(&self) -> Option<&dyn Packageable> {

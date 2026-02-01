@@ -106,7 +106,10 @@ pub use components::{
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 #[allow(deprecated)]
-pub use io::{ConsoleOutput, HumanInput, InputCommand, OutputSink};
+pub use io::{
+    ConsoleOutput, HumanInput, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
+    InputCommand, OutputSink, OutputStyle,
+};
 pub use session::{
     default_session_path, LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError,
     SyncState, SyncStatus,

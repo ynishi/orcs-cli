@@ -77,7 +77,8 @@ pub use orcs_types::{
 // Re-export from Runtime Layer
 pub use orcs_runtime::{
     priority, Channel, ChannelConfig, ChannelError, ChannelHandle, ChannelRunner,
-    ChannelRunnerFactory, ChannelState, ClientRunner, ComponentHandle, DefaultPolicy, EngineError,
-    Event, EventBus, OrcsEngine, PermissionChecker, PrivilegeLevel, Session, StateTransition,
-    World, WorldCommand, WorldCommandSender, WorldManager,
+    ChannelRunnerFactory, ChannelState, ClientRunner, ComponentHandle, DecoratorConfig,
+    DefaultPolicy, EchoWithHilComponent, EngineError, Event, EventBus, OrcsEngine,
+    PermissionChecker, PrivilegeLevel, Session, StateTransition, World, WorldCommand,
+    WorldCommandSender, WorldManager,
 };

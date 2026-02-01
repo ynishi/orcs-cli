@@ -201,6 +201,7 @@
 
 mod child;
 mod component;
+mod emitter;
 mod error;
 mod package;
 mod snapshot;
@@ -209,6 +210,9 @@ mod traits;
 
 // Re-export core traits
 pub use traits::{Identifiable, SignalReceiver, Statusable};
+
+// Re-export emitter trait
+pub use emitter::Emitter;
 
 // Re-export component traits
 pub use child::Child;

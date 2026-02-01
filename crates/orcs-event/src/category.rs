@@ -63,6 +63,16 @@ pub enum EventCategory {
     /// Operations: echo, check
     Echo,
 
+    /// Output events for IO display.
+    ///
+    /// Components emit this category when they want to output
+    /// results to the user via IOBridge.
+    ///
+    /// Payload should contain:
+    /// - `message`: The message to display (String)
+    /// - `level`: Optional log level ("info", "warn", "error")
+    Output,
+
     /// Extension category for plugins.
     ///
     /// Use this for custom components that don't fit built-in categories.
@@ -111,6 +121,12 @@ impl EventCategory {
         matches!(self, Self::Extension { .. })
     }
 
+    /// Returns `true` if this is the Output category.
+    #[must_use]
+    pub fn is_output(&self) -> bool {
+        matches!(self, Self::Output)
+    }
+
     /// Returns the display name of this category.
     #[must_use]
     pub fn name(&self) -> String {
@@ -118,6 +134,7 @@ impl EventCategory {
             Self::Lifecycle => "Lifecycle".to_string(),
             Self::Hil => "Hil".to_string(),
             Self::Echo => "Echo".to_string(),
+            Self::Output => "Output".to_string(),
             Self::Extension { namespace, kind } => format!("{}:{}", namespace, kind),
         }
     }

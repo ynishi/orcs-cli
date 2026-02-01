@@ -54,6 +54,8 @@
 mod base;
 mod client;
 mod common;
+mod emitter;
 
 pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
-pub use client::ClientRunner;
+pub use client::{ClientRunner, ClientRunnerConfig};
+pub use emitter::EventEmitter;

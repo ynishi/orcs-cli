@@ -292,6 +292,35 @@ pub trait Component: Send + Sync {
     fn as_packageable_mut(&mut self) -> Option<&mut dyn crate::Packageable> {
         None
     }
+
+    /// Sets the event emitter for this component.
+    ///
+    /// The emitter allows the component to emit events to:
+    /// - The owning Channel (for IO output)
+    /// - All Components (via signal broadcast)
+    ///
+    /// Called by [`ClientRunner`] during component initialization.
+    ///
+    /// # Default
+    ///
+    /// Default implementation does nothing. Override if your component
+    /// needs to emit events.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn set_emitter(&mut self, emitter: Box<dyn Emitter>) {
+    ///     self.emitter = Some(emitter);
+    /// }
+    ///
+    /// // Later, emit output
+    /// if let Some(emitter) = &self.emitter {
+    ///     emitter.emit_output("Result: success");
+    /// }
+    /// ```
+    fn set_emitter(&mut self, _emitter: Box<dyn crate::Emitter>) {
+        // Default: no-op
+    }
 }
 
 #[cfg(test)]

@@ -36,9 +36,10 @@ use crate::AppError;
 use orcs_event::{EventCategory, Signal};
 use orcs_runtime::{
     default_session_path, ChannelConfig, ChannelHandle, ConsoleOutput, EchoWithHilComponent, Event,
-    HumanInput, InputCommand, LocalFileStore, OrcsEngine, OutputSink, SessionAsset, World,
+    HumanInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, LocalFileStore,
+    OrcsEngine, OutputSink, SessionAsset, World,
 };
-use orcs_types::ComponentId;
+use orcs_types::{ComponentId, Principal, PrincipalId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -74,6 +75,14 @@ pub struct OrcsApp {
     ///
     /// This is always available after construction (not Option).
     io_handle: ChannelHandle,
+    /// Handle for sending input to ClientRunner.
+    ///
+    /// Kept alive to prevent IOPort channel from closing.
+    /// Will be used for IO-based input flow in future.
+    #[allow(dead_code)]
+    io_input: IOInputHandle,
+    /// Handle for receiving IO output from ClientRunner.
+    io_output: IOOutputHandle,
     /// Pending approval (for "y" / "n" without explicit ID).
     pending_approval: Option<PendingApproval>,
     /// Session store for persistence.
@@ -211,7 +220,7 @@ impl OrcsApp {
                 break;
             }
 
-            // Check for stdin input with timeout
+            // Check for stdin input and IO output
             tokio::select! {
                 line_result = reader.next_line() => {
                     match line_result {
@@ -235,6 +244,10 @@ impl OrcsApp {
                             return Err(AppError::Io(e));
                         }
                     }
+                }
+                Some(io_out) = self.io_output.recv() => {
+                    // Display IO output from ClientRunner
+                    self.handle_io_output(io_out);
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                     // Yield to allow engine polling
@@ -419,6 +432,52 @@ impl OrcsApp {
         self.output.info("  q / quit       - Quit application");
         self.output.info("  veto / stop    - Emergency stop");
     }
+
+    /// Handles IO output from ClientRunner.
+    fn handle_io_output(&self, io_out: IOOutput) {
+        match io_out {
+            IOOutput::Print { text, style } => {
+                use orcs_runtime::OutputStyle;
+                match style {
+                    OutputStyle::Warn => self.output.warn(&text),
+                    OutputStyle::Error => self.output.error(&text),
+                    OutputStyle::Info => self.output.info(&text),
+                    _ => self.output.info(&text),
+                }
+            }
+            IOOutput::ShowApprovalRequest {
+                id,
+                operation,
+                description,
+            } => {
+                // Store as pending approval for "y" / "n" without ID
+                // Note: self is &self, so we can't mutate pending_approval here
+                // For now, just display the request
+                self.output
+                    .show_approval_request(&orcs_runtime::ApprovalRequest::with_id(
+                        &id,
+                        &operation,
+                        &description,
+                        serde_json::json!({}),
+                    ));
+            }
+            IOOutput::ShowApproved { approval_id } => {
+                self.output.show_approved(&approval_id);
+            }
+            IOOutput::ShowRejected {
+                approval_id,
+                reason,
+            } => {
+                self.output.show_rejected(&approval_id, reason.as_deref());
+            }
+            IOOutput::Prompt { message } => {
+                self.output.info(&message);
+            }
+            IOOutput::Clear => {
+                // No-op for console output
+            }
+        }
+    }
 }
 
 /// Builder for [`OrcsApp`].
@@ -489,11 +548,15 @@ impl OrcsAppBuilder {
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
 
-        // Spawn runner for IO channel with EchoWithHilComponent
+        // Create IO port for ClientRunner
+        let (io_port, io_input, io_output) = IOPort::with_defaults(io);
+        let principal = Principal::User(PrincipalId::new());
+
+        // Spawn ClientRunner for IO channel with EchoWithHilComponent
         let echo_component = Box::new(EchoWithHilComponent::new());
-        let io_handle = engine.spawn_runner(io, echo_component);
+        let io_handle = engine.spawn_client_runner(io, echo_component, io_port, principal);
         tracing::info!(
-            "IO channel runner spawned with EchoWithHilComponent: {}",
+            "IO channel ClientRunner spawned with EchoWithHilComponent: {}",
             io
         );
 
@@ -527,6 +590,8 @@ impl OrcsAppBuilder {
             input,
             output,
             io_handle,
+            io_input,
+            io_output,
             pending_approval: None,
             store,
             session,

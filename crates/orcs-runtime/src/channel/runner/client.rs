@@ -34,12 +34,13 @@ use super::common::{
     determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
     send_abort, send_transition, SignalAction,
 };
+use super::emitter::EventEmitter;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::World;
 use crate::components::IOBridge;
 use crate::io::{IOPort, InputCommand};
 use orcs_component::Component;
-use orcs_event::{Request, Signal, SignalKind};
+use orcs_event::{EventCategory, Request, Signal, SignalKind};
 use orcs_types::{ChannelId, Principal};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -51,6 +52,20 @@ const EVENT_BUFFER_SIZE: usize = 64;
 
 /// Maximum queue size for events received while paused.
 const PAUSED_QUEUE_MAX_SIZE: usize = 128;
+
+/// Configuration for creating a ClientRunner.
+///
+/// Groups World and Signal channel parameters to reduce argument count.
+pub struct ClientRunnerConfig {
+    /// Command sender for World modifications.
+    pub world_tx: mpsc::Sender<WorldCommand>,
+    /// Read-only World access.
+    pub world: Arc<RwLock<World>>,
+    /// Broadcast receiver for signals.
+    pub signal_rx: broadcast::Receiver<Signal>,
+    /// Broadcast sender for signals (for EventEmitter).
+    pub signal_tx: broadcast::Sender<Signal>,
+}
 
 /// Runner with IO bridging for Human-interactive channels.
 ///
@@ -87,30 +102,31 @@ impl ClientRunner {
     /// # Arguments
     ///
     /// * `id` - The channel's ID
-    /// * `world_tx` - Command sender for World modifications
-    /// * `world` - Read-only World access
-    /// * `signal_rx` - Broadcast receiver for signals
+    /// * `config` - World and signal channel configuration
     /// * `component` - The Component bound to this channel (1:1)
     /// * `io_port` - IO port for View communication
     /// * `principal` - Principal for signal creation
     #[must_use]
     pub fn new(
         id: ChannelId,
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_rx: broadcast::Receiver<Signal>,
-        component: Box<dyn Component>,
+        config: ClientRunnerConfig,
+        mut component: Box<dyn Component>,
         io_port: IOPort,
         principal: Principal,
     ) -> (Self, ChannelHandle) {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
 
+        // Create EventEmitter and inject into Component
+        let component_id = component.id().clone();
+        let emitter = EventEmitter::new(event_tx.clone(), config.signal_tx, component_id);
+        component.set_emitter(Box::new(emitter));
+
         let runner = Self {
             id,
             event_rx,
-            signal_rx,
-            world_tx,
-            world,
+            signal_rx: config.signal_rx,
+            world_tx: config.world_tx,
+            world: config.world,
             component: Arc::new(Mutex::new(component)),
             paused_queue: VecDeque::new(),
             io_bridge: IOBridge::new(io_port),
@@ -342,6 +358,12 @@ impl ClientRunner {
 
     /// Processes a single event by delivering it to the Component.
     async fn process_event(&self, event: Event) {
+        // Handle Output category: send to IOBridge for display
+        if event.category == EventCategory::Output {
+            self.handle_output_event(&event).await;
+            return;
+        }
+
         let request = Request::new(
             event.category,
             &event.operation,
@@ -366,6 +388,33 @@ impl ClientRunner {
                 warn!("ClientRunner {}: Component returned error: {}", self.id, e);
                 // Show error to user via IO
                 let _ = self.io_bridge.error(&e.to_string()).await;
+            }
+        }
+    }
+
+    /// Handles Output category events by sending to IOBridge.
+    async fn handle_output_event(&self, event: &Event) {
+        let message = event
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let level = event
+            .payload
+            .get("level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
+
+        match level {
+            "warn" | "warning" => {
+                let _ = self.io_bridge.warn(message).await;
+            }
+            "error" => {
+                let _ = self.io_bridge.error(message).await;
+            }
+            _ => {
+                let _ = self.io_bridge.info(message).await;
             }
         }
     }
@@ -476,21 +525,27 @@ mod tests {
         let _ = manager_task.await;
     }
 
+    fn make_config(
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_tx: &broadcast::Sender<Signal>,
+    ) -> ClientRunnerConfig {
+        ClientRunnerConfig {
+            world_tx,
+            world,
+            signal_rx: signal_tx.subscribe(),
+            signal_tx: signal_tx.clone(),
+        }
+    }
+
     #[tokio::test]
     async fn client_runner_creation() {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
-        let signal_rx = signal_tx.subscribe();
         let (port, _input, _output) = IOPort::with_defaults(primary);
-        let (runner, handle) = ClientRunner::new(
-            primary,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            mock_component(),
-            port,
-            test_principal(),
-        );
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+        let (runner, handle) =
+            ClientRunner::new(primary, config, mock_component(), port, test_principal());
 
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
@@ -504,17 +559,10 @@ mod tests {
 
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
-        let signal_rx = signal_tx.subscribe();
         let (port, input_handle, _output_handle) = IOPort::with_defaults(primary);
-        let (runner, _handle) = ClientRunner::new(
-            primary,
-            world_tx.clone(),
-            world.clone(),
-            signal_rx,
-            mock_component(),
-            port,
-            test_principal(),
-        );
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+        let (runner, _handle) =
+            ClientRunner::new(primary, config, mock_component(), port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
@@ -535,17 +583,10 @@ mod tests {
 
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
-        let signal_rx = signal_tx.subscribe();
         let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
-        let (runner, _handle) = ClientRunner::new(
-            primary,
-            world_tx.clone(),
-            world.clone(),
-            signal_rx,
-            mock_component(),
-            port,
-            test_principal(),
-        );
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+        let (runner, _handle) =
+            ClientRunner::new(primary, config, mock_component(), port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
@@ -579,17 +620,10 @@ mod tests {
     async fn client_runner_handles_veto() {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
-        let signal_rx = signal_tx.subscribe();
         let (port, _input, _output) = IOPort::with_defaults(primary);
-        let (runner, _handle) = ClientRunner::new(
-            primary,
-            world_tx.clone(),
-            world.clone(),
-            signal_rx,
-            mock_component(),
-            port,
-            test_principal(),
-        );
+        let config = make_config(world_tx.clone(), world, &signal_tx);
+        let (runner, _handle) =
+            ClientRunner::new(primary, config, mock_component(), port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
