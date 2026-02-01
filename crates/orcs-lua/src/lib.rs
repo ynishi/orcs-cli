@@ -57,13 +57,33 @@
 //! Automatic file watching is not implemented yet.
 //!
 //! TODO: Integrate `notify` crate for automatic hot reload on file change.
+//!
+//! # Script Loading
+//!
+//! Scripts can be loaded from:
+//! 1. **Embedded** - Built into the binary at compile time
+//! 2. **Runtime** - Loaded from filesystem at runtime
+//!
+//! ```ignore
+//! use orcs_lua::ScriptLoader;
+//!
+//! // Load embedded script
+//! let component = ScriptLoader::load_embedded("echo")?;
+//!
+//! // Load with runtime fallback
+//! let loader = ScriptLoader::new().with_path("./scripts");
+//! let component = loader.load("echo")?;
+//! ```
 
 mod child;
 mod component;
+pub mod embedded;
 mod error;
+mod loader;
 mod types;
 
 pub use child::LuaChild;
 pub use component::LuaComponent;
 pub use error::LuaError;
+pub use loader::ScriptLoader;
 pub use types::{LuaRequest, LuaResponse, LuaSignal};
