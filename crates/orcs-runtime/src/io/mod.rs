@@ -24,7 +24,7 @@
 //! │  │  output_tx ──► IOOutput                                  │  │
 //! │  └─────────────────────────────────────────────────────────┘  │
 //! │                              │                                  │
-//! │                    HumanChannel (Component)                     │
+//! │                  IOBridgeChannel (Component)                    │
 //! │                              │                                  │
 //! │                    Signal / Request                             │
 //! └───────────────────────────────────────────────────────────────┘
@@ -60,6 +60,7 @@
 mod console;
 mod input;
 mod output;
+mod parser;
 mod port;
 mod renderer;
 mod types;
@@ -74,6 +75,10 @@ pub use port::{IOInputHandle, IOOutputHandle, IOPort, DEFAULT_BUFFER_SIZE};
 pub use console::{setup_ctrlc_handler, Console, ConsoleInputReader};
 pub use renderer::ConsoleRenderer;
 
+// Input parsing (stateless)
+pub use input::InputCommand;
+pub use parser::InputParser;
+
 // Legacy/compatibility (to be migrated)
-pub use input::{HumanInput, InputCommand};
+pub use input::HumanInput;
 pub use output::{ConsoleOutput, OutputSink};

@@ -3,7 +3,7 @@
 //! Tests the complete flow: View → Bridge → Model
 
 use orcs_event::SignalKind;
-use orcs_runtime::components::{ApprovalRequest, HumanChannel};
+use orcs_runtime::components::{ApprovalRequest, IOBridgeChannel};
 use orcs_runtime::io::{ConsoleRenderer, IOInput, IOOutput, IOPort};
 use orcs_types::{ChannelId, Principal, PrincipalId};
 
@@ -16,10 +16,10 @@ fn test_principal() -> Principal {
 async fn view_to_bridge_input_flow() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
 
     // Set default approval ID for HIL responses
-    human_channel.set_default_approval_id(Some("pending-approval-1".to_string()));
+    bridge.set_default_approval_id(Some("pending-approval-1".to_string()));
 
     // View layer sends input
     input_handle.send(IOInput::line("y")).await.unwrap();
@@ -29,7 +29,7 @@ async fn view_to_bridge_input_flow() {
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     // Bridge layer processes input
-    let (signals, commands) = human_channel.drain_input_to_signals();
+    let (signals, commands) = bridge.drain_input_to_signals();
 
     assert_eq!(signals.len(), 2);
     assert!(signals[0].is_approve());
@@ -42,12 +42,12 @@ async fn view_to_bridge_input_flow() {
 async fn bridge_to_view_output_flow() {
     let channel_id = ChannelId::new();
     let (port, _input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let human_channel = HumanChannel::new(port, test_principal());
+    let bridge = IOBridgeChannel::new(port, test_principal());
 
     // Bridge layer sends output
-    human_channel.info("Test message").await.unwrap();
-    human_channel.warn("Warning!").await.unwrap();
-    human_channel.error("Error occurred").await.unwrap();
+    bridge.info("Test message").await.unwrap();
+    bridge.warn("Warning!").await.unwrap();
+    bridge.error("Error occurred").await.unwrap();
 
     // View layer receives output
     let outputs = output_handle.drain();
@@ -64,7 +64,7 @@ async fn bridge_to_view_output_flow() {
 async fn approval_request_flow() {
     let channel_id = ChannelId::new();
     let (port, input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
 
     // Create and display an approval request
     let request = ApprovalRequest::with_id(
@@ -74,8 +74,8 @@ async fn approval_request_flow() {
         serde_json::json!({"path": "/etc/config"}),
     );
 
-    human_channel.show_approval_request(&request).await.unwrap();
-    human_channel.set_default_approval_id(Some("req-integration-test".to_string()));
+    bridge.show_approval_request(&request).await.unwrap();
+    bridge.set_default_approval_id(Some("req-integration-test".to_string()));
 
     // View receives the approval request display
     let output = output_handle.recv().await.unwrap();
@@ -96,7 +96,7 @@ async fn approval_request_flow() {
     input_handle.send(IOInput::line("y")).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let (signals, _) = human_channel.drain_input_to_signals();
+    let (signals, _) = bridge.drain_input_to_signals();
     assert_eq!(signals.len(), 1);
     assert!(signals[0].is_approve());
 
@@ -107,10 +107,7 @@ async fn approval_request_flow() {
     }
 
     // Confirm approval display
-    human_channel
-        .show_approved("req-integration-test")
-        .await
-        .unwrap();
+    bridge.show_approved("req-integration-test").await.unwrap();
     let output = output_handle.recv().await.unwrap();
     assert!(matches!(output, IOOutput::ShowApproved { .. }));
 }
@@ -120,10 +117,10 @@ async fn approval_request_flow() {
 async fn rejection_flow_with_reason() {
     let channel_id = ChannelId::new();
     let (port, input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
 
     // Set default approval ID
-    human_channel.set_default_approval_id(Some("req-reject-test".to_string()));
+    bridge.set_default_approval_id(Some("req-reject-test".to_string()));
 
     // User rejects with ID and reason
     input_handle
@@ -132,7 +129,7 @@ async fn rejection_flow_with_reason() {
         .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let (signals, _) = human_channel.drain_input_to_signals();
+    let (signals, _) = bridge.drain_input_to_signals();
     assert_eq!(signals.len(), 1);
     assert!(signals[0].is_reject());
 
@@ -148,7 +145,7 @@ async fn rejection_flow_with_reason() {
     }
 
     // Confirm rejection display
-    human_channel
+    bridge
         .show_rejected("req-reject-test", Some("too-dangerous"))
         .await
         .unwrap();
@@ -170,7 +167,7 @@ async fn rejection_flow_with_reason() {
 async fn preparsed_signal_from_view() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
 
     // View layer sends a pre-parsed signal (e.g., from Ctrl+C handler)
     input_handle
@@ -179,7 +176,7 @@ async fn preparsed_signal_from_view() {
         .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let (signals, _) = human_channel.drain_input_to_signals();
+    let (signals, _) = bridge.drain_input_to_signals();
     assert_eq!(signals.len(), 1);
     assert!(signals[0].is_veto());
     assert!(signals[0].is_global());
@@ -190,13 +187,13 @@ async fn preparsed_signal_from_view() {
 async fn eof_handling() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
 
     // View layer sends EOF
     input_handle.send(IOInput::Eof).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let (signals, commands) = human_channel.drain_input_to_signals();
+    let (signals, commands) = bridge.drain_input_to_signals();
     assert!(signals.is_empty());
     assert_eq!(commands.len(), 1);
     assert!(matches!(commands[0], orcs_runtime::io::InputCommand::Quit));
@@ -207,8 +204,8 @@ async fn eof_handling() {
 async fn async_recv_input() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
-    human_channel.set_default_approval_id(Some("async-test".to_string()));
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    bridge.set_default_approval_id(Some("async-test".to_string()));
 
     // Spawn a task to send input after a delay
     let handle = tokio::spawn(async move {
@@ -217,7 +214,7 @@ async fn async_recv_input() {
     });
 
     // Wait for input
-    let result = human_channel.recv_input().await;
+    let result = bridge.recv_input().await;
     assert!(result.is_some());
     let signal = result.unwrap().unwrap();
     assert!(signal.is_approve());
@@ -230,12 +227,12 @@ async fn async_recv_input() {
 async fn console_renderer_integration() {
     let channel_id = ChannelId::new();
     let (port, _input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let human_channel = HumanChannel::new(port, test_principal());
+    let bridge = IOBridgeChannel::new(port, test_principal());
 
     // Send various outputs
-    human_channel.info("Info message").await.unwrap();
-    human_channel.warn("Warning message").await.unwrap();
-    human_channel.prompt("Enter value:").await.unwrap();
+    bridge.info("Info message").await.unwrap();
+    bridge.warn("Warning message").await.unwrap();
+    bridge.prompt("Enter value:").await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     // Create renderer and drain outputs
@@ -249,16 +246,16 @@ async fn console_renderer_integration() {
 async fn channel_closed_detection() {
     let channel_id = ChannelId::new();
     let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-    let human_channel = HumanChannel::new(port, test_principal());
+    let bridge = IOBridgeChannel::new(port, test_principal());
 
     // Output channel is open
-    assert!(!human_channel.is_output_closed());
+    assert!(!bridge.is_output_closed());
 
     // Drop output handle
     drop(output_handle);
 
     // Output channel is now closed
-    assert!(human_channel.is_output_closed());
+    assert!(bridge.is_output_closed());
 
     // Input handle should still work until port is dropped
     assert!(!input_handle.is_closed());
@@ -269,8 +266,8 @@ async fn channel_closed_detection() {
 async fn multiple_input_sources() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut human_channel = HumanChannel::new(port, test_principal());
-    human_channel.set_default_approval_id(Some("multi-source".to_string()));
+    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    bridge.set_default_approval_id(Some("multi-source".to_string()));
 
     // Clone the input handle (simulating multiple input sources)
     let input_handle2 = input_handle.clone();
@@ -280,6 +277,6 @@ async fn multiple_input_sources() {
     input_handle2.send(IOInput::line("veto")).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let (signals, _) = human_channel.drain_input_to_signals();
+    let (signals, _) = bridge.drain_input_to_signals();
     assert_eq!(signals.len(), 2);
 }

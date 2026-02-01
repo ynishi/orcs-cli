@@ -30,7 +30,7 @@
 //!
 //! ```no_run
 //! use orcs_runtime::io::{Console, IOPort};
-//! use orcs_runtime::components::HumanChannel;
+//! use orcs_runtime::components::IOBridgeChannel;
 //! use orcs_types::{ChannelId, Principal, PrincipalId};
 //!
 //! #[tokio::main]
@@ -44,8 +44,8 @@
 //!     // Create console with handles
 //!     let console = Console::new(input_handle, output_handle);
 //!
-//!     // Create HumanChannel (Bridge)
-//!     let human_channel = HumanChannel::new(port, principal);
+//!     // Create IOBridgeChannel (Bridge)
+//!     let bridge = IOBridgeChannel::new(port, principal);
 //!
 //!     // Run console (spawns input reader and renderer tasks)
 //!     console.run().await;

@@ -1,6 +1,6 @@
-//! Human Channel - Bridge between View and Model layers.
+//! IO Bridge Channel - Bridge between View and Model layers.
 //!
-//! The HumanChannel is a Component that bridges the View layer (IOPort)
+//! The [`IOBridgeChannel`] is a Component that bridges the View layer (IOPort)
 //! with the Model layer (EventBus). It handles:
 //!
 //! - Input: Parsing user input into Signals
@@ -18,7 +18,7 @@
 //!             │ IOInput                        │ IOOutput
 //!             ▼                                │
 //! ┌───────────────────────────────────────────────────────────────┐
-//! │                    HumanChannel (Bridge)                       │
+//! │                   IOBridgeChannel (Bridge)                     │
 //! │  ┌─────────────────────────────────────────────────────────┐  │
 //! │  │                        IOPort                            │  │
 //! │  └─────────────────────────────────────────────────────────┘  │
@@ -41,7 +41,7 @@
 //! # Example
 //!
 //! ```
-//! use orcs_runtime::components::HumanChannel;
+//! use orcs_runtime::components::IOBridgeChannel;
 //! use orcs_runtime::io::{IOPort, IOInput, IOOutput};
 //! use orcs_types::{ChannelId, Principal, PrincipalId};
 //!
@@ -49,23 +49,23 @@
 //! let principal = Principal::User(PrincipalId::new());
 //!
 //! let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-//! let human_channel = HumanChannel::new(port, principal);
+//! let bridge = IOBridgeChannel::new(port, principal);
 //!
 //! // View layer sends input via input_handle
-//! // HumanChannel converts to Signals
+//! // IOBridgeChannel converts to Signals
 //! // View layer receives output via output_handle
 //! ```
 
-use crate::io::{HumanInput, IOOutput, IOPort, InputCommand};
+use crate::io::{IOOutput, IOPort, InputCommand, InputParser};
 use orcs_component::{Component, ComponentError, EventCategory, Status};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::{ChannelId, ComponentId, Principal, SignalScope};
 use serde_json::Value;
 
-/// Human Channel - Bridge between View and Model layers.
+/// IO Bridge Channel - Bridge between View and Model layers.
 ///
 /// Owns an IOPort and converts between IO types and internal events.
-pub struct HumanChannel {
+pub struct IOBridgeChannel {
     /// Component identifier.
     id: ComponentId,
     /// Current status.
@@ -74,16 +74,14 @@ pub struct HumanChannel {
     io_port: IOPort,
     /// Principal representing the Human user.
     principal: Principal,
-    /// Input parser (reuses HumanInput logic).
-    parser: HumanInput,
     /// Channel ID this component belongs to.
     channel_id: ChannelId,
     /// Default approval ID for HIL responses without explicit ID.
     default_approval_id: Option<String>,
 }
 
-impl HumanChannel {
-    /// Creates a new HumanChannel.
+impl IOBridgeChannel {
+    /// Creates a new IOBridgeChannel.
     ///
     /// # Arguments
     ///
@@ -93,17 +91,16 @@ impl HumanChannel {
     pub fn new(io_port: IOPort, principal: Principal) -> Self {
         let channel_id = io_port.channel_id();
         Self {
-            id: ComponentId::builtin("human-channel"),
+            id: ComponentId::builtin("io-bridge-channel"),
             status: Status::Idle,
             io_port,
-            principal: principal.clone(),
-            parser: HumanInput::with_principal(principal),
+            principal,
             channel_id,
             default_approval_id: None,
         }
     }
 
-    /// Creates a new HumanChannel with a custom component ID.
+    /// Creates a new IOBridgeChannel with a custom component ID.
     #[must_use]
     pub fn with_id(id: ComponentId, io_port: IOPort, principal: Principal) -> Self {
         let channel_id = io_port.channel_id();
@@ -111,8 +108,7 @@ impl HumanChannel {
             id,
             status: Status::Idle,
             io_port,
-            principal: principal.clone(),
-            parser: HumanInput::with_principal(principal),
+            principal,
             channel_id,
             default_approval_id: None,
         }
@@ -154,7 +150,7 @@ impl HumanChannel {
     /// Parses a line of input and converts to Signal.
     #[must_use]
     pub fn parse_line_to_signal(&self, line: &str) -> Option<Signal> {
-        let cmd = self.parser.parse_line(line);
+        let cmd = InputParser::parse(line);
         self.command_to_signal(&cmd)
     }
 
@@ -170,7 +166,7 @@ impl HumanChannel {
         for input in self.io_port.drain_input() {
             match input {
                 crate::io::IOInput::Line(line) => {
-                    let cmd = self.parser.parse_line(&line);
+                    let cmd = InputParser::parse(&line);
                     if let Some(signal) = self.command_to_signal(&cmd) {
                         signals.push(signal);
                     } else {
@@ -209,7 +205,7 @@ impl HumanChannel {
 
         match input {
             crate::io::IOInput::Line(line) => {
-                let cmd = self.parser.parse_line(&line);
+                let cmd = InputParser::parse(&line);
                 if let Some(signal) = self.command_to_signal(&cmd) {
                     Some(Ok(signal))
                 } else {
@@ -307,7 +303,7 @@ impl HumanChannel {
     }
 }
 
-impl Component for HumanChannel {
+impl Component for IOBridgeChannel {
     fn id(&self) -> &ComponentId {
         &self.id
     }
@@ -430,9 +426,9 @@ impl Component for HumanChannel {
     }
 }
 
-impl std::fmt::Debug for HumanChannel {
+impl std::fmt::Debug for IOBridgeChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HumanChannel")
+        f.debug_struct("IOBridgeChannel")
             .field("id", &self.id)
             .field("status", &self.status)
             .field("channel_id", &self.channel_id)
@@ -451,20 +447,20 @@ mod tests {
     }
 
     fn setup() -> (
-        HumanChannel,
+        IOBridgeChannel,
         crate::io::IOInputHandle,
         crate::io::IOOutputHandle,
     ) {
         let channel_id = ChannelId::new();
         let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-        let channel = HumanChannel::new(port, test_principal());
+        let channel = IOBridgeChannel::new(port, test_principal());
         (channel, input_handle, output_handle)
     }
 
     #[test]
-    fn human_channel_creation() {
+    fn io_bridge_channel_creation() {
         let (channel, _, _) = setup();
-        assert_eq!(channel.id().name, "human-channel");
+        assert_eq!(channel.id().name, "io-bridge-channel");
         assert_eq!(channel.status(), Status::Idle);
     }
 
@@ -724,7 +720,7 @@ mod tests {
     fn debug_impl() {
         let (channel, _, _) = setup();
         let debug_str = format!("{:?}", channel);
-        assert!(debug_str.contains("HumanChannel"));
-        assert!(debug_str.contains("human-channel"));
+        assert!(debug_str.contains("IOBridgeChannel"));
+        assert!(debug_str.contains("io-bridge-channel"));
     }
 }

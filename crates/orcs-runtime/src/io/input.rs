@@ -1,41 +1,22 @@
-//! Human input handling.
+//! Human input handling (legacy compatibility layer).
 //!
-//! Parses stdin input into commands and signals for the ORCS system.
+//! This module provides backward compatibility for `HumanInput`.
+//! New code should use [`super::InputParser`] directly.
 //!
-//! # Input Format
+//! # Migration
 //!
-//! | Input | Command | Description |
-//! |-------|---------|-------------|
-//! | `y` or `yes` | Approve | Approve pending request |
-//! | `n` or `no` | Reject | Reject pending request |
-//! | `y <id>` | Approve ID | Approve specific request |
-//! | `n <id> [reason]` | Reject ID | Reject with optional reason |
-//! | `p` or `pause` | Pause | Pause current channel |
-//! | `r` or `resume` | Resume | Resume paused channel |
-//! | `q` or `quit` | Quit | Graceful shutdown |
-//! | Ctrl+C | Veto | Emergency stop |
-//!
-//! # Example
-//!
-//! ```no_run
-//! use orcs_runtime::io::{HumanInput, InputCommand};
-//!
-//! let mut input = HumanInput::new();
-//!
-//! // Parse user input
+//! ```ignore
+//! // Old (deprecated)
+//! let input = HumanInput::new();
 //! let cmd = input.parse_line("y");
-//! assert!(matches!(cmd, InputCommand::Approve { .. }));
 //!
-//! let cmd = input.parse_line("n req-123 too dangerous");
-//! assert!(matches!(cmd, InputCommand::Reject { .. }));
+//! // New (preferred)
+//! let cmd = InputParser::parse("y");
 //! ```
 
+use super::parser::InputParser;
 use orcs_event::Signal;
 use orcs_types::{Principal, PrincipalId};
-
-/// Maximum number of parts when splitting input line.
-/// Format: command [id] [reason/message]
-const MAX_INPUT_PARTS: usize = 3;
 
 /// Parsed input command from Human.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,64 +158,14 @@ impl HumanInput {
     /// # Returns
     ///
     /// The parsed [`InputCommand`].
+    ///
+    /// # Note
+    ///
+    /// This delegates to [`InputParser::parse`]. The `&self` parameter is
+    /// not used; this method exists for backward compatibility.
     #[must_use]
     pub fn parse_line(&self, line: &str) -> InputCommand {
-        let line = line.trim();
-
-        if line.is_empty() {
-            return InputCommand::Empty;
-        }
-
-        let parts: Vec<&str> = line.splitn(MAX_INPUT_PARTS, ' ').collect();
-        let cmd = parts[0].to_lowercase();
-
-        match cmd.as_str() {
-            // Approval
-            "y" | "yes" | "approve" => {
-                let approval_id = parts.get(1).map(|s| (*s).to_string());
-                InputCommand::Approve { approval_id }
-            }
-
-            // Rejection
-            "n" | "no" | "reject" => {
-                let approval_id = parts.get(1).map(|s| (*s).to_string());
-                let reason = parts.get(2).map(|s| (*s).to_string());
-                InputCommand::Reject {
-                    approval_id,
-                    reason,
-                }
-            }
-
-            // Pause
-            "p" | "pause" => InputCommand::Pause,
-
-            // Resume
-            "r" | "resume" => InputCommand::Resume,
-
-            // Steer (rest of line is the message)
-            "s" | "steer" => {
-                let message = if parts.len() > 1 {
-                    parts[1..].join(" ")
-                } else {
-                    // Empty steer message is invalid
-                    return InputCommand::Unknown {
-                        input: line.to_string(),
-                    };
-                };
-                InputCommand::Steer { message }
-            }
-
-            // Quit
-            "q" | "quit" | "exit" => InputCommand::Quit,
-
-            // Veto
-            "veto" | "stop" | "abort" => InputCommand::Veto,
-
-            // Unknown
-            _ => InputCommand::Unknown {
-                input: line.to_string(),
-            },
-        }
+        InputParser::parse(line)
     }
 
     /// Parses input and converts to a Signal if applicable.

@@ -1,18 +1,18 @@
 //! IO types for View layer abstraction.
 //!
 //! These types define the contract between the View layer (Console, WebSocket, etc.)
-//! and the Bridge layer (HumanChannel).
+//! and the Bridge layer (IOBridgeChannel).
 //!
 //! # Architecture
 //!
 //! ```text
-//! View Layer          Bridge Layer         Model Layer
-//! ┌─────────┐        ┌─────────────┐      ┌──────────┐
-//! │ Console │◀──────▶│HumanChannel │◀────▶│ EventBus │
-//! └─────────┘        └─────────────┘      └──────────┘
-//!     │                    │
-//!     │ IOInput            │ Signal/Request
-//!     │ IOOutput           │
+//! View Layer          Bridge Layer            Model Layer
+//! ┌─────────┐        ┌─────────────────┐      ┌──────────┐
+//! │ Console │◀──────▶│ IOBridgeChannel │◀────▶│ EventBus │
+//! └─────────┘        └─────────────────┘      └──────────┘
+//!     │                       │
+//!     │ IOInput               │ Signal/Request
+//!     │ IOOutput              │
 //! ```
 
 use crate::components::ApprovalRequest;

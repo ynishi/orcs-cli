@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the IO abstraction layer:
 //! - IOPort for bidirectional communication
-//! - HumanChannel as bridge between View and Model
+//! - IOBridgeChannel as bridge between View and Model
 //! - Console for terminal I/O
 //!
 //! # Usage
@@ -18,7 +18,7 @@
 //! - `q` or `quit` - Exit
 //! - Any other text - Shows as Unknown command
 
-use orcs_runtime::components::HumanChannel;
+use orcs_runtime::components::IOBridgeChannel;
 use orcs_runtime::io::{setup_ctrlc_handler, Console, IOPort};
 use orcs_types::{ChannelId, Principal, PrincipalId};
 
@@ -50,11 +50,11 @@ async fn main() {
     // Setup Ctrl+C handler
     setup_ctrlc_handler(input_handle.clone());
 
-    // Create HumanChannel (Bridge layer)
-    let mut human_channel = HumanChannel::new(port, principal);
+    // Create IOBridgeChannel (Bridge layer)
+    let mut bridge = IOBridgeChannel::new(port, principal);
 
     // Set a default approval ID for demo
-    human_channel.set_default_approval_id(Some("demo-request-1".to_string()));
+    bridge.set_default_approval_id(Some("demo-request-1".to_string()));
 
     // Create Console (View layer)
     let console = Console::new(input_handle, output_handle);
@@ -72,12 +72,12 @@ async fn main() {
         input_reader.run().await;
     });
 
-    // Main loop: process input from HumanChannel
+    // Main loop: process input from IOBridgeChannel
     println!("Waiting for input...\n");
 
     loop {
         // Wait for input
-        match human_channel.recv_input().await {
+        match bridge.recv_input().await {
             Some(Ok(signal)) => {
                 // Input converted to Signal
                 println!("\n[Signal received]");
