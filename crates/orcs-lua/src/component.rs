@@ -12,6 +12,7 @@ use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
 
 /// A component implemented in Lua.
@@ -115,6 +116,9 @@ impl LuaComponent {
     pub fn from_script(script: &str) -> Result<Self, LuaError> {
         let lua = Lua::new();
 
+        // Register orcs helper functions
+        Self::register_orcs_functions(&lua)?;
+
         // Execute script and get the returned table
         let component_table: Table = lua
             .load(script)
@@ -209,6 +213,58 @@ impl LuaComponent {
         self.shutdown_key = new_component.shutdown_key;
 
         tracing::info!("Reloaded Lua component: {}", self.id);
+        Ok(())
+    }
+
+    /// Registers orcs helper functions in Lua.
+    ///
+    /// Available functions:
+    /// - `orcs.exec(cmd)` - Execute shell command and return output
+    /// - `orcs.exec_streaming(cmd, callback)` - Execute with streaming output
+    fn register_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
+        let orcs_table = lua.create_table()?;
+
+        // orcs.exec(cmd) -> {ok, stdout, stderr, code}
+        let exec_fn = lua.create_function(|lua, cmd: String| {
+            tracing::debug!("Lua exec: {}", cmd);
+
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+
+            let result = lua.create_table()?;
+            result.set("ok", output.status.success())?;
+            result.set(
+                "stdout",
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )?;
+            result.set(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )?;
+            result.set("code", output.status.code().unwrap_or(-1))?;
+
+            Ok(result)
+        })?;
+        orcs_table.set("exec", exec_fn)?;
+
+        // orcs.log(level, msg)
+        let log_fn = lua.create_function(|_, (level, msg): (String, String)| {
+            match level.to_lowercase().as_str() {
+                "debug" => tracing::debug!("[lua] {}", msg),
+                "info" => tracing::info!("[lua] {}", msg),
+                "warn" => tracing::warn!("[lua] {}", msg),
+                "error" => tracing::error!("[lua] {}", msg),
+                _ => tracing::info!("[lua] {}", msg),
+            }
+            Ok(())
+        })?;
+        orcs_table.set("log", log_fn)?;
+
+        lua.globals().set("orcs", orcs_table)?;
+
         Ok(())
     }
 }
