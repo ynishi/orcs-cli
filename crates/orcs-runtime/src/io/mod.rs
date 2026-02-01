@@ -57,6 +57,7 @@
 //! // Bridge layer (HumanChannel) uses port
 //! ```
 
+mod console;
 mod input;
 mod output;
 mod port;
@@ -69,7 +70,8 @@ pub use types::{IOInput, IOOutput, OutputStyle};
 // Port (Bridge layer)
 pub use port::{IOInputHandle, IOOutputHandle, IOPort, DEFAULT_BUFFER_SIZE};
 
-// Renderer (View layer implementation)
+// Console (View layer - complete terminal I/O)
+pub use console::{setup_ctrlc_handler, Console, ConsoleInputReader};
 pub use renderer::ConsoleRenderer;
 
 // Legacy/compatibility (to be migrated)
