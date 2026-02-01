@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the IO abstraction layer:
 //! - IOPort for bidirectional communication
-//! - IOBridgeChannel as bridge between View and Model
+//! - IOBridge as bridge between View and Model
 //! - Console for terminal I/O
 //!
 //! # Usage
@@ -18,7 +18,7 @@
 //! - `q` or `quit` - Exit
 //! - Any other text - Shows as Unknown command
 
-use orcs_runtime::components::IOBridgeChannel;
+use orcs_runtime::components::IOBridge;
 use orcs_runtime::io::{setup_ctrlc_handler, Console, IOPort};
 use orcs_types::{ChannelId, Principal, PrincipalId};
 
@@ -51,8 +51,8 @@ async fn main() {
     // Setup Ctrl+C handler
     setup_ctrlc_handler(input_handle.clone());
 
-    // Create IOBridgeChannel (Bridge layer)
-    let mut bridge = IOBridgeChannel::new(port, principal);
+    // Create IOBridge (Bridge layer)
+    let mut bridge = IOBridge::new(port, principal);
 
     // Create Console (View layer)
     let console = Console::new(input_handle, output_handle);
@@ -70,7 +70,7 @@ async fn main() {
         input_reader.run().await;
     });
 
-    // Main loop: process input from IOBridgeChannel
+    // Main loop: process input from IOBridge
     println!("Waiting for input...\n");
 
     loop {

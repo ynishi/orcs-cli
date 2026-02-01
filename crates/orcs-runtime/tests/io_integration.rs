@@ -3,7 +3,7 @@
 //! Tests the complete flow: View → Bridge → Model
 
 use orcs_event::SignalKind;
-use orcs_runtime::components::{ApprovalRequest, IOBridgeChannel};
+use orcs_runtime::components::{ApprovalRequest, IOBridge};
 use orcs_runtime::io::{ConsoleRenderer, IOInput, IOOutput, IOPort, InputContext};
 use orcs_types::{ChannelId, Principal, PrincipalId};
 
@@ -16,7 +16,7 @@ fn test_principal() -> Principal {
 async fn view_to_bridge_input_flow() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // View layer passes approval ID via InputContext
     let ctx = InputContext::with_approval_id("pending-approval-1");
@@ -48,7 +48,7 @@ async fn view_to_bridge_input_flow() {
 async fn bridge_to_view_output_flow() {
     let channel_id = ChannelId::new();
     let (port, _input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let bridge = IOBridgeChannel::new(port, test_principal());
+    let bridge = IOBridge::new(port, test_principal());
 
     // Bridge layer sends output
     bridge.info("Test message").await.unwrap();
@@ -70,7 +70,7 @@ async fn bridge_to_view_output_flow() {
 async fn approval_request_flow() {
     let channel_id = ChannelId::new();
     let (port, input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // Create and display an approval request
     let request = ApprovalRequest::with_id(
@@ -126,7 +126,7 @@ async fn approval_request_flow() {
 async fn rejection_flow_with_reason() {
     let channel_id = ChannelId::new();
     let (port, input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // User rejects with explicit ID and reason in the input
     // Note: When approval_id is explicitly provided in input, it takes precedence
@@ -175,7 +175,7 @@ async fn rejection_flow_with_reason() {
 async fn preparsed_signal_from_view() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // View layer sends a pre-parsed signal (e.g., from Ctrl+C handler)
     input_handle
@@ -195,7 +195,7 @@ async fn preparsed_signal_from_view() {
 async fn eof_handling() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // View layer sends EOF
     input_handle.send(IOInput::Eof).await.unwrap();
@@ -212,7 +212,7 @@ async fn eof_handling() {
 async fn async_recv_input() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // Spawn a task to send input after a delay
     let handle = tokio::spawn(async move {
@@ -238,7 +238,7 @@ async fn async_recv_input() {
 async fn console_renderer_integration() {
     let channel_id = ChannelId::new();
     let (port, _input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
-    let bridge = IOBridgeChannel::new(port, test_principal());
+    let bridge = IOBridge::new(port, test_principal());
 
     // Send various outputs
     bridge.info("Info message").await.unwrap();
@@ -257,7 +257,7 @@ async fn console_renderer_integration() {
 async fn channel_closed_detection() {
     let channel_id = ChannelId::new();
     let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-    let bridge = IOBridgeChannel::new(port, test_principal());
+    let bridge = IOBridge::new(port, test_principal());
 
     // Output channel is open
     assert!(!bridge.is_output_closed());
@@ -277,7 +277,7 @@ async fn channel_closed_detection() {
 async fn multiple_input_sources() {
     let channel_id = ChannelId::new();
     let (port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
-    let mut bridge = IOBridgeChannel::new(port, test_principal());
+    let mut bridge = IOBridge::new(port, test_principal());
 
     // Clone the input handle (simulating multiple input sources)
     let input_handle2 = input_handle.clone();

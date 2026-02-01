@@ -1,6 +1,6 @@
 //! IO Bridge Channel - Bridge between View and Model layers.
 //!
-//! The [`IOBridgeChannel`] is a Component that bridges the View layer (IOPort)
+//! The [`IOBridge`] is a Component that bridges the View layer (IOPort)
 //! with the Model layer (EventBus). It handles:
 //!
 //! - Input: Parsing user input into Signals
@@ -18,7 +18,7 @@
 //!             │ IOInput                        │ IOOutput
 //!             ▼                                │
 //! ┌───────────────────────────────────────────────────────────────┐
-//! │                   IOBridgeChannel (Bridge)                     │
+//! │                   IOBridge (Bridge)                     │
 //! │  ┌─────────────────────────────────────────────────────────┐  │
 //! │  │                        IOPort                            │  │
 //! │  └─────────────────────────────────────────────────────────┘  │
@@ -41,7 +41,7 @@
 //! # Example
 //!
 //! ```
-//! use orcs_runtime::components::IOBridgeChannel;
+//! use orcs_runtime::components::IOBridge;
 //! use orcs_runtime::io::{IOPort, IOInput, IOOutput};
 //! use orcs_types::{ChannelId, Principal, PrincipalId};
 //!
@@ -49,10 +49,10 @@
 //! let principal = Principal::User(PrincipalId::new());
 //!
 //! let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-//! let bridge = IOBridgeChannel::new(port, principal);
+//! let bridge = IOBridge::new(port, principal);
 //!
 //! // View layer sends input via input_handle
-//! // IOBridgeChannel converts to Signals
+//! // IOBridge converts to Signals
 //! // View layer receives output via output_handle
 //! ```
 
@@ -69,7 +69,7 @@ use orcs_types::{ChannelId, Principal, SignalScope};
 /// which owns this bridge.
 ///
 /// The parser can be injected for testing or customization.
-pub struct IOBridgeChannel {
+pub struct IOBridge {
     /// IO port for communication with View layer.
     io_port: IOPort,
     /// Principal representing the Human user.
@@ -80,8 +80,8 @@ pub struct IOBridgeChannel {
     parser: InputParser,
 }
 
-impl IOBridgeChannel {
-    /// Creates a new IOBridgeChannel with default parser.
+impl IOBridge {
+    /// Creates a new IOBridge with default parser.
     ///
     /// # Arguments
     ///
@@ -92,7 +92,7 @@ impl IOBridgeChannel {
         Self::with_parser(io_port, principal, InputParser)
     }
 
-    /// Creates a new IOBridgeChannel with a custom parser.
+    /// Creates a new IOBridge with a custom parser.
     ///
     /// This allows injecting a custom parser for testing or customization.
     #[must_use]
@@ -307,9 +307,9 @@ impl IOBridgeChannel {
     }
 }
 
-impl std::fmt::Debug for IOBridgeChannel {
+impl std::fmt::Debug for IOBridge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IOBridgeChannel")
+        f.debug_struct("IOBridge")
             .field("channel_id", &self.channel_id)
             .finish_non_exhaustive()
     }
@@ -326,13 +326,13 @@ mod tests {
     }
 
     fn setup() -> (
-        IOBridgeChannel,
+        IOBridge,
         crate::io::IOInputHandle,
         crate::io::IOOutputHandle,
     ) {
         let channel_id = ChannelId::new();
         let (port, input_handle, output_handle) = IOPort::with_defaults(channel_id);
-        let channel = IOBridgeChannel::new(port, test_principal());
+        let channel = IOBridge::new(port, test_principal());
         (channel, input_handle, output_handle)
     }
 
@@ -340,7 +340,7 @@ mod tests {
     fn io_bridge_channel_creation() {
         let channel_id = ChannelId::new();
         let (port, _, _) = IOPort::with_defaults(channel_id);
-        let channel = IOBridgeChannel::new(port, test_principal());
+        let channel = IOBridge::new(port, test_principal());
         // Pure bridge - stores channel_id from port
         assert_eq!(channel.channel_id(), channel_id);
     }
@@ -496,7 +496,7 @@ mod tests {
     fn debug_impl() {
         let (channel, _, _) = setup();
         let debug_str = format!("{:?}", channel);
-        assert!(debug_str.contains("IOBridgeChannel"));
+        assert!(debug_str.contains("IOBridge"));
         assert!(debug_str.contains("channel_id"));
     }
 }

@@ -1,14 +1,14 @@
 //! IO types for View layer abstraction.
 //!
 //! These types define the contract between the View layer (Console, WebSocket, etc.)
-//! and the Bridge layer (IOBridgeChannel).
+//! and the Bridge layer (IOBridge).
 //!
 //! # Architecture
 //!
 //! ```text
 //! View Layer          Bridge Layer            Model Layer
 //! ┌─────────┐        ┌─────────────────┐      ┌──────────┐
-//! │ Console │◀──────▶│ IOBridgeChannel │◀────▶│ EventBus │
+//! │ Console │◀──────▶│ IOBridge │◀────▶│ EventBus │
 //! └─────────┘        └─────────────────┘      └──────────┘
 //!     │                       │
 //!     │ IOInput               │ Signal/Request

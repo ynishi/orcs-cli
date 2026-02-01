@@ -24,7 +24,7 @@
 //! │  │  output_tx ──► IOOutput                                  │  │
 //! │  └─────────────────────────────────────────────────────────┘  │
 //! │                              │                                  │
-//! │                  IOBridgeChannel (Component)                    │
+//! │                  IOBridge (Component)                    │
 //! │                              │                                  │
 //! │                    Signal / Request                             │
 //! └───────────────────────────────────────────────────────────────┘
@@ -78,7 +78,7 @@ pub use renderer::ConsoleRenderer;
 // Input parsing
 pub use input::InputCommand;
 
-// Internal: Parser is injected into IOBridgeChannel
+// Internal: Parser is injected into IOBridge
 pub(crate) use parser::InputParser;
 
 // Legacy/compatibility (deprecated, to be removed)

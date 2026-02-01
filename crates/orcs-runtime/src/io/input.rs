@@ -123,21 +123,11 @@ impl InputCommand {
 /// Human input parser and handler.
 ///
 /// Parses text input from stdin into [`InputCommand`]s.
-///
-/// # Deprecated
-///
-/// Use [`super::IOBridgeChannel`] instead, which integrates the parser
-/// and provides proper View-Bridge layer separation.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use IOBridgeChannel instead, which integrates InputParser"
-)]
 pub struct HumanInput {
     /// Principal representing the Human user.
     principal: Principal,
 }
 
-#[allow(deprecated)]
 impl HumanInput {
     /// Creates a new HumanInput handler.
     #[must_use]
@@ -188,7 +178,6 @@ impl HumanInput {
     }
 }
 
-#[allow(deprecated)]
 impl Default for HumanInput {
     fn default() -> Self {
         Self::new()
@@ -196,7 +185,6 @@ impl Default for HumanInput {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use orcs_event::SignalKind;

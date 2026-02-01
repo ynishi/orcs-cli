@@ -2,7 +2,7 @@
 //!
 //! Pure function for parsing user input into [`InputCommand`].
 //!
-//! This is an internal module. Use [`super::super::components::IOBridgeChannel`]
+//! This is an internal module. Use [`super::super::components::IOBridge`]
 //! which integrates the parser.
 
 use super::InputCommand;
@@ -14,7 +14,7 @@ const MAX_INPUT_PARTS: usize = 3;
 /// Stateless input parser.
 ///
 /// Converts raw text input into [`InputCommand`].
-/// Stateless - can be injected into IOBridgeChannel for testing.
+/// Stateless - can be injected into IOBridge for testing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InputParser;
 
