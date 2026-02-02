@@ -5,32 +5,27 @@
 //!
 //! # Design
 //!
-//! Functions operate on component collections directly, enabling:
-//! - Easier testing without full engine setup
-//! - Clear separation of concerns
-//! - Reusability across different contexts
+//! Functions call `Component::snapshot()` and `Component::restore()` directly,
+//! avoiding the need for Request/Response overhead and dummy ChannelIds.
+//!
+//! # Behavior
+//!
+//! - Components that don't support snapshots (return `NotSupported`) are skipped
+//! - Other errors during restore cause immediate failure with `SnapshotError`
 
-use orcs_component::{Component, ComponentSnapshot, EventCategory, SnapshotError};
-use orcs_event::Request;
-use orcs_types::{ChannelId, ComponentId};
+use orcs_component::{Component, ComponentSnapshot, SnapshotError};
+use orcs_types::ComponentId;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-/// Lifecycle operation: snapshot collection.
-pub(super) const OP_SNAPSHOT: &str = "snapshot";
-
-/// Lifecycle operation: state restoration.
-pub(super) const OP_RESTORE: &str = "restore";
-
-/// Collects snapshots from all components via Lifecycle Request.
+/// Collects snapshots from all components.
 ///
-/// Sends `Request { category: Lifecycle, operation: "snapshot" }` to each component.
-/// Components that support snapshots return `Ok(Value)` containing the snapshot.
-/// Components that don't support snapshots return `Err(NotSupported)` and are skipped.
+/// Calls `Component::snapshot()` on each component.
+/// Components that don't support snapshots are silently skipped.
 ///
 /// # Arguments
 ///
-/// * `components` - Mutable reference to the component map
+/// * `components` - Reference to the component map
 ///
 /// # Returns
 ///
@@ -38,43 +33,22 @@ pub(super) const OP_RESTORE: &str = "restore";
 /// Uses FQN (`namespace::name`) instead of full ID to enable
 /// snapshot restoration across sessions (UUIDs differ between runs).
 pub fn collect_snapshots(
-    components: &mut HashMap<ComponentId, Box<dyn Component>>,
+    components: &HashMap<ComponentId, Box<dyn Component>>,
 ) -> HashMap<String, ComponentSnapshot> {
     let mut snapshots = HashMap::new();
 
-    // Collect component IDs first to avoid borrow issues
-    let component_ids: Vec<ComponentId> = components.keys().cloned().collect();
-
-    for id in component_ids {
-        if let Some(component) = components.get_mut(&id) {
-            let request = Request::new(
-                EventCategory::Lifecycle,
-                OP_SNAPSHOT,
-                id.clone(),
-                ChannelId::new(),
-                serde_json::Value::Null,
-            );
-
-            match component.on_request(&request) {
-                Ok(value) => {
-                    // Deserialize snapshot from Value
-                    match serde_json::from_value::<ComponentSnapshot>(value) {
-                        Ok(snapshot) => {
-                            debug!("Collected snapshot for component: {}", id.fqn());
-                            snapshots.insert(id.fqn(), snapshot);
-                        }
-                        Err(e) => {
-                            warn!("Failed to deserialize snapshot from {}: {}", id.fqn(), e);
-                        }
-                    }
-                }
-                Err(orcs_component::ComponentError::NotSupported(_)) => {
-                    // Component doesn't support snapshots - skip silently
-                    debug!("Component {} does not support snapshots", id.fqn());
-                }
-                Err(e) => {
-                    warn!("Failed to collect snapshot from {}: {}", id.fqn(), e);
-                }
+    for (id, component) in components {
+        match component.snapshot() {
+            Ok(snapshot) => {
+                debug!("Collected snapshot for component: {}", id.fqn());
+                snapshots.insert(id.fqn(), snapshot);
+            }
+            Err(SnapshotError::NotSupported(_)) => {
+                // Component doesn't support snapshots - skip silently
+                debug!("Component {} does not support snapshots", id.fqn());
+            }
+            Err(e) => {
+                warn!("Failed to collect snapshot from {}: {}", id.fqn(), e);
             }
         }
     }
@@ -83,10 +57,15 @@ pub fn collect_snapshots(
     snapshots
 }
 
-/// Restores components from snapshots via Lifecycle Request.
+/// Restores components from snapshots.
 ///
-/// Sends `Request { category: Lifecycle, operation: "restore", payload: snapshot }`
-/// to each component that has a saved snapshot.
+/// Calls `Component::restore()` on each component that has a saved snapshot.
+///
+/// # Behavior
+///
+/// - Components returning `NotSupported` are logged as warnings and skipped
+/// - Other errors cause immediate return with `SnapshotError::RestoreFailed`
+/// - Missing components (not registered) are skipped with debug log
 ///
 /// # Arguments
 ///
@@ -109,31 +88,12 @@ pub fn restore_snapshots(
 
         if let Some(id) = component_id {
             if let Some(component) = components.get_mut(&id) {
-                // Serialize snapshot to Value for request payload
-                let payload = match serde_json::to_value(snapshot) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err(SnapshotError::RestoreFailed {
-                            component: fqn.clone(),
-                            reason: format!("Failed to serialize snapshot: {e}"),
-                        });
-                    }
-                };
-
-                let request = Request::new(
-                    EventCategory::Lifecycle,
-                    OP_RESTORE,
-                    id.clone(),
-                    ChannelId::new(),
-                    payload,
-                );
-
-                match component.on_request(&request) {
-                    Ok(_) => {
+                match component.restore(snapshot) {
+                    Ok(()) => {
                         debug!("Restored component: {}", id.fqn());
                         restored += 1;
                     }
-                    Err(orcs_component::ComponentError::NotSupported(_)) => {
+                    Err(SnapshotError::NotSupported(_)) => {
                         warn!("Component {} does not support snapshot restore", id.fqn());
                     }
                     Err(e) => {
@@ -161,8 +121,7 @@ pub fn restore_snapshots(
 mod tests {
     use super::*;
     use orcs_component::{ComponentError, Status};
-    use orcs_event::Signal;
-    use orcs_event::SignalResponse;
+    use orcs_event::{Request, Signal, SignalResponse};
     use serde_json::Value;
 
     /// A component that supports snapshots for testing.
@@ -190,27 +149,9 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT => {
-                    let snapshot = ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    serde_json::to_value(snapshot)
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))
-                }
-                OP_RESTORE => {
-                    let snapshot: ComponentSnapshot =
-                        serde_json::from_value(request.payload.clone())
-                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    self.counter = snapshot
-                        .to_state()
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    Ok(Value::Null)
-                }
-                _ => {
-                    self.counter += 1;
-                    Ok(Value::Number(self.counter.into()))
-                }
-            }
+            // Increment counter on any request (for testing state changes)
+            self.counter += 1;
+            Ok(Value::Number(self.counter.into()))
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -222,9 +163,18 @@ mod tests {
         }
 
         fn abort(&mut self) {}
+
+        fn snapshot(&self) -> Result<ComponentSnapshot, SnapshotError> {
+            ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
+        }
+
+        fn restore(&mut self, snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {
+            self.counter = snapshot.to_state()?;
+            Ok(())
+        }
     }
 
-    /// A component that does not support snapshots.
+    /// A component that does not support snapshots (uses default implementation).
     struct NonSnapshottableComponent {
         id: ComponentId,
     }
@@ -247,12 +197,7 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT | OP_RESTORE => {
-                    Err(ComponentError::NotSupported(request.operation.clone()))
-                }
-                _ => Ok(request.payload.clone()),
-            }
+            Ok(request.payload.clone())
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -264,6 +209,7 @@ mod tests {
         }
 
         fn abort(&mut self) {}
+        // Uses default snapshot() and restore() which return NotSupported
     }
 
     #[test]
@@ -273,7 +219,7 @@ mod tests {
         let id = comp.id.clone();
         components.insert(id, Box::new(comp));
 
-        let snapshots = collect_snapshots(&mut components);
+        let snapshots = collect_snapshots(&components);
 
         assert_eq!(snapshots.len(), 1);
         assert!(snapshots.contains_key("builtin::snap"));
@@ -291,7 +237,7 @@ mod tests {
         let non_snap_id = non_snap.id.clone();
         components.insert(non_snap_id, Box::new(non_snap));
 
-        let snapshots = collect_snapshots(&mut components);
+        let snapshots = collect_snapshots(&components);
 
         // Only snapshottable component should have snapshot
         assert_eq!(snapshots.len(), 1);
@@ -337,21 +283,21 @@ mod tests {
         components.insert(id.clone(), Box::new(comp));
 
         // Collect snapshots
-        let snapshots = collect_snapshots(&mut components);
+        let snapshots = collect_snapshots(&components);
         assert_eq!(snapshots.len(), 1);
 
-        // Modify the component
+        // Modify the component (triggers counter increment)
         if let Some(comp) = components.get_mut(&id) {
             let _ = comp.on_request(&Request::new(
-                EventCategory::Echo,
+                orcs_component::EventCategory::Echo,
                 "increment",
                 id.clone(),
-                ChannelId::new(),
+                orcs_types::ChannelId::new(),
                 Value::Null,
             ));
         }
 
-        // Restore from snapshot
+        // Restore from snapshot (should reset counter to 42)
         let restored = restore_snapshots(&mut components, &snapshots).unwrap();
         assert_eq!(restored, 1);
     }

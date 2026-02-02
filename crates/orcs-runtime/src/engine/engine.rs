@@ -599,11 +599,11 @@ impl OrcsEngine {
 
     // === Session Persistence ===
 
-    /// Collects snapshots from all components via Lifecycle Request.
+    /// Collects snapshots from all components.
     ///
     /// See [`session::collect_snapshots`] for details.
-    pub fn collect_snapshots(&mut self) -> HashMap<String, ComponentSnapshot> {
-        session::collect_snapshots(&mut self.components)
+    pub fn collect_snapshots(&self) -> HashMap<String, ComponentSnapshot> {
+        session::collect_snapshots(&self.components)
     }
 
     /// Restores components from snapshots in a SessionAsset via Lifecycle Request.
@@ -727,7 +727,6 @@ mod tests {
     use orcs_component::ComponentError;
     use orcs_event::Request;
     use serde_json::Value;
-    use session::{OP_RESTORE, OP_SNAPSHOT};
 
     /// Create a World with IO channel for testing.
     fn test_world() -> (World, ChannelId) {
@@ -760,12 +759,7 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT | OP_RESTORE => {
-                    Err(ComponentError::NotSupported(request.operation.clone()))
-                }
-                _ => Ok(request.payload.clone()),
-            }
+            Ok(request.payload.clone())
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -1044,30 +1038,8 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT => {
-                    // Return snapshot as Value
-                    let snapshot =
-                        orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
-                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    serde_json::to_value(snapshot)
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))
-                }
-                OP_RESTORE => {
-                    // Restore from snapshot in payload
-                    let snapshot: orcs_component::ComponentSnapshot =
-                        serde_json::from_value(request.payload.clone())
-                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    self.counter = snapshot
-                        .to_state()
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    Ok(Value::Null)
-                }
-                _ => {
-                    self.counter += 1;
-                    Ok(Value::Number(self.counter.into()))
-                }
-            }
+            self.counter += 1;
+            Ok(Value::Number(self.counter.into()))
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -1079,6 +1051,15 @@ mod tests {
         }
 
         fn abort(&mut self) {}
+
+        fn snapshot(&self) -> Result<orcs_component::ComponentSnapshot, orcs_component::SnapshotError> {
+            orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
+        }
+
+        fn restore(&mut self, snapshot: &orcs_component::ComponentSnapshot) -> Result<(), orcs_component::SnapshotError> {
+            self.counter = snapshot.to_state()?;
+            Ok(())
+        }
     }
 
     #[tokio::test]

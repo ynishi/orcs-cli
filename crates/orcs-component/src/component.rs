@@ -92,7 +92,9 @@
 //! }
 //! ```
 
-use crate::{ComponentError, EventCategory, Status, StatusDetail};
+use crate::{
+    ComponentError, ComponentSnapshot, EventCategory, SnapshotError, Status, StatusDetail,
+};
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value;
@@ -320,6 +322,54 @@ pub trait Component: Send + Sync {
     /// ```
     fn set_emitter(&mut self, _emitter: Box<dyn crate::Emitter>) {
         // Default: no-op
+    }
+
+    // === Snapshot Support ===
+
+    /// Captures the component's current state as a snapshot.
+    ///
+    /// Override this method to enable session persistence for your component.
+    /// The snapshot can later be restored via [`restore`](Self::restore).
+    ///
+    /// # Default
+    ///
+    /// Returns `NotSupported` - component does not support snapshots.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn snapshot(&self) -> Result<ComponentSnapshot, SnapshotError> {
+    ///     ComponentSnapshot::from_state(self.id.fqn(), &self.state)
+    /// }
+    /// ```
+    fn snapshot(&self) -> Result<ComponentSnapshot, SnapshotError> {
+        Err(SnapshotError::NotSupported(self.id().fqn()))
+    }
+
+    /// Restores the component's state from a snapshot.
+    ///
+    /// Override this method to enable session restoration for your component.
+    ///
+    /// # Default
+    ///
+    /// Returns `NotSupported` - component does not support snapshots.
+    ///
+    /// # Errors
+    ///
+    /// - `SnapshotError::NotSupported` - Component doesn't support snapshots
+    /// - `SnapshotError::ComponentMismatch` - Snapshot is for different component
+    /// - `SnapshotError::Serialization` - Failed to deserialize state
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn restore(&mut self, snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {
+    ///     self.state = snapshot.to_state()?;
+    ///     Ok(())
+    /// }
+    /// ```
+    fn restore(&mut self, _snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {
+        Err(SnapshotError::NotSupported(self.id().fqn()))
     }
 }
 
