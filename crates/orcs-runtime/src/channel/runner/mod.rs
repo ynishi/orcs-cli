@@ -60,6 +60,10 @@ mod emitter;
 mod paused_queue;
 
 pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
+// Builder is the recommended way to construct ChannelRunner with optional features.
+// Re-exported for external use; internal code will migrate to this API.
+#[allow(unused_imports)]
+pub use base::ChannelRunnerBuilder;
 pub use child_context::{ChildContextImpl, LuaChildLoader};
 pub use child_spawner::{ChildSpawner, SpawnedChildHandle};
 pub use client::{ClientRunner, ClientRunnerConfig};

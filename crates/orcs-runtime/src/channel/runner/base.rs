@@ -647,6 +647,168 @@ impl ChannelRunner {
     }
 }
 
+/// Builder for creating [`ChannelRunner`] instances.
+///
+/// This consolidates the various constructor patterns into a fluent API:
+///
+/// ```ignore
+/// // Basic runner (no emitter, no child spawner)
+/// let (runner, handle) = ChannelRunnerBuilder::new(id, world_tx, world, signal_rx, component)
+///     .build();
+///
+/// // With emitter only
+/// let (runner, handle) = ChannelRunnerBuilder::new(id, world_tx, world, signal_rx, component)
+///     .with_emitter(signal_tx)
+///     .build();
+///
+/// // With child spawner only
+/// let (runner, handle) = ChannelRunnerBuilder::new(id, world_tx, world, signal_rx, component)
+///     .with_child_spawner(signal_tx)
+///     .build();
+///
+/// // With both emitter and child spawner
+/// let (runner, handle) = ChannelRunnerBuilder::new(id, world_tx, world, signal_rx, component)
+///     .with_emitter(signal_tx.clone())
+///     .with_child_spawner(signal_tx)
+///     .build();
+/// ```
+pub struct ChannelRunnerBuilder {
+    id: ChannelId,
+    world_tx: mpsc::Sender<WorldCommand>,
+    world: Arc<RwLock<World>>,
+    signal_rx: broadcast::Receiver<Signal>,
+    component: Box<dyn Component>,
+    /// Signal sender for emitter (if enabled).
+    emitter_signal_tx: Option<broadcast::Sender<Signal>>,
+    /// Enable child spawner.
+    enable_child_spawner: bool,
+}
+
+impl ChannelRunnerBuilder {
+    /// Creates a new builder with required parameters.
+    #[must_use]
+    pub fn new(
+        id: ChannelId,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_rx: broadcast::Receiver<Signal>,
+        component: Box<dyn Component>,
+    ) -> Self {
+        Self {
+            id,
+            world_tx,
+            world,
+            signal_rx,
+            component,
+            emitter_signal_tx: None,
+            enable_child_spawner: false,
+        }
+    }
+
+    /// Enables the EventEmitter for this runner.
+    ///
+    /// The emitter allows the Component to emit output events via `orcs.output()`.
+    #[must_use]
+    pub fn with_emitter(mut self, signal_tx: broadcast::Sender<Signal>) -> Self {
+        self.emitter_signal_tx = Some(signal_tx);
+        self
+    }
+
+    /// Enables the ChildSpawner for this runner.
+    ///
+    /// This allows the Component and its Children to spawn sub-children
+    /// via ChildContext.
+    #[must_use]
+    pub fn with_child_spawner(mut self) -> Self {
+        self.enable_child_spawner = true;
+        self
+    }
+
+    /// Builds the ChannelRunner and returns it with a ChannelHandle.
+    #[must_use]
+    pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
+
+        // Set up emitter if enabled
+        if let Some(signal_tx) = &self.emitter_signal_tx {
+            let component_id = self.component.id().clone();
+            let emitter =
+                EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
+            self.component.set_emitter(Box::new(emitter));
+
+            info!(
+                "ChannelRunnerBuilder: injected emitter for {}",
+                component_id.fqn()
+            );
+        }
+
+        // Set up child spawner if enabled
+        let child_spawner = if self.enable_child_spawner {
+            let component_id = self.component.id().fqn();
+            let spawner = ChildSpawner::new(&component_id, event_tx.clone());
+            let spawner_arc = Arc::new(StdMutex::new(spawner));
+
+            info!(
+                "ChannelRunnerBuilder: created spawner for {}",
+                component_id
+            );
+
+            Some(spawner_arc)
+        } else {
+            None
+        };
+
+        // Determine if we need to keep event_tx for child context
+        let event_tx_for_context = if self.enable_child_spawner || self.emitter_signal_tx.is_some()
+        {
+            Some(event_tx.clone())
+        } else {
+            None
+        };
+
+        let runner = ChannelRunner {
+            id: self.id,
+            event_rx,
+            signal_rx: self.signal_rx,
+            world_tx: self.world_tx,
+            world: self.world,
+            component: Arc::new(Mutex::new(self.component)),
+            paused_queue: PausedEventQueue::new(),
+            child_spawner,
+            event_tx: event_tx_for_context,
+        };
+
+        let handle = ChannelHandle::new(self.id, event_tx);
+
+        (runner, handle)
+    }
+}
+
+impl ChannelRunner {
+    /// Creates a new builder for constructing a ChannelRunner.
+    ///
+    /// This is the recommended way to create runners with optional features.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (runner, handle) = ChannelRunner::builder(id, world_tx, world, signal_rx, component)
+    ///     .with_emitter(signal_tx)
+    ///     .with_child_spawner()
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn builder(
+        id: ChannelId,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_rx: broadcast::Receiver<Signal>,
+        component: Box<dyn Component>,
+    ) -> ChannelRunnerBuilder {
+        ChannelRunnerBuilder::new(id, world_tx, world, signal_rx, component)
+    }
+}
+
 /// Factory for creating channel runners.
 pub struct ChannelRunnerFactory {
     /// Command sender for World modifications.
@@ -1005,6 +1167,138 @@ mod tests {
             .unwrap();
 
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    // Builder pattern tests
+
+    #[tokio::test]
+    async fn builder_basic() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .build();
+
+        assert_eq!(runner.id(), primary);
+        assert_eq!(handle.id, primary);
+        assert!(runner.child_spawner().is_none());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_with_emitter() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_emitter(signal_tx.clone())
+        .build();
+
+        assert_eq!(runner.id(), primary);
+        assert_eq!(handle.id, primary);
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_with_child_spawner() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_child_spawner()
+        .build();
+
+        assert_eq!(runner.id(), primary);
+        assert_eq!(handle.id, primary);
+        assert!(runner.child_spawner().is_some());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_with_full_support() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_emitter(signal_tx.clone())
+        .with_child_spawner()
+        .build();
+
+        assert_eq!(runner.id(), primary);
+        assert_eq!(handle.id, primary);
+        assert!(runner.child_spawner().is_some());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_creates_child_context() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, _handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_child_spawner()
+        .build();
+
+        // Should be able to create child context when spawner is enabled
+        let ctx = runner.create_child_context("child-1");
+        assert!(ctx.is_some());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_no_child_context_without_spawner() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, _handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .build();
+
+        // Should NOT be able to create child context when spawner is disabled
+        let ctx = runner.create_child_context("child-1");
+        assert!(ctx.is_none());
 
         teardown(manager_task, world_tx).await;
     }
