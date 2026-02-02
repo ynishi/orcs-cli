@@ -114,9 +114,9 @@ pub mod session;
 pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
 pub use channel::{
     priority, BaseChannel, Channel, ChannelConfig, ChannelCore, ChannelError, ChannelHandle,
-    ChannelMut, ChannelRunner, ChannelRunnerFactory, ChannelState, ChildContextImpl, ChildSpawner,
-    ClientRunner, Event, LuaChildLoader, MaxPrivilege, SpawnedChildHandle, StateTransition, World,
-    WorldCommand, WorldCommandSender, WorldManager,
+    ChannelMut, ChannelRunner, ChannelState, ChildContextImpl, ChildSpawner, ClientRunner, Event,
+    LuaChildLoader, MaxPrivilege, SpawnedChildHandle, StateTransition, World, WorldCommand,
+    WorldCommandSender, WorldManager,
 };
 pub use components::{
     ApprovalRequest, ApprovalResult, DecoratorConfig, EchoWithHilComponent, HilComponent,

@@ -35,8 +35,8 @@
 
 use super::eventbus::EventBus;
 use crate::channel::{
-    ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner,
-    ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
+    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, World,
+    WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
@@ -353,16 +353,6 @@ impl OrcsEngine {
         self.spawn_runner(child_id, component);
 
         Some(child_id)
-    }
-
-    /// Returns a runner factory for creating channel runners.
-    #[must_use]
-    pub fn runner_factory(&self) -> ChannelRunnerFactory {
-        ChannelRunnerFactory::new(
-            self.world_tx.clone(),
-            Arc::clone(&self.world_read),
-            self.signal_tx.clone(),
-        )
     }
 
     /// Returns the read-only World handle for parallel access.

@@ -161,8 +161,8 @@ pub use config::{priority, ChannelConfig, MaxPrivilege};
 pub use error::ChannelError;
 pub use manager::{WorldCommandSender, WorldManager};
 pub use runner::{
-    ChannelHandle, ChannelRunner, ChannelRunnerFactory, ChildContextImpl, ChildSpawner,
-    ClientRunner, ClientRunnerConfig, Event, EventEmitter, LuaChildLoader, SpawnedChildHandle,
+    ChannelHandle, ChannelRunner, ChildContextImpl, ChildSpawner, ClientRunner,
+    ClientRunnerConfig, Event, EventEmitter, LuaChildLoader, SpawnedChildHandle,
 };
 pub use traits::{ChannelCore, ChannelMut};
 pub use world::World;

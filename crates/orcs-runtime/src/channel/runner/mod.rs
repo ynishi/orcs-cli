@@ -63,7 +63,7 @@ mod common;
 mod emitter;
 mod paused_queue;
 
-pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
+pub use base::{ChannelHandle, ChannelRunner, Event};
 // Builder is re-exported for external use (internal code uses it via base::ChannelRunnerBuilder)
 #[allow(unused_imports)]
 pub use base::ChannelRunnerBuilder;

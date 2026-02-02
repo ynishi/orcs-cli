@@ -619,55 +619,6 @@ impl ChannelRunner {
     }
 }
 
-/// Factory for creating channel runners.
-pub struct ChannelRunnerFactory {
-    /// Command sender for World modifications.
-    world_tx: mpsc::Sender<WorldCommand>,
-    /// Read-only World access.
-    world: Arc<RwLock<World>>,
-    /// Signal broadcaster.
-    signal_tx: broadcast::Sender<Signal>,
-}
-
-impl ChannelRunnerFactory {
-    /// Creates a new factory.
-    #[must_use]
-    pub fn new(
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_tx: broadcast::Sender<Signal>,
-    ) -> Self {
-        Self {
-            world_tx,
-            world,
-            signal_tx,
-        }
-    }
-
-    /// Creates a runner for an existing channel with a bound Component.
-    #[must_use]
-    pub fn create(
-        &self,
-        id: ChannelId,
-        component: Box<dyn Component>,
-    ) -> (ChannelRunner, ChannelHandle) {
-        let signal_rx = self.signal_tx.subscribe();
-        ChannelRunner::builder(
-            id,
-            self.world_tx.clone(),
-            Arc::clone(&self.world),
-            signal_rx,
-            component,
-        )
-        .build()
-    }
-
-    /// Broadcasts a signal to all runners.
-    pub fn signal(&self, signal: Signal) {
-        let _ = self.signal_tx.send(signal);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,19 +800,6 @@ mod tests {
 
         let handle2 = handle.clone();
         assert_eq!(handle.id, handle2.id);
-
-        teardown(manager_task, world_tx).await;
-    }
-
-    #[tokio::test]
-    async fn factory_creates_runners() {
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let factory = ChannelRunnerFactory::new(world_tx.clone(), world, signal_tx.clone());
-
-        let (runner, handle) = factory.create(primary, mock_component());
-        assert_eq!(runner.id(), primary);
-        assert_eq!(handle.id, primary);
 
         teardown(manager_task, world_tx).await;
     }
