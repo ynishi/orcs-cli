@@ -34,31 +34,26 @@
 
 use super::error::EngineError;
 use super::eventbus::{ComponentHandle, EventBus};
+use super::{package, session};
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner,
     ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
-use orcs_component::{Component, ComponentSnapshot, EventCategory, Package, PackageInfo};
-use orcs_event::{Request, Signal, SignalKind, SignalResponse};
+use orcs_component::{Component, ComponentSnapshot, Package, PackageInfo};
+use orcs_event::{Signal, SignalKind, SignalResponse};
 use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
 ///
 /// 256 signals provides sufficient buffering for HIL interactions.
 /// Lagged receivers will miss old signals but continue receiving new ones.
 const SIGNAL_BUFFER_SIZE: usize = 256;
-
-/// Lifecycle operation: snapshot collection.
-const OP_SNAPSHOT: &str = "snapshot";
-
-/// Lifecycle operation: state restoration.
-const OP_RESTORE: &str = "restore";
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
@@ -604,126 +599,21 @@ impl OrcsEngine {
 
     // === Session Persistence ===
 
-    /// Collects snapshots from all components via Lifecycle Request.
+    /// Collects snapshots from all components.
     ///
-    /// Sends `Request { category: Lifecycle, operation: "snapshot" }` to each component.
-    /// Components that support snapshots return `Ok(Value)` containing the snapshot.
-    /// Components that don't support snapshots return `Err(NotSupported)` and are skipped.
-    ///
-    /// Returns a map of component FQN (fully qualified name) to snapshot.
-    /// Uses FQN (`namespace::name`) instead of full ID to enable
-    /// snapshot restoration across sessions (UUIDs differ between runs).
-    pub fn collect_snapshots(&mut self) -> HashMap<String, ComponentSnapshot> {
-        let mut snapshots = HashMap::new();
-
-        // Collect component IDs first to avoid borrow issues
-        let component_ids: Vec<ComponentId> = self.components.keys().cloned().collect();
-
-        for id in component_ids {
-            if let Some(component) = self.components.get_mut(&id) {
-                let request = Request::new(
-                    EventCategory::Lifecycle,
-                    OP_SNAPSHOT,
-                    id.clone(),
-                    ChannelId::new(),
-                    serde_json::Value::Null,
-                );
-
-                match component.on_request(&request) {
-                    Ok(value) => {
-                        // Deserialize snapshot from Value
-                        match serde_json::from_value::<ComponentSnapshot>(value) {
-                            Ok(snapshot) => {
-                                debug!("Collected snapshot for component: {}", id.fqn());
-                                snapshots.insert(id.fqn(), snapshot);
-                            }
-                            Err(e) => {
-                                warn!("Failed to deserialize snapshot from {}: {}", id.fqn(), e);
-                            }
-                        }
-                    }
-                    Err(orcs_component::ComponentError::NotSupported(_)) => {
-                        // Component doesn't support snapshots - skip silently
-                        debug!("Component {} does not support snapshots", id.fqn());
-                    }
-                    Err(e) => {
-                        warn!("Failed to collect snapshot from {}: {}", id.fqn(), e);
-                    }
-                }
-            }
-        }
-
-        info!("Collected {} component snapshots", snapshots.len());
-        snapshots
+    /// See [`session::collect_snapshots`] for details.
+    pub fn collect_snapshots(&self) -> HashMap<String, ComponentSnapshot> {
+        session::collect_snapshots(&self.components)
     }
 
     /// Restores components from snapshots in a SessionAsset via Lifecycle Request.
     ///
-    /// Sends `Request { category: Lifecycle, operation: "restore", payload: snapshot }`
-    /// to each component that has a saved snapshot.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(count)` - Number of successfully restored components
-    /// - `Err(SnapshotError)` - Restore failed for a component
+    /// See [`session::restore_snapshots`] for details.
     pub fn restore_snapshots(
         &mut self,
         asset: &SessionAsset,
     ) -> Result<usize, orcs_component::SnapshotError> {
-        let mut restored = 0;
-
-        for (fqn, snapshot) in &asset.component_snapshots {
-            // Find component by FQN (namespace::name)
-            let component_id = self.components.keys().find(|k| k.fqn() == *fqn).cloned();
-
-            if let Some(id) = component_id {
-                if let Some(component) = self.components.get_mut(&id) {
-                    // Serialize snapshot to Value for request payload
-                    let payload = match serde_json::to_value(snapshot) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Err(orcs_component::SnapshotError::RestoreFailed {
-                                component: fqn.clone(),
-                                reason: format!("Failed to serialize snapshot: {e}"),
-                            });
-                        }
-                    };
-
-                    let request = Request::new(
-                        EventCategory::Lifecycle,
-                        OP_RESTORE,
-                        id.clone(),
-                        ChannelId::new(),
-                        payload,
-                    );
-
-                    match component.on_request(&request) {
-                        Ok(_) => {
-                            debug!("Restored component: {}", id.fqn());
-                            restored += 1;
-                        }
-                        Err(orcs_component::ComponentError::NotSupported(_)) => {
-                            warn!("Component {} does not support snapshot restore", id.fqn());
-                        }
-                        Err(e) => {
-                            error!("Failed to restore component {}: {}", id.fqn(), e);
-                            return Err(orcs_component::SnapshotError::RestoreFailed {
-                                component: id.fqn(),
-                                reason: e.to_string(),
-                            });
-                        }
-                    }
-                }
-            } else {
-                debug!(
-                    "Component {} not registered, skipping snapshot restore",
-                    fqn
-                );
-            }
-        }
-
-        info!("Restored {} components from session", restored);
-        Ok(restored)
+        session::restore_snapshots(&mut self.components, &asset.component_snapshots)
     }
 
     /// Saves the current session state to a store.
@@ -801,103 +691,31 @@ impl OrcsEngine {
 
     /// Collects package info from all registered components.
     ///
-    /// Only components that implement [`Packageable`] will report packages.
-    ///
-    /// # Returns
-    ///
-    /// A map of component ID to list of installed packages.
+    /// See [`package::collect_packages`] for details.
     pub fn collect_packages(&self) -> HashMap<ComponentId, Vec<PackageInfo>> {
-        let mut packages = HashMap::with_capacity(self.components.len());
-
-        for (id, component) in &self.components {
-            if let Some(packageable) = component.as_packageable() {
-                let list = packageable.list_packages();
-                if !list.is_empty() {
-                    packages.insert(id.clone(), list.to_vec());
-                }
-            }
-        }
-
-        packages
+        package::collect_packages(&self.components)
     }
 
     /// Installs a package into a specific component.
     ///
-    /// The component must implement [`Packageable`].
-    ///
-    /// # Arguments
-    ///
-    /// * `component_id` - The target component
-    /// * `package` - The package to install
-    ///
-    /// # Errors
-    ///
-    /// - `EngineError::ComponentNotFound` - Component doesn't exist
-    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
-    /// - `EngineError::PackageFailed` - Installation failed
+    /// See [`package::install_package`] for details.
     pub fn install_package(
         &mut self,
         component_id: &ComponentId,
         package: &Package,
     ) -> Result<(), EngineError> {
-        let component = self
-            .components
-            .get_mut(component_id)
-            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-        let packageable = component
-            .as_packageable_mut()
-            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
-
-        packageable
-            .install_package(package)
-            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
-
-        info!(
-            "Package '{}' installed to component '{}'",
-            package.id(),
-            component_id
-        );
-
-        Ok(())
+        package::install_package(&mut self.components, component_id, package)
     }
 
     /// Uninstalls a package from a specific component.
     ///
-    /// # Arguments
-    ///
-    /// * `component_id` - The target component
-    /// * `package_id` - The package ID to uninstall
-    ///
-    /// # Errors
-    ///
-    /// - `EngineError::ComponentNotFound` - Component doesn't exist
-    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
-    /// - `EngineError::PackageFailed` - Uninstallation failed
+    /// See [`package::uninstall_package`] for details.
     pub fn uninstall_package(
         &mut self,
         component_id: &ComponentId,
         package_id: &str,
     ) -> Result<(), EngineError> {
-        let component = self
-            .components
-            .get_mut(component_id)
-            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-        let packageable = component
-            .as_packageable_mut()
-            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
-
-        packageable
-            .uninstall_package(package_id)
-            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
-
-        info!(
-            "Package '{}' uninstalled from component '{}'",
-            package_id, component_id
-        );
-
-        Ok(())
+        package::uninstall_package(&mut self.components, component_id, package_id)
     }
 }
 
@@ -941,12 +759,7 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT | OP_RESTORE => {
-                    Err(ComponentError::NotSupported(request.operation.clone()))
-                }
-                _ => Ok(request.payload.clone()),
-            }
+            Ok(request.payload.clone())
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -1225,30 +1038,8 @@ mod tests {
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            match request.operation.as_str() {
-                OP_SNAPSHOT => {
-                    // Return snapshot as Value
-                    let snapshot =
-                        orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
-                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    serde_json::to_value(snapshot)
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))
-                }
-                OP_RESTORE => {
-                    // Restore from snapshot in payload
-                    let snapshot: orcs_component::ComponentSnapshot =
-                        serde_json::from_value(request.payload.clone())
-                            .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    self.counter = snapshot
-                        .to_state()
-                        .map_err(|e| ComponentError::ExecutionFailed(e.to_string()))?;
-                    Ok(Value::Null)
-                }
-                _ => {
-                    self.counter += 1;
-                    Ok(Value::Number(self.counter.into()))
-                }
-            }
+            self.counter += 1;
+            Ok(Value::Number(self.counter.into()))
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -1260,6 +1051,15 @@ mod tests {
         }
 
         fn abort(&mut self) {}
+
+        fn snapshot(&self) -> Result<orcs_component::ComponentSnapshot, orcs_component::SnapshotError> {
+            orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
+        }
+
+        fn restore(&mut self, snapshot: &orcs_component::ComponentSnapshot) -> Result<(), orcs_component::SnapshotError> {
+            self.counter = snapshot.to_state()?;
+            Ok(())
+        }
     }
 
     #[tokio::test]
