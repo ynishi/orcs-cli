@@ -71,6 +71,9 @@ pub struct EventBus {
     /// Pending response receivers
     pending_responses: HashMap<RequestId, oneshot::Sender<Result<Value, EngineError>>>,
     /// Signal broadcaster
+    ///
+    /// TODO: Remove - Engine now owns signal_tx directly.
+    /// EventBus signal methods (signal(), signal_sender()) are unused.
     signal_tx: broadcast::Sender<Signal>,
     /// Category subscriptions: category -> set of component IDs
     subscriptions: HashMap<EventCategory, HashSet<ComponentId>>,

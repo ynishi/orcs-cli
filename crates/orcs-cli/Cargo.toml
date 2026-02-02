@@ -10,13 +10,10 @@ name = "orcs"
 path = "src/main.rs"
 
 [[example]]
-name = "echo_component"
-
-[[example]]
 name = "stop_resume"
 
 [[example]]
-name = "package_decorator"
+name = "console_io"
 
 [dependencies]
 orcs-app = { workspace = true }

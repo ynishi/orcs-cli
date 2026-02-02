@@ -2,22 +2,23 @@
 //!
 //! The [`OrcsEngine`] is the central runtime that:
 //!
-//! - Manages Component lifecycle (register, poll, shutdown)
-//! - Dispatches Signals to all Components
-//! - Coordinates EventBus message routing
-//! - Manages the World (Channel hierarchy)
+//! - Spawns and manages ChannelRunners (parallel execution)
+//! - Dispatches Signals to all Runners via broadcast
+//! - Coordinates World (Channel hierarchy) management
+//! - Provides session persistence via Runner-bound Components
 //!
-//! # Runtime Loop
+//! # Architecture
 //!
 //! ```text
-//! loop {
-//!     1. Check Signals (highest priority - Veto stops everything)
-//!     2. Poll each Component:
-//!        - Deliver pending Signals
-//!        - Deliver pending Requests
-//!        - Collect Responses
-//!     3. Yield to async runtime
-//! }
+//! OrcsEngine
+//!     │
+//!     ├── signal_tx ────► broadcast to all Runners
+//!     │
+//!     ├── world_tx ─────► WorldManager (channel operations)
+//!     │
+//!     ├── channel_handles ──► Event injection to Runners
+//!     │
+//!     └── runner_components ─► Arc<Mutex<Component>> for snapshot
 //! ```
 //!
 //! # Signal Handling
@@ -29,24 +30,23 @@
 //! - **Pause/Resume**: Suspend/continue execution
 //! - **Approve/Reject**: HIL responses
 //!
-//! Components MUST respond to Signals. If a Component returns
-//! [`SignalResponse::Ignored`], the engine forces abort.
+//! Signals are broadcast to all Runners, which deliver them to their
+//! bound Components.
 
-use super::error::EngineError;
-use super::eventbus::{ComponentHandle, EventBus};
-use super::{package, session};
+use super::eventbus::EventBus;
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner,
     ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
+use crate::Principal;
 use crate::session::{SessionAsset, SessionStore, StorageError};
-use orcs_component::{Component, ComponentSnapshot, Package, PackageInfo};
-use orcs_event::{Signal, SignalKind, SignalResponse};
-use orcs_types::{ChannelId, ComponentId};
+use orcs_component::{Component, ComponentSnapshot, SnapshotError};
+use orcs_event::Signal;
+use orcs_types::ChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
@@ -57,8 +57,8 @@ const SIGNAL_BUFFER_SIZE: usize = 256;
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
-/// Manages the complete lifecycle of Components and coordinates
-/// communication via EventBus.
+/// Coordinates parallel execution of ChannelRunners and manages
+/// the World (channel hierarchy).
 ///
 /// # Parallel Execution Model
 ///
@@ -66,6 +66,7 @@ const SIGNAL_BUFFER_SIZE: usize = 256;
 /// - [`WorldManager`](crate::channel::WorldManager) for concurrent World access
 /// - [`ChannelRunner`](crate::channel::ChannelRunner) per channel
 /// - Event injection via channel handles
+/// - Component access via shared `Arc<Mutex<>>` for snapshots
 ///
 /// # Example
 ///
@@ -88,15 +89,11 @@ const SIGNAL_BUFFER_SIZE: usize = 256;
 ///
 /// # Signal Priority
 ///
-/// Signals are processed with highest priority. A Veto signal
+/// Signals are broadcast to all Runners. A Veto signal
 /// immediately stops the engine without processing further.
 pub struct OrcsEngine {
-    /// EventBus for message routing
+    /// EventBus for channel event injection
     eventbus: EventBus,
-    /// Registered Components
-    components: HashMap<ComponentId, Box<dyn Component>>,
-    /// Component handles for message delivery
-    handles: HashMap<ComponentId, ComponentHandle>,
     /// Running state
     running: bool,
     // --- Parallel execution infrastructure ---
@@ -112,6 +109,11 @@ pub struct OrcsEngine {
     manager_task: Option<tokio::task::JoinHandle<()>>,
     /// Channel runner task handles
     runner_tasks: HashMap<ChannelId, tokio::task::JoinHandle<()>>,
+    /// Component references for snapshot access.
+    ///
+    /// Each Runner holds the same Arc, enabling Engine to access
+    /// Components for session persistence without owning them.
+    runner_components: HashMap<ChannelId, Arc<Mutex<Box<dyn Component>>>>,
     // --- IO Channel (required) ---
     /// IO channel for Human input/output.
     ///
@@ -159,8 +161,6 @@ impl OrcsEngine {
 
         Self {
             eventbus: EventBus::new(),
-            components: HashMap::new(),
-            handles: HashMap::new(),
             running: false,
             world_tx,
             world_read,
@@ -168,6 +168,7 @@ impl OrcsEngine {
             channel_handles: HashMap::new(),
             manager_task: Some(manager_task),
             runner_tasks: HashMap::new(),
+            runner_components: HashMap::new(),
             io_channel,
         }
     }
@@ -193,6 +194,10 @@ impl OrcsEngine {
             signal_rx,
             component,
         );
+
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -246,6 +251,10 @@ impl OrcsEngine {
             component,
         );
 
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
+
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
 
@@ -289,6 +298,10 @@ impl OrcsEngine {
             signal_tx: self.signal_tx.clone(),
         };
         let (runner, handle) = ClientRunner::new(channel_id, config, component, io_port, principal);
+
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -362,35 +375,13 @@ impl OrcsEngine {
         &self.world_tx
     }
 
-    /// Register a component with its subscriptions.
-    ///
-    /// The component's `subscriptions()` method is called to determine
-    /// which event categories it should receive requests for.
-    pub fn register(&mut self, component: Box<dyn Component>) {
-        let id = component.id().clone();
-        let subscriptions = component.subscriptions();
-        let handle = self.eventbus.register(id.clone(), subscriptions.to_vec());
-
-        info!(
-            "Registered component: {} (subscriptions: {:?})",
-            id,
-            subscriptions.iter().map(|c| c.name()).collect::<Vec<_>>()
-        );
-
-        self.handles.insert(id.clone(), handle);
-        self.components.insert(id, component);
-    }
-
     /// Send signal (from external, e.g., human input)
     ///
-    /// Broadcasts to both ChannelRunners (via signal_tx) and
-    /// registered components (via eventbus).
+    /// Broadcasts to all ChannelRunners via signal_tx.
     pub fn signal(&self, signal: Signal) {
         info!("Signal dispatched: {:?}", signal.kind);
         // Broadcast to ChannelRunners
-        let _ = self.signal_tx.send(signal.clone());
-        // Also send to component-level eventbus
-        self.eventbus.signal(signal);
+        let _ = self.signal_tx.send(signal);
     }
 
     /// Check if engine is running
@@ -408,9 +399,12 @@ impl OrcsEngine {
         info!("OrcsEngine started");
     }
 
-    /// Stop the engine
-    pub fn stop(&mut self) {
-        self.running = false;
+    /// Stop the engine by sending a Veto signal.
+    ///
+    /// This triggers graceful shutdown via the signal broadcast channel.
+    pub fn stop(&self) {
+        info!("Engine stop requested");
+        let _ = self.signal_tx.send(Signal::veto(Principal::System));
     }
 
     /// Returns the IO channel ID.
@@ -424,7 +418,7 @@ impl OrcsEngine {
     /// Main run loop with parallel execution.
     ///
     /// This method:
-    /// 1. Runs the main polling loop
+    /// 1. Waits for stop signal (running flag set to false)
     /// 2. Shuts down all runners on exit
     ///
     /// # Note
@@ -440,14 +434,35 @@ impl OrcsEngine {
     /// engine.run().await;
     /// ```
     pub async fn run(&mut self) {
-        self.running = true;
-        info!("OrcsEngine started (parallel mode)");
+        self.start();
+        info!("Entering parallel run loop");
 
-        while self.running {
-            self.poll_once();
-            tokio::task::yield_now().await;
+        let mut signal_rx = self.signal_tx.subscribe();
+
+        loop {
+            tokio::select! {
+                result = signal_rx.recv() => {
+                    match result {
+                        Ok(signal) if signal.is_veto() => {
+                            info!("Veto signal received, stopping engine");
+                            break;
+                        }
+                        Ok(_) => {
+                            // Other signals: continue running
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Signal receiver lagged by {} messages", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("Signal channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
+        self.running = false;
         self.shutdown_parallel().await;
         info!("OrcsEngine stopped (parallel mode)");
     }
@@ -474,152 +489,93 @@ impl OrcsEngine {
         }
         self.channel_handles.clear();
 
-        // Also do component shutdown
-        self.shutdown_components();
-    }
-
-    /// Poll all components once
-    fn poll_once(&mut self) {
-        let component_ids: Vec<ComponentId> = self.components.keys().cloned().collect();
-        let mut to_remove: Vec<ComponentId> = Vec::new();
-
-        for id in component_ids {
-            // Skip if already marked for removal
-            if to_remove.contains(&id) {
-                continue;
-            }
-
-            // Collect signals first
-            let signals: Vec<Signal> = {
-                if let Some(handle) = self.handles.get_mut(&id) {
-                    let mut sigs = Vec::new();
-                    while let Some(signal) = handle.try_recv_signal() {
-                        sigs.push(signal);
-                    }
-                    sigs
-                } else {
-                    continue;
-                }
-            };
-
-            // Process collected signals
-            for signal in signals {
-                // Veto stops everything - check first
-                if signal.kind == SignalKind::Veto {
-                    self.running = false;
-                    return;
-                }
-
-                let should_remove = if let Some(component) = self.components.get_mut(&id) {
-                    let response = component.on_signal(&signal);
-
-                    match response {
-                        SignalResponse::Handled => {
-                            info!("Component {} handled signal {:?}", id, signal.kind);
-                            false
-                        }
-                        SignalResponse::Ignored => {
-                            // Signal is a command - ignoring is not acceptable
-                            // Force kill the component
-                            warn!(
-                                "Component {} ignored signal {:?} - forcing abort",
-                                id, signal.kind
-                            );
-                            component.abort();
-                            true
-                        }
-                        SignalResponse::Abort => {
-                            info!("Component {} aborting due to signal {:?}", id, signal.kind);
-                            component.abort();
-                            true
-                        }
-                    }
-                } else {
-                    false
-                };
-
-                if should_remove {
-                    to_remove.push(id.clone());
-                    break; // Don't process more signals for this component
-                }
-            }
-
-            // Skip request processing if component is being removed
-            if to_remove.contains(&id) {
-                continue;
-            }
-
-            // Collect requests
-            let requests: Vec<orcs_event::Request> = {
-                if let Some(handle) = self.handles.get_mut(&id) {
-                    let mut reqs = Vec::new();
-                    while let Some(request) = handle.try_recv_request() {
-                        reqs.push(request);
-                    }
-                    reqs
-                } else {
-                    continue;
-                }
-            };
-
-            // Process collected requests
-            for request in requests {
-                let request_id = request.id;
-                if let Some(component) = self.components.get_mut(&id) {
-                    debug!("Component {} handling request: {}", id, request.operation);
-                    let result = component.on_request(&request);
-                    let mapped = result.map_err(|e| e.to_string());
-                    self.eventbus.respond(request_id, mapped);
-                }
-            }
-        }
-
-        // Remove aborted components
-        for id in to_remove {
-            self.unregister(&id);
-        }
-    }
-
-    /// Unregister a component
-    fn unregister(&mut self, id: &ComponentId) {
-        self.eventbus.unregister(id);
-        self.handles.remove(id);
-        self.components.remove(id);
-        info!("Unregistered component: {}", id);
-    }
-
-    /// Shutdown all components.
-    pub fn shutdown_components(&mut self) {
-        info!("Shutting down all components");
-        for (id, component) in &mut self.components {
-            debug!("Aborting component: {}", id);
-            component.abort();
-        }
+        // Clear component references
+        self.runner_components.clear();
     }
 
     // === Session Persistence ===
 
-    /// Collects snapshots from all components.
+    /// Collects snapshots from all Runner-bound Components.
     ///
-    /// See [`session::collect_snapshots`] for details.
-    pub fn collect_snapshots(&self) -> HashMap<String, ComponentSnapshot> {
-        session::collect_snapshots(&self.components)
+    /// Iterates over all runner_components and calls `Component::snapshot()`.
+    /// Components that don't support snapshots are silently skipped.
+    ///
+    /// # Returns
+    ///
+    /// A map of component FQN (fully qualified name) to snapshot.
+    pub async fn collect_snapshots(&self) -> HashMap<String, ComponentSnapshot> {
+        let mut snapshots = HashMap::new();
+
+        for (channel_id, component_arc) in &self.runner_components {
+            let component = component_arc.lock().await;
+            let fqn = component.id().fqn();
+
+            match component.snapshot() {
+                Ok(snapshot) => {
+                    debug!(
+                        "Collected snapshot for component {} (channel {})",
+                        fqn, channel_id
+                    );
+                    snapshots.insert(fqn, snapshot);
+                }
+                Err(SnapshotError::NotSupported(_)) => {
+                    debug!("Component {} does not support snapshots", fqn);
+                }
+                Err(e) => {
+                    warn!("Failed to collect snapshot from {}: {}", fqn, e);
+                }
+            }
+        }
+
+        info!("Collected {} component snapshots", snapshots.len());
+        snapshots
     }
 
-    /// Restores components from snapshots in a SessionAsset via Lifecycle Request.
+    /// Restores components from snapshots in a SessionAsset.
     ///
-    /// See [`session::restore_snapshots`] for details.
-    pub fn restore_snapshots(
-        &mut self,
-        asset: &SessionAsset,
-    ) -> Result<usize, orcs_component::SnapshotError> {
-        session::restore_snapshots(&mut self.components, &asset.component_snapshots)
+    /// Iterates over all runner_components and restores from matching snapshots.
+    ///
+    /// # Arguments
+    ///
+    /// * `asset` - The session asset containing snapshots
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)` - Number of successfully restored components
+    /// - `Err(SnapshotError)` - Restore failed for a component
+    pub async fn restore_snapshots(&self, asset: &SessionAsset) -> Result<usize, SnapshotError> {
+        let mut restored = 0;
+
+        for component_arc in self.runner_components.values() {
+            let mut component = component_arc.lock().await;
+            let fqn = component.id().fqn();
+
+            if let Some(snapshot) = asset.component_snapshots.get(&fqn) {
+                match component.restore(snapshot) {
+                    Ok(()) => {
+                        debug!("Restored component: {}", fqn);
+                        restored += 1;
+                    }
+                    Err(SnapshotError::NotSupported(_)) => {
+                        warn!("Component {} does not support snapshot restore", fqn);
+                    }
+                    Err(e) => {
+                        return Err(SnapshotError::RestoreFailed {
+                            component: fqn,
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        info!("Restored {} components from session", restored);
+        Ok(restored)
     }
 
     /// Saves the current session state to a store.
     ///
-    /// Collects snapshots from all components and saves them along with
-    /// the provided SessionAsset.
+    /// Collects snapshots from all Runner-bound Components and saves them.
     ///
     /// # Arguments
     ///
@@ -630,12 +586,12 @@ impl OrcsEngine {
     ///
     /// Returns `StorageError` if saving fails.
     pub async fn save_session<S: SessionStore>(
-        &mut self,
+        &self,
         store: &S,
         asset: &mut SessionAsset,
     ) -> Result<(), StorageError> {
         // Collect component snapshots
-        let snapshots = self.collect_snapshots();
+        let snapshots = self.collect_snapshots().await;
 
         // Update asset with snapshots
         for (id, snapshot) in snapshots {
@@ -653,8 +609,7 @@ impl OrcsEngine {
     /// Loads a session and restores component state.
     ///
     /// Loads the session from the store and restores all component
-    /// snapshots. For components with `SnapshotSupport::Enabled`,
-    /// restore failures are errors (not warnings).
+    /// snapshots to their Runner-bound Components.
     ///
     /// # Arguments
     ///
@@ -668,9 +623,9 @@ impl OrcsEngine {
     /// # Errors
     ///
     /// - `StorageError::Storage` - Loading from store failed
-    /// - `StorageError::Snapshot` - Restore failed for Enabled component
+    /// - `StorageError::Snapshot` - Restore failed for a component
     pub async fn load_session<S: SessionStore>(
-        &mut self,
+        &self,
         store: &S,
         session_id: &str,
     ) -> Result<SessionAsset, StorageError> {
@@ -678,44 +633,13 @@ impl OrcsEngine {
         let asset = store.load(session_id).await?;
 
         // Restore component snapshots
-        let restored = self.restore_snapshots(&asset)?;
+        let restored = self.restore_snapshots(&asset).await?;
 
         info!(
             "Session loaded: {} ({} components restored)",
             session_id, restored
         );
         Ok(asset)
-    }
-
-    // --- Package Management ---
-
-    /// Collects package info from all registered components.
-    ///
-    /// See [`package::collect_packages`] for details.
-    pub fn collect_packages(&self) -> HashMap<ComponentId, Vec<PackageInfo>> {
-        package::collect_packages(&self.components)
-    }
-
-    /// Installs a package into a specific component.
-    ///
-    /// See [`package::install_package`] for details.
-    pub fn install_package(
-        &mut self,
-        component_id: &ComponentId,
-        package: &Package,
-    ) -> Result<(), EngineError> {
-        package::install_package(&mut self.components, component_id, package)
-    }
-
-    /// Uninstalls a package from a specific component.
-    ///
-    /// See [`package::uninstall_package`] for details.
-    pub fn uninstall_package(
-        &mut self,
-        component_id: &ComponentId,
-        package_id: &str,
-    ) -> Result<(), EngineError> {
-        package::uninstall_package(&mut self.components, component_id, package_id)
     }
 }
 
@@ -725,7 +649,8 @@ mod tests {
     use crate::channel::{ChannelCore, WorldCommand};
     use crate::Principal;
     use orcs_component::ComponentError;
-    use orcs_event::Request;
+    use orcs_event::{Request, SignalResponse};
+    use orcs_types::ComponentId;
     use serde_json::Value;
 
     /// Create a World with IO channel for testing.
@@ -813,65 +738,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_component() {
+    async fn stop_engine_sends_veto_signal() {
         let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-        let echo = Box::new(EchoComponent::new());
-        engine.register(echo);
+        let engine = OrcsEngine::new(world, io);
 
-        assert_eq!(engine.components.len(), 1);
+        // Subscribe before stop
+        let mut rx = engine.signal_tx.subscribe();
 
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    #[tokio::test]
-    async fn veto_stops_engine() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-
-        let echo = Box::new(EchoComponent::new());
-        engine.register(echo);
-
-        let principal = Principal::System;
-        engine.signal(Signal::veto(principal));
-        engine.running = true;
-        engine.poll_once();
-
-        assert!(!engine.is_running());
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    #[tokio::test]
-    async fn multiple_components() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-
-        let echo1 = Box::new(EchoComponent::new());
-        let mut echo2_inner = EchoComponent::new();
-        echo2_inner.id = ComponentId::builtin("echo2");
-        let echo2 = Box::new(echo2_inner);
-
-        engine.register(echo1);
-        engine.register(echo2);
-
-        assert_eq!(engine.components.len(), 2);
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    #[tokio::test]
-    async fn stop_engine() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-        engine.running = true;
-
-        assert!(engine.is_running());
+        // stop() should send Veto signal
         engine.stop();
-        assert!(!engine.is_running());
+
+        // Verify Veto was sent
+        let received = rx.recv().await.expect("receive signal");
+        assert!(received.is_veto());
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
@@ -904,108 +783,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_signal_handled() {
+    async fn spawn_runner_stores_component_ref() {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
         let echo = Box::new(EchoComponent::new());
-        engine.register(echo);
+        let _handle = engine.spawn_runner(io, echo);
+
+        // Component should be stored in runner_components
+        assert_eq!(engine.runner_components.len(), 1);
+        assert!(engine.runner_components.contains_key(&io));
+
+        // Cleanup
+        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn signal_broadcast_works() {
+        let (world, io) = test_world();
+        let engine = OrcsEngine::new(world, io);
+
+        // Subscribe before signal
+        let mut rx = engine.signal_tx.subscribe();
 
         let principal = Principal::System;
         let cancel = Signal::cancel(io, principal);
+        engine.signal(cancel.clone());
 
-        engine.signal(cancel);
-        engine.running = true;
-        engine.poll_once();
-
-        // Cancel should not stop engine (only Veto does)
-        assert!(engine.is_running());
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_aborts_all_components() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-        let echo = Box::new(EchoComponent::new());
-        let id = echo.id.clone();
-        engine.register(echo);
-
-        engine.shutdown_components();
-
-        // Component should have been aborted
-        assert!(engine.components.contains_key(&id));
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    struct CountingComponent {
-        id: ComponentId,
-        request_count: std::sync::atomic::AtomicUsize,
-        signal_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl CountingComponent {
-        fn new(name: &str) -> Self {
-            Self {
-                id: ComponentId::builtin(name),
-                request_count: std::sync::atomic::AtomicUsize::new(0),
-                signal_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl Component for CountingComponent {
-        fn id(&self) -> &ComponentId {
-            &self.id
-        }
-
-        fn status(&self) -> orcs_component::Status {
-            orcs_component::Status::Idle
-        }
-
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            self.request_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(request.payload.clone())
-        }
-
-        fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            self.signal_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if signal.is_veto() {
-                SignalResponse::Abort
-            } else {
-                SignalResponse::Handled
-            }
-        }
-
-        fn abort(&mut self) {}
-    }
-
-    #[tokio::test]
-    async fn poll_processes_signals() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-
-        let comp = Box::new(CountingComponent::new("counter"));
-        engine.register(comp);
-
-        let principal = Principal::System;
-
-        // Send multiple non-veto signals
-        engine.signal(Signal::cancel(io, principal.clone()));
-        engine.signal(Signal::cancel(io, principal));
-
-        engine.running = true;
-        tokio::task::yield_now().await;
-        engine.poll_once();
-
-        // Engine should still be running (no veto)
-        assert!(engine.is_running());
+        // Should receive the signal
+        let received = rx.recv().await.expect("receive signal");
+        assert!(matches!(
+            received.kind,
+            orcs_event::SignalKind::Cancel { .. }
+        ));
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
@@ -1013,7 +823,7 @@ mod tests {
 
     // === Snapshot Tests ===
 
-    /// A component that supports snapshots for testing via Request.
+    /// A component that supports snapshots for testing.
     struct SnapshottableComponent {
         id: ComponentId,
         counter: u64,
@@ -1037,7 +847,7 @@ mod tests {
             orcs_component::Status::Idle
         }
 
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+        fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
             self.counter += 1;
             Ok(Value::Number(self.counter.into()))
         }
@@ -1052,33 +862,34 @@ mod tests {
 
         fn abort(&mut self) {}
 
-        fn snapshot(&self) -> Result<orcs_component::ComponentSnapshot, orcs_component::SnapshotError> {
+        fn snapshot(
+            &self,
+        ) -> Result<orcs_component::ComponentSnapshot, orcs_component::SnapshotError> {
             orcs_component::ComponentSnapshot::from_state(self.id.fqn(), &self.counter)
         }
 
-        fn restore(&mut self, snapshot: &orcs_component::ComponentSnapshot) -> Result<(), orcs_component::SnapshotError> {
+        fn restore(
+            &mut self,
+            snapshot: &orcs_component::ComponentSnapshot,
+        ) -> Result<(), orcs_component::SnapshotError> {
             self.counter = snapshot.to_state()?;
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn collect_snapshots_from_components() {
+    async fn collect_snapshots_from_runner_components() {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
-        // Register snapshottable component
+        // Spawn runner with snapshottable component
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
-        engine.register(comp);
+        let _handle = engine.spawn_runner(io, comp);
 
-        // Register non-snapshottable component
-        let echo = Box::new(EchoComponent::new());
-        engine.register(echo);
+        // Collect snapshots (async now)
+        let snapshots = engine.collect_snapshots().await;
 
-        // Collect snapshots
-        let snapshots = engine.collect_snapshots();
-
-        // Only snapshottable component should have snapshot
+        // Should have one snapshot
         assert_eq!(snapshots.len(), 1);
         assert!(snapshots.contains_key("builtin::snap"));
 
@@ -1087,23 +898,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_snapshots_to_components() {
+    async fn restore_snapshots_to_runner_components() {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
-        // Register snapshottable component with initial value
+        // Spawn runner with snapshottable component (initial value 0)
         let comp = Box::new(SnapshottableComponent::new("snap", 0));
-        engine.register(comp);
+        let _handle = engine.spawn_runner(io, comp);
 
         // Create asset with snapshot containing different value
-        // Use FQN format (namespace::name) for snapshot key
         let mut asset = SessionAsset::new();
         let snapshot = orcs_component::ComponentSnapshot::from_state("builtin::snap", &100u64)
             .expect("create snapshot");
         asset.save_snapshot(snapshot);
 
         // Restore from asset
-        let restored = engine.restore_snapshots(&asset).expect("restore snapshots");
+        let restored = engine
+            .restore_snapshots(&asset)
+            .await
+            .expect("restore snapshots");
 
         assert_eq!(restored, 1);
 
@@ -1112,7 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_and_load_session() {
+    async fn save_and_load_session_via_runners() {
         use crate::session::LocalFileStore;
         use tempfile::TempDir;
 
@@ -1122,9 +935,9 @@ mod tests {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
-        // Register snapshottable component
+        // Spawn runner with snapshottable component
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
-        engine.register(comp);
+        let _handle = engine.spawn_runner(io, comp);
 
         // Save session
         let mut asset = SessionAsset::new();
@@ -1141,9 +954,9 @@ mod tests {
         let (world2, io2) = test_world();
         let mut engine2 = OrcsEngine::new(world2, io2);
 
-        // Register component with different initial value
+        // Spawn runner with component (different initial value)
         let comp2 = Box::new(SnapshottableComponent::new("snap", 0));
-        engine2.register(comp2);
+        let _handle2 = engine2.spawn_runner(io2, comp2);
 
         // Load session
         let loaded = engine2
