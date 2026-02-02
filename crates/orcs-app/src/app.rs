@@ -63,14 +63,15 @@
 //! }
 //! ```
 
-use crate::AppError;
+use crate::{AppError, CliOverrides};
 use orcs_component::Component;
 use orcs_event::Signal;
 use orcs_lua::ScriptLoader;
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::{
-    ChannelConfig, ConfigLoader, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
-    InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset, World,
+    ChannelConfig, ConfigLoader, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle,
+    IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
+    World,
 };
 use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
@@ -279,7 +280,7 @@ impl OrcsApp {
                     // Display IO output from ClientRunner
                     self.handle_io_output(io_out);
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                () = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                     // Yield to allow engine polling
                 }
             }
@@ -353,7 +354,7 @@ impl OrcsApp {
             }
             InputCommand::Steer { message } => {
                 self.renderer
-                    .render_output(&IOOutput::info(format!("Steer: {}", message)));
+                    .render_output(&IOOutput::info(format!("Steer: {message}")));
                 // TODO: Implement steer
             }
             InputCommand::Empty => {
@@ -403,7 +404,7 @@ impl OrcsApp {
 
         if let Err(e) = self.io_input.try_send(io_input) {
             self.renderer
-                .render_output(&IOOutput::error(format!("Failed to send message: {:?}", e)));
+                .render_output(&IOOutput::error(format!("Failed to send message: {e:?}")));
         }
     }
 
@@ -558,9 +559,7 @@ pub struct OrcsAppBuilder {
     /// Session ID to resume from.
     resume_session_id: Option<String>,
     /// CLI overrides (applied after config loading).
-    cli_verbose: Option<bool>,
-    cli_debug: Option<bool>,
-    cli_session_path: Option<PathBuf>,
+    cli_overrides: CliOverrides,
 }
 
 impl OrcsAppBuilder {
@@ -570,9 +569,7 @@ impl OrcsAppBuilder {
         Self {
             project_root: None,
             resume_session_id: None,
-            cli_verbose: None,
-            cli_debug: None,
-            cli_session_path: None,
+            cli_overrides: CliOverrides::new(),
         }
     }
 
@@ -588,21 +585,28 @@ impl OrcsAppBuilder {
     /// Enables verbose output (CLI override).
     #[must_use]
     pub fn verbose(mut self) -> Self {
-        self.cli_verbose = Some(true);
+        self.cli_overrides = self.cli_overrides.verbose(true);
         self
     }
 
     /// Enables debug mode (CLI override).
     #[must_use]
     pub fn debug(mut self) -> Self {
-        self.cli_debug = Some(true);
+        self.cli_overrides = self.cli_overrides.debug(true);
         self
     }
 
     /// Sets a custom session storage path (CLI override).
     #[must_use]
     pub fn with_session_path(mut self, path: PathBuf) -> Self {
-        self.cli_session_path = Some(path);
+        self.cli_overrides = self.cli_overrides.session_path(path);
+        self
+    }
+
+    /// Sets CLI overrides directly.
+    #[must_use]
+    pub fn with_cli_overrides(mut self, overrides: CliOverrides) -> Self {
+        self.cli_overrides = overrides;
         self
     }
 
@@ -635,20 +639,12 @@ impl OrcsAppBuilder {
         let mut config = loader.load().map_err(|e| AppError::Config(e.to_string()))?;
 
         // Apply CLI overrides (highest priority)
-        if let Some(verbose) = self.cli_verbose {
-            config.ui.verbose = verbose;
-        }
-        if let Some(debug) = self.cli_debug {
-            config.debug = debug;
-        }
-        if let Some(ref path) = self.cli_session_path {
-            config.paths.session_dir = Some(path.clone());
-        }
+        self.cli_overrides.apply(&mut config);
 
         // Create session store
         let session_path = config.paths.session_dir_or_default();
         let store = LocalFileStore::new(session_path)
-            .map_err(|e| AppError::Config(format!("Failed to create session store: {}", e)))?;
+            .map_err(|e| AppError::Config(format!("Failed to create session store: {e}")))?;
 
         // Create World with IO channel
         let mut world = World::new();
@@ -663,7 +659,7 @@ impl OrcsAppBuilder {
 
         // Spawn ClientRunner for IO channel with LuaComponent (claude_cli)
         let lua_component = ScriptLoader::load_embedded("claude_cli")
-            .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {}", e)))?;
+            .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {e}")))?;
         let component_id = lua_component.id().clone();
         let _handle =
             engine.spawn_client_runner(io, Box::new(lua_component), io_port, principal.clone());

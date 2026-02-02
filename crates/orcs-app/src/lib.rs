@@ -58,9 +58,11 @@
 //! ```
 
 mod app;
+mod cli_overrides;
 mod error;
 
 pub use app::{OrcsApp, OrcsAppBuilder};
+pub use cli_overrides::CliOverrides;
 pub use error::AppError;
 
 // Re-export from Plugin SDK Layer
@@ -85,5 +87,6 @@ pub use orcs_runtime::{
 
 // Re-export configuration types
 pub use orcs_runtime::{
-    ConfigError, ConfigLoader, HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig,
+    ConfigError, ConfigLoader, ConfigResolver, HilConfig, ModelConfig, NoOpResolver, OrcsConfig,
+    PathsConfig, UiConfig,
 };

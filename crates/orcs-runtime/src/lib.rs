@@ -123,7 +123,7 @@ pub use components::{
 };
 pub use config::{
     default_config_dir, default_config_path, save_global_config, ConfigError, ConfigLoader,
-    HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig,
+    ConfigResolver, HilConfig, ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{

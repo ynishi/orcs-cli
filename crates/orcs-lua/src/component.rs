@@ -7,12 +7,12 @@ use crate::types::{
     parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
 };
 use mlua::{Function, Lua, RegistryKey, Table};
-use orcs_component::{Component, ComponentError, EventCategory, Status};
+use orcs_component::{Component, ComponentError, Emitter, EventCategory, Status};
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 
 /// A component implemented in Lua.
@@ -62,6 +62,11 @@ pub struct LuaComponent {
     shutdown_key: Option<RegistryKey>,
     /// Script path (for hot reload).
     script_path: Option<String>,
+    /// Event emitter for ChannelRunner mode.
+    ///
+    /// When set, allows Lua scripts to emit events via `orcs.output()`.
+    /// This enables ChannelRunner-based execution (IO-less, event-only).
+    emitter: Option<Arc<Mutex<Box<dyn Emitter>>>>,
 }
 
 // SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
@@ -183,6 +188,7 @@ impl LuaComponent {
             init_key,
             shutdown_key,
             script_path: None,
+            emitter: None,
         })
     }
 
@@ -204,23 +210,43 @@ impl LuaComponent {
 
         let new_component = Self::from_file(path)?;
 
-        // Swap internals
+        // Swap internals (preserve emitter)
         self.lua = new_component.lua;
         self.subscriptions = new_component.subscriptions;
         self.on_request_key = new_component.on_request_key;
         self.on_signal_key = new_component.on_signal_key;
         self.init_key = new_component.init_key;
         self.shutdown_key = new_component.shutdown_key;
+        // Note: emitter is preserved across reload
+
+        // Re-register orcs.output if emitter is set
+        if let Some(emitter) = &self.emitter {
+            let lua = self
+                .lua
+                .lock()
+                .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
+            Self::register_output_function(&lua, Arc::clone(emitter))?;
+        }
 
         tracing::info!("Reloaded Lua component: {}", self.id);
         Ok(())
+    }
+
+    /// Returns whether this component has an emitter set.
+    ///
+    /// When true, the component can emit events via `orcs.output()`.
+    #[must_use]
+    pub fn has_emitter(&self) -> bool {
+        self.emitter.is_some()
     }
 
     /// Registers orcs helper functions in Lua.
     ///
     /// Available functions:
     /// - `orcs.exec(cmd)` - Execute shell command and return output
-    /// - `orcs.exec_streaming(cmd, callback)` - Execute with streaming output
+    /// - `orcs.log(level, msg)` - Log a message at specified level
+    ///
+    /// Note: `orcs.output(msg)` is registered separately via `set_emitter()`.
     fn register_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
         let orcs_table = lua.create_table()?;
 
@@ -277,8 +303,59 @@ impl LuaComponent {
         })?;
         orcs_table.set("log", log_fn)?;
 
+        // orcs.output - placeholder (registered with emitter later)
+        // This allows scripts to check for the function even without emitter
+        let output_noop_fn = lua.create_function(|_, msg: String| {
+            tracing::debug!("[lua] orcs.output called without emitter: {}", msg);
+            Ok(())
+        })?;
+        orcs_table.set("output", output_noop_fn)?;
+
+        // orcs.output_with_level - placeholder
+        let output_level_noop_fn = lua.create_function(|_, (msg, _level): (String, String)| {
+            tracing::debug!(
+                "[lua] orcs.output_with_level called without emitter: {}",
+                msg
+            );
+            Ok(())
+        })?;
+        orcs_table.set("output_with_level", output_level_noop_fn)?;
+
         lua.globals().set("orcs", orcs_table)?;
 
+        Ok(())
+    }
+
+    /// Registers the orcs.output function with a real emitter.
+    ///
+    /// Called when `set_emitter()` is invoked to enable event emission.
+    fn register_output_function(
+        lua: &Lua,
+        emitter: Arc<Mutex<Box<dyn Emitter>>>,
+    ) -> Result<(), LuaError> {
+        let orcs_table: Table = lua.globals().get("orcs")?;
+
+        // orcs.output(msg) - emit output event via emitter
+        let emitter_clone = Arc::clone(&emitter);
+        let output_fn = lua.create_function(move |_, msg: String| {
+            if let Ok(em) = emitter_clone.lock() {
+                em.emit_output(&msg);
+            }
+            Ok(())
+        })?;
+        orcs_table.set("output", output_fn)?;
+
+        // orcs.output_with_level(msg, level) - emit output with level
+        let emitter_clone2 = Arc::clone(&emitter);
+        let output_level_fn = lua.create_function(move |_, (msg, level): (String, String)| {
+            if let Ok(em) = emitter_clone2.lock() {
+                em.emit_output_with_level(&msg, &level);
+            }
+            Ok(())
+        })?;
+        orcs_table.set("output_with_level", output_level_fn)?;
+
+        tracing::debug!("Registered orcs.output functions with emitter");
         Ok(())
     }
 }
@@ -400,6 +477,18 @@ impl Component for LuaComponent {
         if let Ok(shutdown_fn) = lua.registry_value::<Function>(shutdown_key) {
             if let Err(e) = shutdown_fn.call::<()>(()) {
                 tracing::warn!("Lua shutdown error: {}", e);
+            }
+        }
+    }
+
+    fn set_emitter(&mut self, emitter: Box<dyn Emitter>) {
+        let emitter_arc = Arc::new(Mutex::new(emitter));
+        self.emitter = Some(Arc::clone(&emitter_arc));
+
+        // Register orcs.output function with the emitter
+        if let Ok(lua) = self.lua.lock() {
+            if let Err(e) = Self::register_output_function(&lua, emitter_arc) {
+                tracing::warn!("Failed to register orcs.output: {}", e);
             }
         }
     }
@@ -687,6 +776,174 @@ mod tests {
             let result = component.on_request(&req);
 
             // Should complete without error (log output goes to tracing)
+            assert!(result.is_ok());
+        }
+    }
+
+    // --- orcs.output / Emitter tests ---
+
+    mod emitter_tests {
+        use super::*;
+        use orcs_component::Emitter;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Mock emitter that records calls for testing.
+        #[derive(Debug, Clone)]
+        struct MockEmitter {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        impl MockEmitter {
+            fn new() -> Self {
+                Self {
+                    call_count: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+
+            fn call_count(&self) -> usize {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        impl Emitter for MockEmitter {
+            fn emit_output(&self, _message: &str) {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn emit_output_with_level(&self, _message: &str, _level: &str) {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn clone_box(&self) -> Box<dyn Emitter> {
+                Box::new(self.clone())
+            }
+        }
+
+        #[test]
+        fn has_emitter_returns_false_initially() {
+            let component = LuaComponent::from_script(
+                r#"
+                return {
+                    id = "test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req) return { success = true } end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+                "#,
+            )
+            .expect("load script");
+
+            assert!(!component.has_emitter());
+        }
+
+        #[test]
+        fn set_emitter_enables_has_emitter() {
+            let mut component = LuaComponent::from_script(
+                r#"
+                return {
+                    id = "test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req) return { success = true } end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+                "#,
+            )
+            .expect("load script");
+
+            let emitter = MockEmitter::new();
+            component.set_emitter(Box::new(emitter));
+
+            assert!(component.has_emitter());
+        }
+
+        #[test]
+        fn orcs_output_calls_emitter() {
+            let script = r#"
+                return {
+                    id = "output-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        orcs.output("Hello from Lua!")
+                        return { success = true }
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }
+            "#;
+
+            let mut component = LuaComponent::from_script(script).expect("load script");
+
+            let emitter = MockEmitter::new();
+            let emitter_clone = emitter.clone();
+            component.set_emitter(Box::new(emitter));
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            assert!(
+                emitter_clone.call_count() >= 1,
+                "emitter should have been called"
+            );
+        }
+
+        #[test]
+        fn orcs_output_with_level_calls_emitter() {
+            let script = r#"
+                return {
+                    id = "output-level-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        orcs.output_with_level("Warning message", "warn")
+                        return { success = true }
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }
+            "#;
+
+            let mut component = LuaComponent::from_script(script).expect("load script");
+
+            let emitter = MockEmitter::new();
+            let emitter_clone = emitter.clone();
+            component.set_emitter(Box::new(emitter));
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            assert!(result.is_ok());
+            assert!(
+                emitter_clone.call_count() >= 1,
+                "emitter should have been called"
+            );
+        }
+
+        #[test]
+        fn orcs_output_without_emitter_is_noop() {
+            let script = r#"
+                return {
+                    id = "output-noop-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        -- This should not panic even without emitter
+                        orcs.output("Message without emitter")
+                        return { success = true }
+                    end,
+                    on_signal = function(sig)
+                        return "Ignored"
+                    end,
+                }
+            "#;
+
+            let mut component = LuaComponent::from_script(script).expect("load script");
+
+            // Note: no emitter set
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+
+            // Should complete without error
             assert!(result.is_ok());
         }
     }

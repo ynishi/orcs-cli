@@ -95,10 +95,12 @@
 
 mod error;
 mod loader;
+mod resolver;
 mod types;
 
 pub use error::ConfigError;
 pub use loader::{save_global_config, ConfigLoader};
+pub use resolver::{ConfigResolver, NoOpResolver};
 pub use types::{HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig};
 
 /// Default global config directory.

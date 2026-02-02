@@ -11,12 +11,19 @@ pub const ECHO: &str = include_str!("../scripts/echo.lua");
 /// Built-in claude_cli script.
 pub const CLAUDE_CLI: &str = include_str!("../scripts/claude_cli.lua");
 
+/// Built-in echo_emitter script (ChannelRunner mode).
+///
+/// This script uses `orcs.output()` for output emission,
+/// making it suitable for ChannelRunner-based execution.
+pub const ECHO_EMITTER: &str = include_str!("../scripts/echo_emitter.lua");
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
     let mut scripts = HashMap::new();
     scripts.insert("echo", ECHO);
     scripts.insert("claude_cli", CLAUDE_CLI);
+    scripts.insert("echo_emitter", ECHO_EMITTER);
     scripts
 }
 
@@ -26,6 +33,7 @@ pub fn get(name: &str) -> Option<&'static str> {
     match name {
         "echo" => Some(ECHO),
         "claude_cli" => Some(CLAUDE_CLI),
+        "echo_emitter" => Some(ECHO_EMITTER),
         _ => None,
     }
 }
@@ -33,7 +41,7 @@ pub fn get(name: &str) -> Option<&'static str> {
 /// Lists all available embedded script names.
 #[must_use]
 pub fn list() -> Vec<&'static str> {
-    vec!["echo", "claude_cli"]
+    vec!["echo", "claude_cli", "echo_emitter"]
 }
 
 #[cfg(test)]
@@ -84,10 +92,31 @@ mod tests {
     }
 
     #[test]
-    fn all_contains_both_scripts() {
+    fn echo_emitter_script_embedded() {
+        assert!(ECHO_EMITTER.contains("id = \"echo_emitter\""));
+        assert!(ECHO_EMITTER.contains("on_request"));
+        assert!(ECHO_EMITTER.contains("on_signal"));
+        assert!(ECHO_EMITTER.contains("orcs.output"));
+    }
+
+    #[test]
+    fn get_echo_emitter() {
+        let script = get("echo_emitter").expect("echo_emitter script should exist");
+        assert!(script.contains("echo_emitter"));
+    }
+
+    #[test]
+    fn list_contains_echo_emitter() {
+        let names = list();
+        assert!(names.contains(&"echo_emitter"));
+    }
+
+    #[test]
+    fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts.len(), 3);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
+        assert!(scripts.contains_key("echo_emitter"));
     }
 }
