@@ -57,6 +57,7 @@ mod child_spawner;
 mod client;
 mod common;
 mod emitter;
+mod paused_queue;
 
 pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
 pub use child_context::{ChildContextImpl, LuaChildLoader};

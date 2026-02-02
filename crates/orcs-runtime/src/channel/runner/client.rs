@@ -35,6 +35,7 @@ use super::common::{
     send_abort, send_transition, SignalAction,
 };
 use super::emitter::EventEmitter;
+use super::paused_queue::PausedEventQueue;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::World;
 use crate::components::IOBridge;
@@ -43,16 +44,12 @@ use orcs_component::{Component, ComponentError};
 use orcs_event::{EventCategory, Request, Signal, SignalKind};
 use orcs_types::{ChannelId, Principal};
 use serde_json::Value;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
-
-/// Maximum queue size for events received while paused.
-const PAUSED_QUEUE_MAX_SIZE: usize = 128;
 
 // --- Response handling ---
 
@@ -157,7 +154,7 @@ pub struct ClientRunner {
     /// Bound Component (1:1 relationship).
     component: Arc<Mutex<Box<dyn Component>>>,
     /// Queue for events received while paused.
-    paused_queue: VecDeque<Event>,
+    paused_queue: PausedEventQueue,
 
     // === IO-specific fields ===
     /// IO bridge for View-Model communication.
@@ -198,7 +195,7 @@ impl ClientRunner {
             world_tx: config.world_tx,
             world: config.world,
             component: Arc::new(Mutex::new(component)),
-            paused_queue: VecDeque::new(),
+            paused_queue: PausedEventQueue::new(),
             io_bridge: IOBridge::new(io_port),
             principal,
         };
@@ -438,19 +435,8 @@ impl ClientRunner {
 
         // Queue events while paused
         if is_channel_paused(&self.world, self.id).await {
-            if self.paused_queue.len() >= PAUSED_QUEUE_MAX_SIZE {
-                warn!(
-                    "ClientRunner {}: paused queue full (max={}), dropping event",
-                    self.id, PAUSED_QUEUE_MAX_SIZE
-                );
-                return true;
-            }
-            debug!(
-                "ClientRunner {}: queuing event while paused (queue_size={})",
-                self.id,
-                self.paused_queue.len() + 1
-            );
-            self.paused_queue.push_back(event);
+            self.paused_queue
+                .try_enqueue(event, "ClientRunner", self.id);
             return true;
         }
 
@@ -580,17 +566,10 @@ impl ClientRunner {
 
     /// Drains the paused queue and processes all queued events.
     async fn drain_paused_queue(&mut self) {
-        if self.paused_queue.is_empty() {
-            return;
-        }
+        // Collect events first to avoid borrow issues with async process_event
+        let events: Vec<_> = self.paused_queue.drain("ClientRunner", self.id).collect();
 
-        let count = self.paused_queue.len();
-        info!(
-            "ClientRunner {}: draining {} queued events after resume",
-            self.id, count
-        );
-
-        while let Some(event) = self.paused_queue.pop_front() {
+        for event in events {
             self.process_event(event).await;
         }
     }

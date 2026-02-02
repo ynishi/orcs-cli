@@ -37,6 +37,7 @@ use super::common::{
     determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
     send_abort, send_transition, SignalAction,
 };
+use super::paused_queue::PausedEventQueue;
 use super::EventEmitter;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
@@ -45,7 +46,6 @@ use orcs_component::{AsyncChildContext, ChildContext, Component};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -69,9 +69,6 @@ pub struct Event {
 
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
-
-/// Maximum queue size for events received while paused.
-const PAUSED_QUEUE_MAX_SIZE: usize = 128;
 
 /// Handle for injecting events into a [`ChannelRunner`].
 #[derive(Clone, Debug)]
@@ -130,7 +127,7 @@ pub struct ChannelRunner {
     /// Bound Component (1:1 relationship).
     component: Arc<Mutex<Box<dyn Component>>>,
     /// Queue for events received while paused.
-    paused_queue: VecDeque<Event>,
+    paused_queue: PausedEventQueue,
     /// Child spawner for managing spawned children (optional).
     child_spawner: Option<Arc<StdMutex<ChildSpawner>>>,
     /// Event sender for child context (kept for context creation).
@@ -158,7 +155,7 @@ impl ChannelRunner {
             world_tx,
             world,
             component: Arc::new(Mutex::new(component)),
-            paused_queue: VecDeque::new(),
+            paused_queue: PausedEventQueue::new(),
             child_spawner: None,
             event_tx: None,
         };
@@ -209,7 +206,7 @@ impl ChannelRunner {
             world_tx,
             world,
             component: Arc::new(Mutex::new(component)),
-            paused_queue: VecDeque::new(),
+            paused_queue: PausedEventQueue::new(),
             child_spawner: Some(spawner_arc),
             event_tx: Some(event_tx.clone()),
         };
@@ -263,7 +260,7 @@ impl ChannelRunner {
             world_tx,
             world,
             component: Arc::new(Mutex::new(component)),
-            paused_queue: VecDeque::new(),
+            paused_queue: PausedEventQueue::new(),
             child_spawner: None,
             event_tx: Some(event_tx.clone()),
         };
@@ -319,7 +316,7 @@ impl ChannelRunner {
             world_tx,
             world,
             component: Arc::new(Mutex::new(component)),
-            paused_queue: VecDeque::new(),
+            paused_queue: PausedEventQueue::new(),
             child_spawner: Some(spawner_arc),
             event_tx: Some(event_tx.clone()),
         };
@@ -567,19 +564,8 @@ impl ChannelRunner {
 
         // Queue events while paused
         if is_channel_paused(&self.world, self.id).await {
-            if self.paused_queue.len() >= PAUSED_QUEUE_MAX_SIZE {
-                warn!(
-                    "ChannelRunner {}: paused queue full (max={}), dropping event",
-                    self.id, PAUSED_QUEUE_MAX_SIZE
-                );
-                return true;
-            }
-            debug!(
-                "ChannelRunner {}: queuing event while paused (queue_size={})",
-                self.id,
-                self.paused_queue.len() + 1
-            );
-            self.paused_queue.push_back(event);
+            self.paused_queue
+                .try_enqueue(event, "ChannelRunner", self.id);
             return true;
         }
 
@@ -617,17 +603,13 @@ impl ChannelRunner {
 
     /// Drains the paused queue and processes all queued events.
     async fn drain_paused_queue(&mut self) {
-        if self.paused_queue.is_empty() {
-            return;
-        }
+        // Collect events first to avoid borrow issues with async process_event
+        let events: Vec<_> = self
+            .paused_queue
+            .drain("ChannelRunner", self.id)
+            .collect();
 
-        let count = self.paused_queue.len();
-        info!(
-            "ChannelRunner {}: draining {} queued events after resume",
-            self.id, count
-        );
-
-        while let Some(event) = self.paused_queue.pop_front() {
+        for event in events {
             self.process_event(event).await;
         }
     }
