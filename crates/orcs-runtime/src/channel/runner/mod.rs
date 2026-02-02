@@ -35,9 +35,13 @@
 //! For background channels (agents, tools):
 //!
 //! ```ignore
-//! let (runner, handle) = ChannelRunner::new(
+//! let (runner, handle) = ChannelRunner::builder(
 //!     channel_id, world_tx, world, signal_rx, component,
-//! );
+//! )
+//! .with_emitter(signal_tx)      // optional: enable event emission
+//! .with_child_spawner()         // optional: enable child spawning
+//! .build();
+//!
 //! tokio::spawn(runner.run());
 //! ```
 //!
@@ -60,8 +64,7 @@ mod emitter;
 mod paused_queue;
 
 pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
-// Builder is the recommended way to construct ChannelRunner with optional features.
-// Re-exported for external use; internal code will migrate to this API.
+// Builder is re-exported for external use (internal code uses it via base::ChannelRunnerBuilder)
 #[allow(unused_imports)]
 pub use base::ChannelRunnerBuilder;
 pub use child_context::{ChildContextImpl, LuaChildLoader};

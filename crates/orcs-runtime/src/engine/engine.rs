@@ -187,13 +187,14 @@ impl OrcsEngine {
         component: Box<dyn Component>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new(
+        let (runner, handle) = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
             signal_rx,
             component,
-        );
+        )
+        .build();
 
         // Store Component reference for snapshot access
         let component_ref = Arc::clone(runner.component());
@@ -241,15 +242,16 @@ impl OrcsEngine {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
 
-        // Use new_with_emitter to ensure event_tx/event_rx consistency
-        let (runner, handle) = ChannelRunner::new_with_emitter(
+        // Use builder with emitter to ensure event_tx/event_rx consistency
+        let (runner, handle) = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
             signal_rx,
-            self.signal_tx.clone(),
             component,
-        );
+        )
+        .with_emitter(self.signal_tx.clone())
+        .build();
 
         // Store Component reference for snapshot access
         let component_ref = Arc::clone(runner.component());

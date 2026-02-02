@@ -26,7 +26,7 @@
 //!
 //! # Lifecycle
 //!
-//! 1. Created via [`ChannelRunner::new()`]
+//! 1. Created via [`ChannelRunner::builder()`]
 //! 2. Started with [`ChannelRunner::run()`] (spawns tokio task)
 //! 3. Processes Events until channel completes or is killed
 //! 4. Cleanup on drop
@@ -135,197 +135,6 @@ pub struct ChannelRunner {
 }
 
 impl ChannelRunner {
-    /// Creates a new ChannelRunner with a bound Component.
-    ///
-    /// Returns the runner and a handle for injecting events.
-    #[must_use]
-    pub fn new(
-        id: ChannelId,
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_rx: broadcast::Receiver<Signal>,
-        component: Box<dyn Component>,
-    ) -> (Self, ChannelHandle) {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
-
-        let runner = Self {
-            id,
-            event_rx,
-            signal_rx,
-            world_tx,
-            world,
-            component: Arc::new(Mutex::new(component)),
-            paused_queue: PausedEventQueue::new(),
-            child_spawner: None,
-            event_tx: None,
-        };
-
-        let handle = ChannelHandle::new(id, event_tx);
-
-        (runner, handle)
-    }
-
-    /// Creates a new ChannelRunner with child spawning support.
-    ///
-    /// This enables the Component and its Children to spawn sub-children
-    /// via ChildContext.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Channel ID
-    /// * `world_tx` - World command sender
-    /// * `world` - Read-only World access
-    /// * `signal_rx` - Signal receiver (broadcast)
-    /// * `_signal_tx` - Signal sender (reserved for future use)
-    /// * `component` - Component to bind
-    #[must_use]
-    pub fn new_with_child_spawner(
-        id: ChannelId,
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_rx: broadcast::Receiver<Signal>,
-        _signal_tx: broadcast::Sender<Signal>,
-        component: Box<dyn Component>,
-    ) -> (Self, ChannelHandle) {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
-
-        // Create child spawner
-        let component_id = component.id().fqn();
-        let spawner = ChildSpawner::new(&component_id, event_tx.clone());
-        let spawner_arc = Arc::new(StdMutex::new(spawner));
-
-        info!(
-            "ChannelRunner::new_with_child_spawner: created spawner for {}",
-            component_id
-        );
-
-        let runner = Self {
-            id,
-            event_rx,
-            signal_rx,
-            world_tx,
-            world,
-            component: Arc::new(Mutex::new(component)),
-            paused_queue: PausedEventQueue::new(),
-            child_spawner: Some(spawner_arc),
-            event_tx: Some(event_tx.clone()),
-        };
-
-        let handle = ChannelHandle::new(id, event_tx);
-
-        (runner, handle)
-    }
-
-    /// Creates a new ChannelRunner with an EventEmitter injected into the Component.
-    ///
-    /// This ensures the Emitter's `event_tx` is the same channel that the Runner
-    /// listens on (`event_rx`), enabling proper event delivery.
-    ///
-    /// Use this for IO-less (event-only) Components that need to emit output
-    /// via `orcs.output()` in Lua scripts.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Channel ID
-    /// * `world_tx` - World command sender
-    /// * `world` - Read-only World access
-    /// * `signal_rx` - Signal receiver (broadcast)
-    /// * `signal_tx` - Signal sender (for Emitter to broadcast)
-    /// * `component` - Component to bind (will receive the emitter)
-    #[must_use]
-    pub fn new_with_emitter(
-        id: ChannelId,
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_rx: broadcast::Receiver<Signal>,
-        signal_tx: broadcast::Sender<Signal>,
-        mut component: Box<dyn Component>,
-    ) -> (Self, ChannelHandle) {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
-
-        // Create emitter with the SAME event_tx that runner will receive on
-        let component_id = component.id().clone();
-        let emitter = EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
-        component.set_emitter(Box::new(emitter));
-
-        info!(
-            "ChannelRunner::new_with_emitter: injected emitter for {}",
-            component_id.fqn()
-        );
-
-        let runner = Self {
-            id,
-            event_rx,
-            signal_rx,
-            world_tx,
-            world,
-            component: Arc::new(Mutex::new(component)),
-            paused_queue: PausedEventQueue::new(),
-            child_spawner: None,
-            event_tx: Some(event_tx.clone()),
-        };
-
-        let handle = ChannelHandle::new(id, event_tx);
-
-        (runner, handle)
-    }
-
-    /// Creates a new ChannelRunner with both Emitter and ChildSpawner support.
-    ///
-    /// This is the most complete constructor, enabling:
-    /// - Event emission via Emitter
-    /// - Child spawning via ChildContext
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Channel ID
-    /// * `world_tx` - World command sender
-    /// * `world` - Read-only World access
-    /// * `signal_rx` - Signal receiver (broadcast)
-    /// * `signal_tx` - Signal sender (for Emitter and child context)
-    /// * `component` - Component to bind
-    #[must_use]
-    pub fn new_with_full_support(
-        id: ChannelId,
-        world_tx: mpsc::Sender<WorldCommand>,
-        world: Arc<RwLock<World>>,
-        signal_rx: broadcast::Receiver<Signal>,
-        signal_tx: broadcast::Sender<Signal>,
-        mut component: Box<dyn Component>,
-    ) -> (Self, ChannelHandle) {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
-
-        // Create emitter
-        let component_id = component.id().clone();
-        let emitter = EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
-        component.set_emitter(Box::new(emitter));
-
-        // Create child spawner
-        let spawner = ChildSpawner::new(component_id.fqn(), event_tx.clone());
-        let spawner_arc = Arc::new(StdMutex::new(spawner));
-
-        info!(
-            "ChannelRunner::new_with_full_support: created emitter and spawner for {}",
-            component_id.fqn()
-        );
-
-        let runner = Self {
-            id,
-            event_rx,
-            signal_rx,
-            world_tx,
-            world,
-            component: Arc::new(Mutex::new(component)),
-            paused_queue: PausedEventQueue::new(),
-            child_spawner: Some(spawner_arc),
-            event_tx: Some(event_tx.clone()),
-        };
-
-        let handle = ChannelHandle::new(id, event_tx);
-
-        (runner, handle)
-    }
-
     /// Creates a ChildContext for use by managed children.
     ///
     /// The returned context can be injected into LuaChild instances
@@ -635,13 +444,14 @@ impl ChannelRunner {
         }
 
         let child_id = reply_rx.await.ok()??;
-        let (runner, handle) = ChannelRunner::new(
+        let (runner, handle) = ChannelRunner::builder(
             child_id,
             self.world_tx.clone(),
             Arc::clone(&self.world),
             signal_rx,
             component,
-        );
+        )
+        .build();
 
         Some((runner, handle))
     }
@@ -842,13 +652,14 @@ impl ChannelRunnerFactory {
         component: Box<dyn Component>,
     ) -> (ChannelRunner, ChannelHandle) {
         let signal_rx = self.signal_tx.subscribe();
-        ChannelRunner::new(
+        ChannelRunner::builder(
             id,
             self.world_tx.clone(),
             Arc::clone(&self.world),
             signal_rx,
             component,
         )
+        .build()
     }
 
     /// Broadcasts a signal to all runners.
@@ -946,13 +757,14 @@ mod tests {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new(
+        let (runner, handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world,
             signal_rx,
             mock_component(),
-        );
+        )
+        .build();
 
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
@@ -965,13 +777,14 @@ mod tests {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new(
+        let (runner, handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world,
             signal_rx,
             mock_component(),
-        );
+        )
+        .build();
 
         let runner_task = tokio::spawn(runner.run());
 
@@ -999,13 +812,14 @@ mod tests {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, _handle) = ChannelRunner::new(
+        let (runner, _handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world.clone(),
             signal_rx,
             mock_component(),
-        );
+        )
+        .build();
 
         let runner_task = tokio::spawn(runner.run());
 
@@ -1024,13 +838,14 @@ mod tests {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
-        let (_runner, handle) = ChannelRunner::new(
+        let (_runner, handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world,
             signal_rx,
             mock_component(),
-        );
+        )
+        .build();
 
         let handle2 = handle.clone();
         assert_eq!(handle.id, handle2.id);
@@ -1056,14 +871,15 @@ mod tests {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new_with_emitter(
+        let (runner, handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world,
             signal_rx,
-            signal_tx.clone(),
             mock_component(),
-        );
+        )
+        .with_emitter(signal_tx.clone())
+        .build();
 
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
@@ -1132,14 +948,15 @@ mod tests {
         let component = Box::new(EmittingComponent::new(StdArc::clone(&call_count)));
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::new_with_emitter(
+        let (runner, handle) = ChannelRunner::builder(
             primary,
             world_tx.clone(),
             world,
             signal_rx,
-            signal_tx.clone(),
             component,
-        );
+        )
+        .with_emitter(signal_tx.clone())
+        .build();
 
         let runner_task = tokio::spawn(runner.run());
 
