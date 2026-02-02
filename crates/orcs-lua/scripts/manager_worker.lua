@@ -4,8 +4,7 @@
 -- This script demonstrates the Mgr-Sub pattern where a Component (Manager)
 -- spawns and controls Child entities (Workers).
 --
--- Current Limitation: orcs.spawn_child is only available inside LuaChild.run(),
--- not in LuaComponent. This test validates the Child-spawns-Child workflow.
+-- Component can spawn children via set_child_context() (see tests).
 
 return {
     id = "manager",

@@ -63,6 +63,15 @@ pub enum EventCategory {
     /// Operations: echo, check
     Echo,
 
+    /// User input from IOBridge.
+    ///
+    /// Components subscribe to this category to receive user messages
+    /// from the interactive console or other input sources.
+    ///
+    /// Payload should contain:
+    /// - `message`: The user's input text (String)
+    UserInput,
+
     /// Output events for IO display.
     ///
     /// Components emit this category when they want to output
@@ -127,6 +136,12 @@ impl EventCategory {
         matches!(self, Self::Output)
     }
 
+    /// Returns `true` if this is the UserInput category.
+    #[must_use]
+    pub fn is_user_input(&self) -> bool {
+        matches!(self, Self::UserInput)
+    }
+
     /// Returns the display name of this category.
     #[must_use]
     pub fn name(&self) -> String {
@@ -134,6 +149,7 @@ impl EventCategory {
             Self::Lifecycle => "Lifecycle".to_string(),
             Self::Hil => "Hil".to_string(),
             Self::Echo => "Echo".to_string(),
+            Self::UserInput => "UserInput".to_string(),
             Self::Output => "Output".to_string(),
             Self::Extension { namespace, kind } => format!("{}:{}", namespace, kind),
         }

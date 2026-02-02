@@ -155,6 +155,8 @@ pub fn parse_event_category(s: &str) -> Option<EventCategory> {
         "Lifecycle" => Some(EventCategory::Lifecycle),
         "Hil" => Some(EventCategory::Hil),
         "Echo" => Some(EventCategory::Echo),
+        "UserInput" => Some(EventCategory::UserInput),
+        "Output" => Some(EventCategory::Output),
         _ => {
             // Treat as Extension category
             Some(EventCategory::Extension {

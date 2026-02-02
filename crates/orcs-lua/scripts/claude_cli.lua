@@ -7,7 +7,7 @@
 return {
     id = "claude_cli",
     namespace = "builtin",
-    subscriptions = {"Echo"},
+    subscriptions = {"UserInput"},
 
     on_request = function(request)
         -- Extract user message from payload

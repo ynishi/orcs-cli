@@ -342,7 +342,8 @@ impl ClientRunner {
 
     /// Handles user message input by forwarding to Component.
     ///
-    /// Creates an Echo Event and delivers to Component via on_request().
+    /// Creates a UserInput Event and delivers to Component via on_request().
+    /// Components that subscribe to `UserInput` category will receive this event.
     async fn handle_user_message(&self, message: &str) {
         debug!("ClientRunner {}: user message: {}", self.id, message);
 
@@ -352,10 +353,10 @@ impl ClientRunner {
             comp.id().clone()
         };
 
-        // Create Echo event for Component
+        // Create UserInput event for Component
         let event = Event {
-            category: EventCategory::Echo,
-            operation: "echo".to_string(),
+            category: EventCategory::UserInput,
+            operation: "input".to_string(),
             source: source_id,
             payload: serde_json::json!({
                 "message": message

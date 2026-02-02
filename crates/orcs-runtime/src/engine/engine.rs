@@ -39,8 +39,8 @@ use crate::channel::{
     ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
-use crate::Principal;
 use crate::session::{SessionAsset, SessionStore, StorageError};
+use crate::Principal;
 use orcs_component::{Component, ComponentSnapshot, SnapshotError};
 use orcs_event::Signal;
 use orcs_types::ChannelId;
