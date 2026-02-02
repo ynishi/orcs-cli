@@ -80,6 +80,7 @@ mod component;
 pub mod embedded;
 mod error;
 mod loader;
+pub mod orcs_helpers;
 pub mod testing;
 mod types;
 
@@ -87,4 +88,5 @@ pub use child::LuaChild;
 pub use component::LuaComponent;
 pub use error::LuaError;
 pub use loader::ScriptLoader;
+pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};
 pub use types::{LuaRequest, LuaResponse, LuaSignal};

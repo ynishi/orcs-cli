@@ -7,7 +7,9 @@ use crate::types::{
     parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
 };
 use mlua::{Function, Lua, RegistryKey, Table};
-use orcs_component::{Component, ComponentError, Emitter, EventCategory, Status};
+use orcs_component::{
+    ChildConfig, ChildContext, Component, ComponentError, Emitter, EventCategory, Status,
+};
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
@@ -67,6 +69,11 @@ pub struct LuaComponent {
     /// When set, allows Lua scripts to emit events via `orcs.output()`.
     /// This enables ChannelRunner-based execution (IO-less, event-only).
     emitter: Option<Arc<Mutex<Box<dyn Emitter>>>>,
+    /// Child context for spawning and managing children.
+    ///
+    /// When set, allows Lua scripts to spawn children via `orcs.spawn_child()`.
+    /// This enables the Manager-Worker pattern where Components manage Children.
+    child_context: Option<Arc<Mutex<Box<dyn ChildContext>>>>,
 }
 
 // SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
@@ -189,6 +196,7 @@ impl LuaComponent {
             shutdown_key,
             script_path: None,
             emitter: None,
+            child_context: None,
         })
     }
 
@@ -228,6 +236,15 @@ impl LuaComponent {
             Self::register_output_function(&lua, Arc::clone(emitter))?;
         }
 
+        // Re-register child context functions if child_context is set
+        if let Some(ctx) = &self.child_context {
+            let lua = self
+                .lua
+                .lock()
+                .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
+            Self::register_child_context_functions(&lua, Arc::clone(ctx))?;
+        }
+
         tracing::info!("Reloaded Lua component: {}", self.id);
         Ok(())
     }
@@ -238,6 +255,110 @@ impl LuaComponent {
     #[must_use]
     pub fn has_emitter(&self) -> bool {
         self.emitter.is_some()
+    }
+
+    /// Returns whether this component has a child context set.
+    ///
+    /// When true, the component can spawn children via `orcs.spawn_child()`.
+    #[must_use]
+    pub fn has_child_context(&self) -> bool {
+        self.child_context.is_some()
+    }
+
+    /// Sets the child context for spawning and managing children.
+    ///
+    /// Once set, the Lua script can use:
+    /// - `orcs.spawn_child(config)` - Spawn a child
+    /// - `orcs.child_count()` - Get current child count
+    /// - `orcs.max_children()` - Get max allowed children
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - The child context
+    pub fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        let ctx_arc = Arc::new(Mutex::new(ctx));
+        self.child_context = Some(Arc::clone(&ctx_arc));
+
+        // Register child context functions in Lua
+        if let Ok(lua) = self.lua.lock() {
+            if let Err(e) = Self::register_child_context_functions(&lua, ctx_arc) {
+                tracing::warn!("Failed to register child context functions: {}", e);
+            }
+        }
+    }
+
+    /// Registers child context functions in Lua's orcs table.
+    ///
+    /// Adds:
+    /// - `orcs.spawn_child(config)` - Spawn a child
+    /// - `orcs.child_count()` - Get current child count
+    /// - `orcs.max_children()` - Get max allowed children
+    fn register_child_context_functions(
+        lua: &Lua,
+        ctx: Arc<Mutex<Box<dyn ChildContext>>>,
+    ) -> Result<(), LuaError> {
+        let orcs_table: Table = lua.globals().get("orcs")?;
+
+        // orcs.spawn_child(config) -> { ok, id, handle, error }
+        // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
+        let ctx_clone = Arc::clone(&ctx);
+        let spawn_child_fn = lua.create_function(move |lua, config: Table| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Parse config
+            let id: String = config
+                .get("id")
+                .map_err(|_| mlua::Error::RuntimeError("config.id required".into()))?;
+
+            let child_config = if let Ok(script) = config.get::<String>("script") {
+                ChildConfig::from_inline(&id, script)
+            } else if let Ok(path) = config.get::<String>("path") {
+                ChildConfig::from_file(&id, path)
+            } else {
+                ChildConfig::new(&id)
+            };
+
+            // Spawn the child
+            let result = lua.create_table()?;
+            match ctx_guard.spawn_child(child_config) {
+                Ok(handle) => {
+                    result.set("ok", true)?;
+                    result.set("id", handle.id().to_string())?;
+                }
+                Err(e) => {
+                    result.set("ok", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?;
+        orcs_table.set("spawn_child", spawn_child_fn)?;
+
+        // orcs.child_count() -> number
+        let ctx_clone = Arc::clone(&ctx);
+        let child_count_fn = lua.create_function(move |_, ()| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            Ok(ctx_guard.child_count())
+        })?;
+        orcs_table.set("child_count", child_count_fn)?;
+
+        // orcs.max_children() -> number
+        let ctx_clone = Arc::clone(&ctx);
+        let max_children_fn = lua.create_function(move |_, ()| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            Ok(ctx_guard.max_children())
+        })?;
+        orcs_table.set("max_children", max_children_fn)?;
+
+        tracing::debug!("Registered orcs.spawn_child, child_count, max_children functions");
+        Ok(())
     }
 
     /// Registers orcs helper functions in Lua.

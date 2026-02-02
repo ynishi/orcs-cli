@@ -25,6 +25,7 @@
 //! ```
 
 use crate::error::LuaError;
+use crate::orcs_helpers::register_base_orcs_functions;
 use crate::types::{parse_signal_response, parse_status, LuaResponse, LuaSignal};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 use orcs_component::{
@@ -120,6 +121,9 @@ impl LuaChild {
             ))))
         })?;
 
+        // Register base orcs functions (log, exec) if not already registered
+        register_base_orcs_functions(&lua_guard)?;
+
         // Extract id
         let id: String = table
             .get("id")
@@ -214,6 +218,9 @@ impl LuaChild {
             ))))
         })?;
 
+        // Register base orcs functions (log, exec) if not already registered
+        register_base_orcs_functions(&lua_guard)?;
+
         // Create a simple on_signal function that returns "Ignored"
         let on_signal_fn = lua_guard.create_function(|_, _: mlua::Value| Ok("Ignored"))?;
 
@@ -274,6 +281,14 @@ impl SignalReceiver for LuaChild {
             return SignalResponse::Ignored;
         };
 
+        // Register context functions if context is available
+        // This allows on_signal to use orcs.emit_output, etc.
+        if let Some(ctx) = &self.context {
+            if let Err(e) = register_context_functions(&lua, ctx.clone_box()) {
+                tracing::warn!("Failed to register context functions in on_signal: {}", e);
+            }
+        }
+
         let Ok(on_signal): Result<Function, _> = lua.registry_value(&self.on_signal_key) else {
             return SignalResponse::Ignored;
         };
@@ -304,6 +319,14 @@ impl SignalReceiver for LuaChild {
         // Call Lua abort if available
         if let Some(abort_key) = &self.abort_key {
             if let Ok(lua) = self.lua.lock() {
+                // Register context functions if context is available
+                // This allows abort() to use orcs.emit_output, etc.
+                if let Some(ctx) = &self.context {
+                    if let Err(e) = register_context_functions(&lua, ctx.clone_box()) {
+                        tracing::warn!("Failed to register context functions in abort: {}", e);
+                    }
+                }
+
                 if let Ok(abort_fn) = lua.registry_value::<Function>(abort_key) {
                     if let Err(e) = abort_fn.call::<()>(()) {
                         tracing::warn!("Lua child abort error: {}", e);
