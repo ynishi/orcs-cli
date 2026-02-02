@@ -76,6 +76,7 @@
 mod engine;
 mod error;
 mod eventbus;
+mod session;
 
 pub use engine::OrcsEngine;
 pub use error::EngineError;
