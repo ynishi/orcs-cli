@@ -11,10 +11,29 @@
 //! - Reusability across different contexts
 
 use super::error::EngineError;
-use orcs_component::{Component, Package, PackageInfo};
+use orcs_component::{Component, Package, PackageInfo, Packageable};
 use orcs_types::ComponentId;
 use std::collections::HashMap;
 use tracing::info;
+
+/// Retrieves a mutable reference to a component's Packageable implementation.
+///
+/// # Errors
+///
+/// - `EngineError::ComponentNotFound` - Component doesn't exist
+/// - `EngineError::PackageNotSupported` - Component doesn't implement Packageable
+fn get_packageable_mut<'a>(
+    components: &'a mut HashMap<ComponentId, Box<dyn Component>>,
+    component_id: &ComponentId,
+) -> Result<&'a mut dyn Packageable, EngineError> {
+    let component = components
+        .get_mut(component_id)
+        .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
+
+    component
+        .as_packageable_mut()
+        .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))
+}
 
 /// Collects package info from all registered components.
 ///
@@ -64,13 +83,7 @@ pub fn install_package(
     component_id: &ComponentId,
     package: &Package,
 ) -> Result<(), EngineError> {
-    let component = components
-        .get_mut(component_id)
-        .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-    let packageable = component
-        .as_packageable_mut()
-        .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
+    let packageable = get_packageable_mut(components, component_id)?;
 
     packageable
         .install_package(package)
@@ -103,13 +116,7 @@ pub fn uninstall_package(
     component_id: &ComponentId,
     package_id: &str,
 ) -> Result<(), EngineError> {
-    let component = components
-        .get_mut(component_id)
-        .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-    let packageable = component
-        .as_packageable_mut()
-        .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
+    let packageable = get_packageable_mut(components, component_id)?;
 
     packageable
         .uninstall_package(package_id)
