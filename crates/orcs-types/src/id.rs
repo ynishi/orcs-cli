@@ -189,6 +189,36 @@ impl ComponentId {
     pub fn is_builtin(&self) -> bool {
         self.namespace == "builtin"
     }
+
+    /// Creates a child component ID with a deterministic UUID v5.
+    ///
+    /// The UUID is derived from the ORCS namespace UUID and the
+    /// child name using SHA-1.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_types::ComponentId;
+    ///
+    /// let child = ComponentId::child("worker-1");
+    /// assert_eq!(child.namespace, "child");
+    /// assert_eq!(child.name, "worker-1");
+    /// ```
+    #[must_use]
+    pub fn child(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            uuid: Uuid::new_v5(&ORCS_NAMESPACE, format!("child:{}", name).as_bytes()),
+            namespace: "child".to_string(),
+            name,
+        }
+    }
+
+    /// Returns `true` if this is a child component.
+    #[must_use]
+    pub fn is_child(&self) -> bool {
+        self.namespace == "child"
+    }
 }
 
 impl std::fmt::Display for ComponentId {

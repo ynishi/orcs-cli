@@ -31,6 +31,8 @@
 //! 3. Processes Events until channel completes or is killed
 //! 4. Cleanup on drop
 
+use super::child_context::{ChildContextImpl, LuaChildLoader};
+use super::child_spawner::ChildSpawner;
 use super::common::{
     determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
     send_abort, send_transition, SignalAction,
@@ -39,12 +41,12 @@ use super::EventEmitter;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
-use orcs_component::Component;
+use orcs_component::{AsyncChildContext, ChildContext, Component};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
@@ -113,6 +115,7 @@ impl ChannelHandle {
 /// - Receives Signals via broadcast and delivers to Component
 /// - Sends World modifications via command queue
 /// - Has read access to the World for queries
+/// - Manages spawned children via ChildSpawner
 pub struct ChannelRunner {
     /// This channel's ID.
     id: ChannelId,
@@ -128,6 +131,10 @@ pub struct ChannelRunner {
     component: Arc<Mutex<Box<dyn Component>>>,
     /// Queue for events received while paused.
     paused_queue: VecDeque<Event>,
+    /// Child spawner for managing spawned children (optional).
+    child_spawner: Option<Arc<StdMutex<ChildSpawner>>>,
+    /// Event sender for child context (kept for context creation).
+    event_tx: Option<mpsc::Sender<Event>>,
 }
 
 impl ChannelRunner {
@@ -152,6 +159,59 @@ impl ChannelRunner {
             world,
             component: Arc::new(Mutex::new(component)),
             paused_queue: VecDeque::new(),
+            child_spawner: None,
+            event_tx: None,
+        };
+
+        let handle = ChannelHandle::new(id, event_tx);
+
+        (runner, handle)
+    }
+
+    /// Creates a new ChannelRunner with child spawning support.
+    ///
+    /// This enables the Component and its Children to spawn sub-children
+    /// via ChildContext.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Channel ID
+    /// * `world_tx` - World command sender
+    /// * `world` - Read-only World access
+    /// * `signal_rx` - Signal receiver (broadcast)
+    /// * `_signal_tx` - Signal sender (reserved for future use)
+    /// * `component` - Component to bind
+    #[must_use]
+    pub fn new_with_child_spawner(
+        id: ChannelId,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_rx: broadcast::Receiver<Signal>,
+        _signal_tx: broadcast::Sender<Signal>,
+        component: Box<dyn Component>,
+    ) -> (Self, ChannelHandle) {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
+
+        // Create child spawner
+        let component_id = component.id().fqn();
+        let spawner = ChildSpawner::new(&component_id, event_tx.clone());
+        let spawner_arc = Arc::new(StdMutex::new(spawner));
+
+        info!(
+            "ChannelRunner::new_with_child_spawner: created spawner for {}",
+            component_id
+        );
+
+        let runner = Self {
+            id,
+            event_rx,
+            signal_rx,
+            world_tx,
+            world,
+            component: Arc::new(Mutex::new(component)),
+            paused_queue: VecDeque::new(),
+            child_spawner: Some(spawner_arc),
+            event_tx: Some(event_tx.clone()),
         };
 
         let handle = ChannelHandle::new(id, event_tx);
@@ -188,7 +248,7 @@ impl ChannelRunner {
 
         // Create emitter with the SAME event_tx that runner will receive on
         let component_id = component.id().clone();
-        let emitter = EventEmitter::new(event_tx.clone(), signal_tx, component_id.clone());
+        let emitter = EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
         component.set_emitter(Box::new(emitter));
 
         info!(
@@ -204,11 +264,148 @@ impl ChannelRunner {
             world,
             component: Arc::new(Mutex::new(component)),
             paused_queue: VecDeque::new(),
+            child_spawner: None,
+            event_tx: Some(event_tx.clone()),
         };
 
         let handle = ChannelHandle::new(id, event_tx);
 
         (runner, handle)
+    }
+
+    /// Creates a new ChannelRunner with both Emitter and ChildSpawner support.
+    ///
+    /// This is the most complete constructor, enabling:
+    /// - Event emission via Emitter
+    /// - Child spawning via ChildContext
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Channel ID
+    /// * `world_tx` - World command sender
+    /// * `world` - Read-only World access
+    /// * `signal_rx` - Signal receiver (broadcast)
+    /// * `signal_tx` - Signal sender (for Emitter and child context)
+    /// * `component` - Component to bind
+    #[must_use]
+    pub fn new_with_full_support(
+        id: ChannelId,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_rx: broadcast::Receiver<Signal>,
+        signal_tx: broadcast::Sender<Signal>,
+        mut component: Box<dyn Component>,
+    ) -> (Self, ChannelHandle) {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
+
+        // Create emitter
+        let component_id = component.id().clone();
+        let emitter = EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
+        component.set_emitter(Box::new(emitter));
+
+        // Create child spawner
+        let spawner = ChildSpawner::new(component_id.fqn(), event_tx.clone());
+        let spawner_arc = Arc::new(StdMutex::new(spawner));
+
+        info!(
+            "ChannelRunner::new_with_full_support: created emitter and spawner for {}",
+            component_id.fqn()
+        );
+
+        let runner = Self {
+            id,
+            event_rx,
+            signal_rx,
+            world_tx,
+            world,
+            component: Arc::new(Mutex::new(component)),
+            paused_queue: VecDeque::new(),
+            child_spawner: Some(spawner_arc),
+            event_tx: Some(event_tx.clone()),
+        };
+
+        let handle = ChannelHandle::new(id, event_tx);
+
+        (runner, handle)
+    }
+
+    /// Creates a ChildContext for use by managed children.
+    ///
+    /// The returned context can be injected into LuaChild instances
+    /// to enable them to spawn sub-children.
+    ///
+    /// Returns None if child spawning was not enabled for this runner.
+    #[must_use]
+    pub fn create_child_context(&self, child_id: &str) -> Option<Box<dyn ChildContext>> {
+        let spawner = self.child_spawner.as_ref()?;
+        let event_tx = self.event_tx.as_ref()?;
+
+        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner));
+
+        Some(Box::new(ctx))
+    }
+
+    /// Creates a ChildContext with a LuaChildLoader for spawning Lua children.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - ID of the child that will use this context
+    /// * `loader` - Loader for creating LuaChild instances from configs
+    #[must_use]
+    pub fn create_child_context_with_loader(
+        &self,
+        child_id: &str,
+        loader: Arc<dyn LuaChildLoader>,
+    ) -> Option<Box<dyn ChildContext>> {
+        let spawner = self.child_spawner.as_ref()?;
+        let event_tx = self.event_tx.as_ref()?;
+
+        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner))
+            .with_lua_loader(loader);
+
+        Some(Box::new(ctx))
+    }
+
+    /// Creates an AsyncChildContext for use by async children.
+    ///
+    /// The returned context can be used with async spawn operations.
+    ///
+    /// Returns None if child spawning was not enabled for this runner.
+    #[must_use]
+    pub fn create_async_child_context(&self, child_id: &str) -> Option<Box<dyn AsyncChildContext>> {
+        let spawner = self.child_spawner.as_ref()?;
+        let event_tx = self.event_tx.as_ref()?;
+
+        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner));
+
+        Some(Box::new(ctx))
+    }
+
+    /// Creates an AsyncChildContext with a LuaChildLoader.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - ID of the child that will use this context
+    /// * `loader` - Loader for creating LuaChild instances from configs
+    #[must_use]
+    pub fn create_async_child_context_with_loader(
+        &self,
+        child_id: &str,
+        loader: Arc<dyn LuaChildLoader>,
+    ) -> Option<Box<dyn AsyncChildContext>> {
+        let spawner = self.child_spawner.as_ref()?;
+        let event_tx = self.event_tx.as_ref()?;
+
+        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner))
+            .with_lua_loader(loader);
+
+        Some(Box::new(ctx))
+    }
+
+    /// Returns a reference to the child spawner, if enabled.
+    #[must_use]
+    pub fn child_spawner(&self) -> Option<&Arc<StdMutex<ChildSpawner>>> {
+        self.child_spawner.as_ref()
     }
 
     /// Returns a reference to the bound Component.
@@ -305,6 +502,13 @@ impl ChannelRunner {
             return true;
         }
 
+        // Propagate signal to spawned children
+        if let Some(spawner) = &self.child_spawner {
+            if let Ok(mut s) = spawner.lock() {
+                s.propagate_signal(&signal);
+            }
+        }
+
         // Dispatch to component first
         let component_action = dispatch_signal_to_component(&signal, &self.component).await;
         if let SignalAction::Stop { reason } = component_action {
@@ -312,6 +516,8 @@ impl ChannelRunner {
                 "ChannelRunner {}: component requested stop: {}",
                 self.id, reason
             );
+            // Abort all children before stopping
+            self.abort_all_children();
             send_abort(&self.world_tx, self.id, &reason).await;
             return false;
         }
@@ -321,6 +527,8 @@ impl ChannelRunner {
         match action {
             SignalAction::Stop { reason } => {
                 info!("ChannelRunner {}: stopping - {}", self.id, reason);
+                // Abort all children before stopping
+                self.abort_all_children();
                 send_abort(&self.world_tx, self.id, &reason).await;
                 return false;
             }
@@ -336,6 +544,16 @@ impl ChannelRunner {
         }
 
         true
+    }
+
+    /// Aborts all spawned children.
+    fn abort_all_children(&self) {
+        if let Some(spawner) = &self.child_spawner {
+            if let Ok(mut s) = spawner.lock() {
+                s.abort_all();
+                debug!("ChannelRunner {}: aborted all children", self.id);
+            }
+        }
     }
 
     /// Handles an incoming event.

@@ -52,10 +52,14 @@
 //! ```
 
 mod base;
+mod child_context;
+mod child_spawner;
 mod client;
 mod common;
 mod emitter;
 
 pub use base::{ChannelHandle, ChannelRunner, ChannelRunnerFactory, Event};
+pub use child_context::{ChildContextImpl, LuaChildLoader};
+pub use child_spawner::{ChildSpawner, SpawnedChildHandle};
 pub use client::{ClientRunner, ClientRunnerConfig};
 pub use emitter::EventEmitter;
