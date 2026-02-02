@@ -201,6 +201,7 @@
 
 mod child;
 mod component;
+mod context;
 mod emitter;
 mod error;
 mod package;
@@ -216,8 +217,19 @@ pub use traits::{Identifiable, SignalReceiver, Statusable};
 pub use emitter::Emitter;
 
 // Re-export component traits
-pub use child::Child;
+pub use child::{
+    AsyncRunnableChild, Child, ChildError, ChildResult, ChildResultDto, RunnableChild,
+};
 pub use component::Component;
+
+// Re-export async_trait for convenience
+pub use async_trait::async_trait;
+
+// Re-export child context types
+pub use context::{
+    AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle, RunError,
+    SpawnError,
+};
 
 // Re-export status types
 pub use status::{Progress, Status, StatusDetail};

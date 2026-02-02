@@ -8,9 +8,13 @@ license.workspace = true
 [dependencies]
 orcs-types = { workspace = true }
 orcs-event = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
 
 [lints]
 workspace = true
