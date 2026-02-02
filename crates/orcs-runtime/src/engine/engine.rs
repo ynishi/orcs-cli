@@ -34,7 +34,7 @@
 
 use super::error::EngineError;
 use super::eventbus::{ComponentHandle, EventBus};
-use super::session;
+use super::{package, session};
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ChannelRunnerFactory, ClientRunner,
     ClientRunnerConfig, World, WorldCommand, WorldCommandSender, WorldManager,
@@ -691,103 +691,31 @@ impl OrcsEngine {
 
     /// Collects package info from all registered components.
     ///
-    /// Only components that implement [`Packageable`] will report packages.
-    ///
-    /// # Returns
-    ///
-    /// A map of component ID to list of installed packages.
+    /// See [`package::collect_packages`] for details.
     pub fn collect_packages(&self) -> HashMap<ComponentId, Vec<PackageInfo>> {
-        let mut packages = HashMap::with_capacity(self.components.len());
-
-        for (id, component) in &self.components {
-            if let Some(packageable) = component.as_packageable() {
-                let list = packageable.list_packages();
-                if !list.is_empty() {
-                    packages.insert(id.clone(), list.to_vec());
-                }
-            }
-        }
-
-        packages
+        package::collect_packages(&self.components)
     }
 
     /// Installs a package into a specific component.
     ///
-    /// The component must implement [`Packageable`].
-    ///
-    /// # Arguments
-    ///
-    /// * `component_id` - The target component
-    /// * `package` - The package to install
-    ///
-    /// # Errors
-    ///
-    /// - `EngineError::ComponentNotFound` - Component doesn't exist
-    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
-    /// - `EngineError::PackageFailed` - Installation failed
+    /// See [`package::install_package`] for details.
     pub fn install_package(
         &mut self,
         component_id: &ComponentId,
         package: &Package,
     ) -> Result<(), EngineError> {
-        let component = self
-            .components
-            .get_mut(component_id)
-            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-        let packageable = component
-            .as_packageable_mut()
-            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
-
-        packageable
-            .install_package(package)
-            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
-
-        info!(
-            "Package '{}' installed to component '{}'",
-            package.id(),
-            component_id
-        );
-
-        Ok(())
+        package::install_package(&mut self.components, component_id, package)
     }
 
     /// Uninstalls a package from a specific component.
     ///
-    /// # Arguments
-    ///
-    /// * `component_id` - The target component
-    /// * `package_id` - The package ID to uninstall
-    ///
-    /// # Errors
-    ///
-    /// - `EngineError::ComponentNotFound` - Component doesn't exist
-    /// - `EngineError::PackageNotSupported` - Component doesn't support packages
-    /// - `EngineError::PackageFailed` - Uninstallation failed
+    /// See [`package::uninstall_package`] for details.
     pub fn uninstall_package(
         &mut self,
         component_id: &ComponentId,
         package_id: &str,
     ) -> Result<(), EngineError> {
-        let component = self
-            .components
-            .get_mut(component_id)
-            .ok_or_else(|| EngineError::ComponentNotFound(component_id.clone()))?;
-
-        let packageable = component
-            .as_packageable_mut()
-            .ok_or_else(|| EngineError::PackageNotSupported(component_id.clone()))?;
-
-        packageable
-            .uninstall_package(package_id)
-            .map_err(|e| EngineError::PackageFailed(e.to_string()))?;
-
-        info!(
-            "Package '{}' uninstalled from component '{}'",
-            package_id, component_id
-        );
-
-        Ok(())
+        package::uninstall_package(&mut self.components, component_id, package_id)
     }
 }
 
