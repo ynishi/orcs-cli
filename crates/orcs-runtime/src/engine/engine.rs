@@ -367,13 +367,6 @@ impl OrcsEngine {
         &self.world_tx
     }
 
-    /// Broadcast a signal to all channel runners.
-    pub fn broadcast_signal(&self, signal: Signal) {
-        let _ = self.signal_tx.send(signal.clone());
-        // Also send to component-level eventbus
-        self.eventbus.signal(signal);
-    }
-
     /// Register a component with its subscriptions.
     ///
     /// The component's `subscriptions()` method is called to determine
