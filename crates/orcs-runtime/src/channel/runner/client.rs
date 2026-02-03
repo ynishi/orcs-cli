@@ -73,6 +73,10 @@ pub enum ComponentResponse<'a> {
     },
     /// Direct text response to display.
     TextResponse(&'a str),
+    /// Error response from component.
+    ///
+    /// Triggered when response contains `{ "success": false, "error": "..." }`.
+    ErrorResponse(&'a str),
     /// No displayable content.
     Empty,
 }
@@ -82,6 +86,7 @@ impl<'a> ComponentResponse<'a> {
     ///
     /// Supports multiple formats:
     /// - `{ "status": "pending_approval", "approval_id": "...", "message": "..." }`
+    /// - `{ "success": false, "error": "..." }` → ErrorResponse
     /// - `{ "response": "..." }`
     /// - `{ "data": { "response": "..." } }`
     #[must_use]
@@ -100,6 +105,15 @@ impl<'a> ComponentResponse<'a> {
                     description,
                 };
             }
+        }
+
+        // Check for error response: { "success": false, "error": "..." }
+        if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            if let Some(error_msg) = value.get("error").and_then(|v| v.as_str()) {
+                return Self::ErrorResponse(error_msg);
+            }
+            // success: false but no error message
+            return Self::ErrorResponse("Unknown error");
         }
 
         // Check for direct response field
@@ -531,6 +545,9 @@ impl ClientRunner {
             ComponentResponse::TextResponse(text) => {
                 let _ = self.io_bridge.info(text).await;
             }
+            ComponentResponse::ErrorResponse(error_msg) => {
+                let _ = self.io_bridge.error(error_msg).await;
+            }
             ComponentResponse::Empty => {
                 // No displayable content - intentionally silent
             }
@@ -910,6 +927,66 @@ mod tests {
             let response = ComponentResponse::from_json(&json);
 
             assert_eq!(response, ComponentResponse::TextResponse("Direct"));
+        }
+
+        #[test]
+        fn from_json_error_response() {
+            let json = json!({
+                "success": false,
+                "error": "Command failed"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::ErrorResponse("Command failed"));
+        }
+
+        #[test]
+        fn from_json_error_response_no_message() {
+            let json = json!({
+                "success": false
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::ErrorResponse("Unknown error"));
+        }
+
+        #[test]
+        fn from_json_success_true_not_error() {
+            // success: true should not trigger error response
+            let json = json!({
+                "success": true,
+                "response": "Operation succeeded"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::TextResponse("Operation succeeded")
+            );
+        }
+
+        #[test]
+        fn from_json_pending_priority_over_error() {
+            // pending_approval should take priority over error
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-999",
+                "success": false,
+                "error": "This should be ignored"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-999",
+                    description: "Awaiting approval"
+                }
+            );
         }
     }
 
