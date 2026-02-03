@@ -487,6 +487,8 @@ pub struct ChannelRunnerBuilder {
     component: Box<dyn Component>,
     /// Signal sender for emitter (if enabled).
     emitter_signal_tx: Option<broadcast::Sender<Signal>>,
+    /// Output channel for routing Output events to IO channel.
+    output_tx: Option<mpsc::Sender<Event>>,
     /// Enable child spawner.
     enable_child_spawner: bool,
 }
@@ -508,6 +510,7 @@ impl ChannelRunnerBuilder {
             signal_rx,
             component,
             emitter_signal_tx: None,
+            output_tx: None,
             enable_child_spawner: false,
         }
     }
@@ -518,6 +521,22 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_emitter(mut self, signal_tx: broadcast::Sender<Signal>) -> Self {
         self.emitter_signal_tx = Some(signal_tx);
+        self
+    }
+
+    /// Sets the output channel for routing Output events.
+    ///
+    /// When set, the Component's `emit_output()` calls will send events
+    /// to this channel instead of the runner's own event channel.
+    /// This enables ChannelRunner components to display output via
+    /// ClientRunner's IOBridge.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_tx` - Sender for the IO channel's event_rx
+    #[must_use]
+    pub fn with_output_channel(mut self, output_tx: mpsc::Sender<Event>) -> Self {
+        self.output_tx = Some(output_tx);
         self
     }
 
@@ -539,8 +558,18 @@ impl ChannelRunnerBuilder {
         // Set up emitter if enabled
         if let Some(signal_tx) = &self.emitter_signal_tx {
             let component_id = self.component.id().clone();
-            let emitter =
+            let mut emitter =
                 EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
+
+            // Route Output events to IO channel if configured
+            if let Some(output_tx) = self.output_tx.take() {
+                emitter = emitter.with_output_channel(output_tx);
+                info!(
+                    "ChannelRunnerBuilder: routing output to IO channel for {}",
+                    component_id.fqn()
+                );
+            }
+
             self.component.set_emitter(Box::new(emitter));
 
             info!(

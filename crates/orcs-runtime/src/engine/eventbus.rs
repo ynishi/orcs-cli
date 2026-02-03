@@ -49,8 +49,17 @@ use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::{ChannelId, ComponentId, RequestId};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Shared channel handles for event broadcasting.
+///
+/// This type allows multiple components (EventBus, ClientRunner) to
+/// access the same set of channel handles for event injection and broadcast.
+///
+/// Uses std::sync::RwLock for sync access in EventBus methods.
+pub type SharedChannelHandles = Arc<RwLock<HashMap<ChannelId, ChannelHandle>>>;
 
 /// EventBus - routes messages between components and channels.
 ///
@@ -77,8 +86,10 @@ pub struct EventBus {
     signal_tx: broadcast::Sender<Signal>,
     /// Category subscriptions: category -> set of component IDs
     subscriptions: HashMap<EventCategory, HashSet<ComponentId>>,
-    /// Channel handles for event injection
-    channel_handles: HashMap<ChannelId, ChannelHandle>,
+    /// Shared channel handles for event injection and broadcast.
+    ///
+    /// This is shared with ClientRunner to enable UserInput broadcast.
+    channel_handles: SharedChannelHandles,
 }
 
 impl EventBus {
@@ -91,8 +102,17 @@ impl EventBus {
             pending_responses: HashMap::new(),
             signal_tx,
             subscriptions: HashMap::new(),
-            channel_handles: HashMap::new(),
+            channel_handles: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Returns a clone of the shared channel handles.
+    ///
+    /// This can be used by ClientRunner to broadcast events
+    /// without holding a reference to the entire EventBus.
+    #[must_use]
+    pub fn shared_handles(&self) -> SharedChannelHandles {
+        Arc::clone(&self.channel_handles)
     }
 
     /// Register component with subscriptions.
@@ -272,14 +292,16 @@ impl EventBus {
     /// Call this when a new [`ChannelRunner`](crate::channel::ChannelRunner)
     /// is created to enable event injection to that channel.
     pub fn register_channel(&mut self, handle: ChannelHandle) {
-        self.channel_handles.insert(handle.id, handle);
+        let mut handles = self.channel_handles.write().expect("lock poisoned");
+        handles.insert(handle.id, handle);
     }
 
     /// Unregisters a channel handle.
     ///
     /// Call this when a channel is killed or completed.
     pub fn unregister_channel(&mut self, id: &ChannelId) {
-        self.channel_handles.remove(id);
+        let mut handles = self.channel_handles.write().expect("lock poisoned");
+        handles.remove(id);
     }
 
     /// Injects an event into a specific channel.
@@ -310,10 +332,13 @@ impl EventBus {
     /// eventbus.inject(channel_id, event).await?;
     /// ```
     pub async fn inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
-        let handle = self
-            .channel_handles
-            .get(&channel_id)
-            .ok_or(EngineError::ChannelNotFound(channel_id))?;
+        let handle = {
+            let handles = self.channel_handles.read().expect("lock poisoned");
+            handles
+                .get(&channel_id)
+                .cloned()
+                .ok_or(EngineError::ChannelNotFound(channel_id))?
+        };
 
         handle
             .inject(event)
@@ -329,8 +354,8 @@ impl EventBus {
     ///
     /// Returns error if channel not found, buffer full, or channel closed.
     pub fn try_inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
-        let handle = self
-            .channel_handles
+        let handles = self.channel_handles.read().expect("lock poisoned");
+        let handle = handles
             .get(&channel_id)
             .ok_or(EngineError::ChannelNotFound(channel_id))?;
 
@@ -339,10 +364,79 @@ impl EventBus {
             .map_err(|e| EngineError::SendFailed(e.to_string()))
     }
 
+    /// Broadcasts an event to all registered channels.
+    ///
+    /// This is used for data-plane events (e.g., UserInput) that need to reach
+    /// all channels. Unlike Signal broadcast (control-plane, high priority),
+    /// this operates on the data-plane via channel event queues.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Event to broadcast to all channels
+    ///
+    /// # Returns
+    ///
+    /// Number of channels that successfully received the event.
+    /// Channels with full buffers or closed handles are skipped.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use orcs_event::EventCategory;
+    ///
+    /// let event = Event {
+    ///     category: EventCategory::UserInput,
+    ///     operation: "input".to_string(),
+    ///     source: component_id,
+    ///     payload: serde_json::json!({"message": "hello"}),
+    /// };
+    ///
+    /// let delivered = eventbus.broadcast(event);
+    /// ```
+    pub fn broadcast(&self, event: Event) -> usize {
+        let handles = self.channel_handles.read().expect("lock poisoned");
+        let mut delivered = 0;
+        for handle in handles.values() {
+            if handle.try_inject(event.clone()).is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
+    /// Broadcasts an event to all registered channels (async version).
+    ///
+    /// Waits for each channel to accept the event. Use this when delivery
+    /// guarantee is more important than latency.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Event to broadcast to all channels
+    ///
+    /// # Returns
+    ///
+    /// Number of channels that successfully received the event.
+    pub async fn broadcast_async(&self, event: Event) -> usize {
+        // Collect handles first to avoid holding lock during async operations
+        let handles: Vec<_> = {
+            let h = self.channel_handles.read().expect("lock poisoned");
+            h.values().cloned().collect()
+        };
+
+        let mut delivered = 0;
+        for handle in handles {
+            if handle.inject(event.clone()).await.is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Returns the number of registered channels.
     #[must_use]
     pub fn channel_count(&self) -> usize {
-        self.channel_handles.len()
+        let handles = self.channel_handles.read().expect("lock poisoned");
+        handles.len()
     }
 
     /// Returns the signal broadcast sender.
@@ -707,5 +801,91 @@ mod tests {
         let received = rx.await.unwrap();
         assert_eq!(received.id, request_id);
         assert_eq!(received.operation, "submit");
+    }
+
+    // === Broadcast tests ===
+
+    #[test]
+    fn broadcast_to_no_channels() {
+        let bus = EventBus::new();
+        let source = ComponentId::builtin("source");
+
+        let event = Event {
+            category: EventCategory::UserInput,
+            operation: "input".to_string(),
+            source,
+            payload: serde_json::json!({"message": "hello"}),
+        };
+
+        let delivered = bus.broadcast(event);
+        assert_eq!(delivered, 0);
+    }
+
+    #[tokio::test]
+    async fn broadcast_to_multiple_channels() {
+        use crate::channel::{ChannelConfig, World, WorldManager};
+
+        let mut world = World::new();
+        let ch1 = world.create_channel(ChannelConfig::default());
+        let ch2 = world.create_channel(ChannelConfig::default());
+
+        let (manager, _world_tx) = WorldManager::with_world(world);
+        let _manager_task = tokio::spawn(manager.run());
+
+        let mut bus = EventBus::new();
+
+        // Create channel handles manually for test
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(32);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(32);
+
+        let handle1 = ChannelHandle::new(ch1, tx1);
+        let handle2 = ChannelHandle::new(ch2, tx2);
+
+        bus.register_channel(handle1);
+        bus.register_channel(handle2);
+
+        let source = ComponentId::builtin("source");
+        let event = Event {
+            category: EventCategory::UserInput,
+            operation: "input".to_string(),
+            source,
+            payload: serde_json::json!({"message": "broadcast test"}),
+        };
+
+        let delivered = bus.broadcast(event);
+        assert_eq!(delivered, 2);
+
+        // Both channels should receive the event
+        let evt1 = rx1.try_recv();
+        let evt2 = rx2.try_recv();
+        assert!(evt1.is_ok());
+        assert!(evt2.is_ok());
+        assert_eq!(evt1.unwrap().operation, "input");
+        assert_eq!(evt2.unwrap().operation, "input");
+    }
+
+    #[tokio::test]
+    async fn broadcast_async_to_channels() {
+        let mut bus = EventBus::new();
+
+        let ch1 = ChannelId::new();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(32);
+        let handle1 = ChannelHandle::new(ch1, tx1);
+        bus.register_channel(handle1);
+
+        let source = ComponentId::builtin("source");
+        let event = Event {
+            category: EventCategory::UserInput,
+            operation: "async_input".to_string(),
+            source,
+            payload: serde_json::json!({"message": "async broadcast"}),
+        };
+
+        let delivered = bus.broadcast_async(event).await;
+        assert_eq!(delivered, 1);
+
+        let evt = rx1.try_recv();
+        assert!(evt.is_ok());
+        assert_eq!(evt.unwrap().operation, "async_input");
     }
 }

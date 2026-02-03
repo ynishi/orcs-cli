@@ -28,11 +28,17 @@ use tokio::sync::{broadcast, mpsc};
 ///
 /// Allows Components to emit events to their owning Channel
 /// or broadcast signals to all Components.
+///
+/// Output events can be routed to a separate IO channel when configured,
+/// enabling ChannelRunner components to display output via ClientRunner.
 #[derive(Clone)]
 pub struct EventEmitter {
     /// Sender to emit events to the owning Channel.
     /// ClientRunner receives these via event_rx.
     channel_tx: mpsc::Sender<Event>,
+    /// Sender for Output events to IO channel.
+    /// If set, emit_output sends here instead of channel_tx.
+    output_tx: Option<mpsc::Sender<Event>>,
     /// Sender to broadcast signals to all Components.
     signal_tx: broadcast::Sender<Signal>,
     /// Component ID for event source.
@@ -55,9 +61,25 @@ impl EventEmitter {
     ) -> Self {
         Self {
             channel_tx,
+            output_tx: None,
             signal_tx,
             source_id,
         }
+    }
+
+    /// Sets the output channel for routing Output events to IO channel.
+    ///
+    /// When set, `emit_output()` will send to this channel instead of
+    /// the owning channel. This enables ChannelRunner components to
+    /// display output via ClientRunner's IOBridge.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_tx` - Sender for the IO channel's event_rx
+    #[must_use]
+    pub fn with_output_channel(mut self, output_tx: mpsc::Sender<Event>) -> Self {
+        self.output_tx = Some(output_tx);
+        self
     }
 
     /// Emits an event to the owning Channel.
@@ -78,8 +100,9 @@ impl EventEmitter {
 
     /// Emits an Output event with a message.
     ///
-    /// Convenience method for emitting display output.
-    /// ClientRunner will send this to IOBridge.
+    /// If an output channel is configured (via `with_output_channel`),
+    /// the event is sent there. Otherwise, it's sent to the owning channel.
+    /// ClientRunner will send this to IOBridge for display.
     ///
     /// # Arguments
     ///
@@ -94,10 +117,12 @@ impl EventEmitter {
                 "level": "info"
             }),
         };
-        let _ = self.emit(event);
+        let _ = self.emit_to_output(event);
     }
 
     /// Emits an Output event with a specific level.
+    ///
+    /// If an output channel is configured, sends there; otherwise to owning channel.
     ///
     /// # Arguments
     ///
@@ -113,7 +138,18 @@ impl EventEmitter {
                 "level": level
             }),
         };
-        let _ = self.emit(event);
+        let _ = self.emit_to_output(event);
+    }
+
+    /// Emits an event to the output channel (or owning channel if not configured).
+    ///
+    /// This is the internal method used by emit_output variants.
+    fn emit_to_output(&self, event: Event) -> bool {
+        if let Some(output_tx) = &self.output_tx {
+            output_tx.try_send(event).is_ok()
+        } else {
+            self.emit(event)
+        }
     }
 
     /// Broadcasts a signal to all Components.

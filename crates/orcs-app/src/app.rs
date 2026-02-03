@@ -646,9 +646,10 @@ impl OrcsAppBuilder {
         let store = LocalFileStore::new(session_path)
             .map_err(|e| AppError::Config(format!("Failed to create session store: {e}")))?;
 
-        // Create World with IO channel
+        // Create World with IO channel and a channel for claude_cli
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
+        let claude_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -657,15 +658,22 @@ impl OrcsAppBuilder {
         let (io_port, io_input, io_output) = IOPort::with_defaults(io);
         let principal = Principal::User(PrincipalId::new());
 
-        // Spawn ClientRunner for IO channel with LuaComponent (claude_cli)
+        // Spawn ClientRunner for IO channel (no component - bridge only)
+        let (_io_handle, io_event_tx) = engine.spawn_client_runner(io, io_port, principal.clone());
+        tracing::info!("ClientRunner spawned: channel={} (IO bridge)", io);
+
+        // Spawn ChannelRunner for claude_cli with output routed to IO channel
         let lua_component = ScriptLoader::load_embedded("claude_cli")
             .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {e}")))?;
         let component_id = lua_component.id().clone();
-        let _handle =
-            engine.spawn_client_runner(io, Box::new(lua_component), io_port, principal.clone());
+        let _claude_handle = engine.spawn_runner_with_emitter(
+            claude_channel,
+            Box::new(lua_component),
+            Some(io_event_tx),
+        );
         tracing::info!(
-            "ClientRunner spawned: channel={}, component={}",
-            io,
+            "ChannelRunner spawned: channel={}, component={}",
+            claude_channel,
             component_id.fqn()
         );
 

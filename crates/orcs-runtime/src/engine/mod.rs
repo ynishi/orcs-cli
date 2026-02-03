@@ -79,4 +79,4 @@ mod eventbus;
 
 pub use engine::OrcsEngine;
 pub use error::EngineError;
-pub use eventbus::{ComponentHandle, EventBus};
+pub use eventbus::{ComponentHandle, EventBus, SharedChannelHandles};

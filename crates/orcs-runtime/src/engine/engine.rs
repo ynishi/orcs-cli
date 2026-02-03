@@ -35,7 +35,7 @@
 
 use super::eventbus::EventBus;
 use crate::channel::{
-    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, World,
+    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, Event, World,
     WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
@@ -46,7 +46,7 @@ use orcs_event::Signal;
 use orcs_types::ChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
@@ -226,32 +226,46 @@ impl OrcsEngine {
     ///
     /// * `channel_id` - The channel to run
     /// * `component` - The Component to bind (must implement `set_emitter`)
+    /// * `output_tx` - Optional sender for routing Output events to IO channel
     ///
     /// # Example
     ///
     /// ```ignore
     /// // Lua scripts can use orcs.output() after emitter is set
     /// let lua_component = LuaComponent::from_script("...")?;
-    /// let handle = engine.spawn_runner_with_emitter(channel_id, Box::new(lua_component));
+    ///
+    /// // Without output routing (Output stays in this channel)
+    /// let handle = engine.spawn_runner_with_emitter(channel_id, component, None);
+    ///
+    /// // With output routing to IO channel
+    /// let (_, io_event_tx) = engine.spawn_client_runner(io_channel, io_port, principal);
+    /// let handle = engine.spawn_runner_with_emitter(channel_id, component, Some(io_event_tx));
     /// ```
     pub fn spawn_runner_with_emitter(
         &mut self,
         channel_id: ChannelId,
         component: Box<dyn Component>,
+        output_tx: Option<mpsc::Sender<Event>>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
 
         // Use builder with emitter to ensure event_tx/event_rx consistency
-        let (runner, handle) = ChannelRunner::builder(
+        let mut builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
             signal_rx,
             component,
         )
-        .with_emitter(self.signal_tx.clone())
-        .build();
+        .with_emitter(self.signal_tx.clone());
+
+        // Route Output events to IO channel if specified
+        if let Some(tx) = output_tx {
+            builder = builder.with_output_channel(tx);
+        }
+
+        let (runner, handle) = builder.build();
 
         // Store Component reference for snapshot access
         let component_ref = Arc::clone(runner.component());
@@ -275,35 +289,37 @@ impl OrcsEngine {
         handle
     }
 
-    /// Spawn a ClientRunner for an IO channel with a bound Component.
+    /// Spawn a ClientRunner for an IO channel (no component).
     ///
-    /// ClientRunner provides IO bridging for Human-interactive channels.
-    /// The Component receives an EventEmitter for emitting events.
+    /// ClientRunner is dedicated to Human I/O bridging. It broadcasts UserInput
+    /// events to all channels and displays Output events from other channels.
     ///
     /// # Arguments
     ///
     /// * `channel_id` - The channel to run
-    /// * `component` - The Component to bind (1:1 relationship)
     /// * `io_port` - IO port for View communication
     /// * `principal` - Principal for signal creation from IO input
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (ChannelHandle, event_tx) where event_tx can be used by
+    /// other runners to send Output events to this runner for display.
     pub fn spawn_client_runner(
         &mut self,
         channel_id: ChannelId,
-        component: Box<dyn Component>,
         io_port: IOPort,
         principal: orcs_types::Principal,
-    ) -> ChannelHandle {
+    ) -> (ChannelHandle, mpsc::Sender<Event>) {
         let config = ClientRunnerConfig {
             world_tx: self.world_tx.clone(),
             world: Arc::clone(&self.world_read),
             signal_rx: self.signal_tx.subscribe(),
-            signal_tx: self.signal_tx.clone(),
+            channel_handles: self.eventbus.shared_handles(),
         };
-        let (runner, handle) = ClientRunner::new(channel_id, config, component, io_port, principal);
+        let (runner, handle) = ClientRunner::new(channel_id, config, io_port, principal);
 
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
+        // Get event_tx for other runners to send Output events
+        let event_tx = runner.event_tx().clone();
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -316,7 +332,7 @@ impl OrcsEngine {
         self.runner_tasks.insert(channel_id, runner_task);
 
         info!("Spawned ClientRunner for channel {}", channel_id);
-        handle
+        (handle, event_tx)
     }
 
     /// Spawn a child channel with configuration and bound Component.

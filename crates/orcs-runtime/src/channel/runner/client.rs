@@ -31,94 +31,23 @@
 
 use super::base::{ChannelHandle, Event};
 use super::common::{
-    determine_channel_action, dispatch_signal_to_component, is_channel_active, is_channel_paused,
-    send_abort, send_transition, SignalAction,
+    determine_channel_action, is_channel_active, is_channel_paused, send_abort, send_transition,
+    SignalAction,
 };
-use super::emitter::EventEmitter;
 use super::paused_queue::PausedEventQueue;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::World;
 use crate::components::IOBridge;
+use crate::engine::SharedChannelHandles;
 use crate::io::{IOPort, InputCommand};
-use orcs_component::{Component, ComponentError};
-use orcs_event::{EventCategory, Request, Signal, SignalKind};
-use orcs_types::{ChannelId, Principal};
-use serde_json::Value;
+use orcs_event::{EventCategory, Signal, SignalKind};
+use orcs_types::{ChannelId, ComponentId, Principal};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
-
-// --- Response handling ---
-
-/// JSON field names for component responses.
-mod response_fields {
-    pub const STATUS: &str = "status";
-    pub const PENDING_APPROVAL: &str = "pending_approval";
-    pub const APPROVAL_ID: &str = "approval_id";
-    pub const MESSAGE: &str = "message";
-    pub const RESPONSE: &str = "response";
-    pub const DATA: &str = "data";
-}
-
-/// Categorized component response for display routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComponentResponse<'a> {
-    /// Awaiting human approval with ID and description.
-    PendingApproval {
-        approval_id: &'a str,
-        description: &'a str,
-    },
-    /// Direct text response to display.
-    TextResponse(&'a str),
-    /// No displayable content.
-    Empty,
-}
-
-impl<'a> ComponentResponse<'a> {
-    /// Parses a JSON response into a categorized response.
-    ///
-    /// Supports multiple formats:
-    /// - `{ "status": "pending_approval", "approval_id": "...", "message": "..." }`
-    /// - `{ "response": "..." }`
-    /// - `{ "data": { "response": "..." } }`
-    #[must_use]
-    pub fn from_json(value: &'a Value) -> Self {
-        use response_fields::*;
-
-        // Check for pending_approval status
-        if value.get(STATUS).and_then(|v| v.as_str()) == Some(PENDING_APPROVAL) {
-            if let Some(approval_id) = value.get(APPROVAL_ID).and_then(|v| v.as_str()) {
-                let description = value
-                    .get(MESSAGE)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Awaiting approval");
-                return Self::PendingApproval {
-                    approval_id,
-                    description,
-                };
-            }
-        }
-
-        // Check for direct response field
-        if let Some(text) = value.get(RESPONSE).and_then(|v| v.as_str()) {
-            return Self::TextResponse(text);
-        }
-
-        // Check for nested data.response
-        if let Some(text) = value
-            .get(DATA)
-            .and_then(|d| d.get(RESPONSE))
-            .and_then(|v| v.as_str())
-        {
-            return Self::TextResponse(text);
-        }
-
-        Self::Empty
-    }
-}
 
 /// Configuration for creating a ClientRunner.
 ///
@@ -130,20 +59,35 @@ pub struct ClientRunnerConfig {
     pub world: Arc<RwLock<World>>,
     /// Broadcast receiver for signals.
     pub signal_rx: broadcast::Receiver<Signal>,
-    /// Broadcast sender for signals (for EventEmitter).
-    pub signal_tx: broadcast::Sender<Signal>,
+    /// Shared channel handles for UserInput broadcast.
+    pub channel_handles: SharedChannelHandles,
 }
 
 /// Runner with IO bridging for Human-interactive channels.
 ///
-/// Extends the basic runner with:
-/// - IO input loop integrated into `select!`
-/// - IO output methods for approval feedback
-/// - Principal for signal creation from IO input
+/// This runner is dedicated to bridging Human input/output with the system.
+/// It does NOT hold a Component - instead it broadcasts UserInput events
+/// to all channels and displays Output events from other channels.
+///
+/// # Architecture
+///
+/// ```text
+/// Human ↔ ClientRunner (IOBridge only)
+///            ↓ UserInput Event (broadcast)
+///         EventBus
+///            ↓
+///         ChannelRunner(claude_cli, etc.)
+///            ↓ Output Event
+///         ClientRunner
+///            ↓
+///         Human (display)
+/// ```
 pub struct ClientRunner {
     /// This channel's ID.
     id: ChannelId,
-    /// Receiver for incoming events.
+    /// Sender for events (used for creating handle).
+    event_tx: mpsc::Sender<Event>,
+    /// Receiver for incoming events (Output from other channels).
     event_rx: mpsc::Receiver<Event>,
     /// Receiver for signals (broadcast).
     signal_rx: broadcast::Receiver<Signal>,
@@ -151,8 +95,8 @@ pub struct ClientRunner {
     world_tx: mpsc::Sender<WorldCommand>,
     /// Read-only World access.
     world: Arc<RwLock<World>>,
-    /// Bound Component (1:1 relationship).
-    component: Arc<Mutex<Box<dyn Component>>>,
+    /// Shared channel handles for UserInput broadcast.
+    channel_handles: SharedChannelHandles,
     /// Queue for events received while paused.
     paused_queue: PausedEventQueue,
 
@@ -161,43 +105,43 @@ pub struct ClientRunner {
     io_bridge: IOBridge,
     /// Principal for signal creation from IO input.
     principal: Principal,
+    /// Source ID for events (identifies this runner as event source).
+    source_id: ComponentId,
 }
 
 impl ClientRunner {
-    /// Creates a new ClientRunner with IO bridging.
+    /// Creates a new ClientRunner with IO bridging (no component).
+    ///
+    /// This runner is dedicated to Human I/O. It broadcasts UserInput events
+    /// to all channels and displays Output events received from other channels.
     ///
     /// # Arguments
     ///
     /// * `id` - The channel's ID
     /// * `config` - World and signal channel configuration
-    /// * `component` - The Component bound to this channel (1:1)
     /// * `io_port` - IO port for View communication
     /// * `principal` - Principal for signal creation
     #[must_use]
     pub fn new(
         id: ChannelId,
         config: ClientRunnerConfig,
-        mut component: Box<dyn Component>,
         io_port: IOPort,
         principal: Principal,
     ) -> (Self, ChannelHandle) {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
 
-        // Create EventEmitter and inject into Component
-        let component_id = component.id().clone();
-        let emitter = EventEmitter::new(event_tx.clone(), config.signal_tx, component_id);
-        component.set_emitter(Box::new(emitter));
-
         let runner = Self {
             id,
+            event_tx: event_tx.clone(),
             event_rx,
             signal_rx: config.signal_rx,
             world_tx: config.world_tx,
             world: config.world,
-            component: Arc::new(Mutex::new(component)),
+            channel_handles: config.channel_handles,
             paused_queue: PausedEventQueue::new(),
             io_bridge: IOBridge::new(io_port),
             principal,
+            source_id: ComponentId::builtin("io_bridge"),
         };
 
         let handle = ChannelHandle::new(id, event_tx);
@@ -210,10 +154,12 @@ impl ClientRunner {
         self.id
     }
 
-    /// Returns a reference to the bound Component.
+    /// Returns the event sender for this channel.
+    ///
+    /// This can be used to inject Output events into this runner for display.
     #[must_use]
-    pub fn component(&self) -> &Arc<Mutex<Box<dyn Component>>> {
-        &self.component
+    pub fn event_tx(&self) -> &mpsc::Sender<Event> {
+        &self.event_tx
     }
 
     /// Returns a reference to the IO bridge.
@@ -315,7 +261,7 @@ impl ClientRunner {
     /// | Command | Action |
     /// |---------|--------|
     /// | Quit | Abort channel |
-    /// | Unknown | Forward to Component as user message |
+    /// | Unknown | Broadcast as UserInput event to all channels |
     /// | Empty | Ignore |
     async fn handle_io_command(&mut self, cmd: InputCommand) -> bool {
         match cmd {
@@ -325,8 +271,8 @@ impl ClientRunner {
                 false
             }
             InputCommand::Unknown { input } => {
-                // Forward user message to Component as Echo request
-                self.handle_user_message(&input).await;
+                // Broadcast user message as UserInput event
+                self.handle_user_message(&input);
                 true
             }
             InputCommand::Empty => {
@@ -337,35 +283,46 @@ impl ClientRunner {
         }
     }
 
-    /// Handles user message input by forwarding to Component.
+    /// Handles user message input by broadcasting to all channels.
     ///
-    /// Creates a UserInput Event and delivers to Component via on_request().
-    /// Components that subscribe to `UserInput` category will receive this event.
-    async fn handle_user_message(&self, message: &str) {
+    /// Creates a UserInput Event and broadcasts to all registered channels
+    /// via the shared channel handles. Components that subscribe to
+    /// `UserInput` category will receive this event.
+    fn handle_user_message(&self, message: &str) {
         debug!("ClientRunner {}: user message: {}", self.id, message);
 
-        // Get component ID for event source
-        let source_id = {
-            let comp = self.component.lock().await;
-            comp.id().clone()
-        };
-
-        // Create UserInput event for Component
+        // Create UserInput event
         let event = Event {
             category: EventCategory::UserInput,
             operation: "input".to_string(),
-            source: source_id,
+            source: self.source_id.clone(),
             payload: serde_json::json!({
                 "message": message
             }),
         };
 
-        self.process_event(event).await;
+        // Broadcast to all channels
+        let handles = self.channel_handles.read().expect("lock poisoned");
+        let mut delivered = 0;
+        for (channel_id, handle) in handles.iter() {
+            // Skip self to avoid echo
+            if *channel_id == self.id {
+                continue;
+            }
+            if handle.try_inject(event.clone()).is_ok() {
+                delivered += 1;
+            }
+        }
+        debug!(
+            "ClientRunner {}: broadcast UserInput to {} channels",
+            self.id, delivered
+        );
     }
 
     /// Handles an incoming signal.
     ///
     /// Includes IO feedback for approval-related signals.
+    /// Note: This runner has no component, so signal handling is simplified.
     async fn handle_signal(&mut self, signal: Signal) -> bool {
         debug!(
             "ClientRunner {}: received signal {:?}",
@@ -375,17 +332,6 @@ impl ClientRunner {
         // Check if signal affects this channel
         if !signal.affects_channel(self.id) {
             return true;
-        }
-
-        // Dispatch to component first
-        let component_action = dispatch_signal_to_component(&signal, &self.component).await;
-        if let SignalAction::Stop { reason } = component_action {
-            info!(
-                "ClientRunner {}: component requested stop: {}",
-                self.id, reason
-            );
-            send_abort(&self.world_tx, self.id, &reason).await;
-            return false;
         }
 
         // Determine channel-level action with IO feedback
@@ -444,7 +390,10 @@ impl ClientRunner {
         true
     }
 
-    /// Processes a single event by delivering it to the Component.
+    /// Processes a single event.
+    ///
+    /// ClientRunner only handles Output events (for display).
+    /// Other events are ignored as this runner has no component.
     async fn process_event(&self, event: Event) {
         // Handle Output category: send to IOBridge for display
         if event.category == EventCategory::Output {
@@ -452,89 +401,11 @@ impl ClientRunner {
             return;
         }
 
-        // Clone values needed after spawn_blocking
-        let operation = event.operation.clone();
-        let payload = event.payload.clone();
-
-        let request = Request::new(
-            event.category,
-            &event.operation,
-            event.source,
-            self.id,
-            event.payload,
+        // Ignore other events - this runner has no component
+        debug!(
+            "ClientRunner {}: ignoring non-Output event {:?}",
+            self.id, event.category
         );
-
-        // Execute on_request in spawn_blocking to avoid blocking the async runtime.
-        // This is necessary because Component::on_request is a sync method that may
-        // perform blocking I/O (e.g., LuaComponent calling external CLIs).
-        let component = self.component.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut comp = component.blocking_lock();
-            comp.on_request(&request)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(ComponentError::ExecutionFailed(format!(
-                "task panicked: {}",
-                e
-            )))
-        });
-
-        self.handle_component_result(result, &operation, &payload)
-            .await;
-    }
-
-    /// Handles the result from Component::on_request.
-    ///
-    /// Routes the response to the appropriate IOBridge method based on content.
-    async fn handle_component_result(
-        &self,
-        result: Result<Value, ComponentError>,
-        operation: &str,
-        payload: &Value,
-    ) {
-        match result {
-            Ok(response) => {
-                debug!(
-                    "ClientRunner {}: Component returned success: {:?}",
-                    self.id, response
-                );
-                self.display_component_response(&response, operation, payload)
-                    .await;
-            }
-            Err(e) => {
-                warn!("ClientRunner {}: Component returned error: {}", self.id, e);
-                let _ = self.io_bridge.error(&e.to_string()).await;
-            }
-        }
-    }
-
-    /// Displays a component response via IOBridge.
-    ///
-    /// Uses [`ComponentResponse`] to categorize and route the response.
-    async fn display_component_response(&self, response: &Value, operation: &str, payload: &Value) {
-        match ComponentResponse::from_json(response) {
-            ComponentResponse::PendingApproval {
-                approval_id,
-                description,
-            } => {
-                let _ = self
-                    .io_bridge
-                    .show_approval_request(&crate::components::ApprovalRequest::with_id(
-                        approval_id,
-                        operation,
-                        description,
-                        payload.clone(),
-                    ))
-                    .await;
-            }
-            ComponentResponse::TextResponse(text) => {
-                let _ = self.io_bridge.info(text).await;
-            }
-            ComponentResponse::Empty => {
-                // No displayable content - intentionally silent
-            }
-        }
     }
 
     /// Handles Output category events by sending to IOBridge.
@@ -581,55 +452,9 @@ mod tests {
     use crate::channel::config::ChannelConfig;
     use crate::channel::manager::WorldManager;
     use crate::io::IOPort;
-    use orcs_component::{ComponentError, Status};
-    use orcs_event::SignalResponse;
-    use orcs_types::{ComponentId, PrincipalId};
-    use serde_json::Value;
-
-    struct MockComponent {
-        id: ComponentId,
-        status: Status,
-    }
-
-    impl MockComponent {
-        fn new(name: &str) -> Self {
-            Self {
-                id: ComponentId::builtin(name),
-                status: Status::Idle,
-            }
-        }
-    }
-
-    impl Component for MockComponent {
-        fn id(&self) -> &ComponentId {
-            &self.id
-        }
-
-        fn status(&self) -> Status {
-            self.status
-        }
-
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
-            Ok(request.payload.clone())
-        }
-
-        fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
-                self.status = Status::Aborted;
-                SignalResponse::Abort
-            } else {
-                SignalResponse::Handled
-            }
-        }
-
-        fn abort(&mut self) {
-            self.status = Status::Aborted;
-        }
-    }
-
-    fn mock_component() -> Box<dyn Component> {
-        Box::new(MockComponent::new("test"))
-    }
+    use orcs_types::PrincipalId;
+    use std::collections::HashMap;
+    use std::sync::RwLock as StdRwLock;
 
     fn test_principal() -> Principal {
         Principal::User(PrincipalId::new())
@@ -668,11 +493,12 @@ mod tests {
         world: Arc<RwLock<World>>,
         signal_tx: &broadcast::Sender<Signal>,
     ) -> ClientRunnerConfig {
+        let channel_handles: SharedChannelHandles = Arc::new(StdRwLock::new(HashMap::new()));
         ClientRunnerConfig {
             world_tx,
             world,
             signal_rx: signal_tx.subscribe(),
-            signal_tx: signal_tx.clone(),
+            channel_handles,
         }
     }
 
@@ -682,8 +508,7 @@ mod tests {
 
         let (port, _input, _output) = IOPort::with_defaults(primary);
         let config = make_config(world_tx.clone(), world, &signal_tx);
-        let (runner, handle) =
-            ClientRunner::new(primary, config, mock_component(), port, test_principal());
+        let (runner, handle) = ClientRunner::new(primary, config, port, test_principal());
 
         assert_eq!(runner.id(), primary);
         assert_eq!(handle.id, primary);
@@ -699,8 +524,7 @@ mod tests {
 
         let (port, input_handle, _output_handle) = IOPort::with_defaults(primary);
         let config = make_config(world_tx.clone(), world, &signal_tx);
-        let (runner, _handle) =
-            ClientRunner::new(primary, config, mock_component(), port, test_principal());
+        let (runner, _handle) = ClientRunner::new(primary, config, port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
@@ -723,8 +547,7 @@ mod tests {
 
         let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
         let config = make_config(world_tx.clone(), world, &signal_tx);
-        let (runner, _handle) =
-            ClientRunner::new(primary, config, mock_component(), port, test_principal());
+        let (runner, _handle) = ClientRunner::new(primary, config, port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
@@ -760,8 +583,7 @@ mod tests {
 
         let (port, _input, _output) = IOPort::with_defaults(primary);
         let config = make_config(world_tx.clone(), world, &signal_tx);
-        let (runner, _handle) =
-            ClientRunner::new(primary, config, mock_component(), port, test_principal());
+        let (runner, _handle) = ClientRunner::new(primary, config, port, test_principal());
 
         let runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
@@ -776,284 +598,8 @@ mod tests {
         teardown(manager_task, world_tx).await;
     }
 
-    // --- ComponentResponse tests ---
-
-    mod component_response_tests {
-        use super::*;
-        use serde_json::json;
-
-        #[test]
-        fn from_json_pending_approval() {
-            let json = json!({
-                "status": "pending_approval",
-                "approval_id": "req-123",
-                "message": "Confirm action?"
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(
-                response,
-                ComponentResponse::PendingApproval {
-                    approval_id: "req-123",
-                    description: "Confirm action?"
-                }
-            );
-        }
-
-        #[test]
-        fn from_json_pending_approval_default_message() {
-            let json = json!({
-                "status": "pending_approval",
-                "approval_id": "req-456"
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(
-                response,
-                ComponentResponse::PendingApproval {
-                    approval_id: "req-456",
-                    description: "Awaiting approval"
-                }
-            );
-        }
-
-        #[test]
-        fn from_json_pending_approval_missing_id_returns_empty() {
-            let json = json!({
-                "status": "pending_approval"
-                // Missing approval_id
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::Empty);
-        }
-
-        #[test]
-        fn from_json_direct_response() {
-            let json = json!({
-                "response": "Hello, world!"
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::TextResponse("Hello, world!"));
-        }
-
-        #[test]
-        fn from_json_nested_data_response() {
-            let json = json!({
-                "data": {
-                    "response": "Nested response",
-                    "source": "test"
-                }
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::TextResponse("Nested response"));
-        }
-
-        #[test]
-        fn from_json_empty_object() {
-            let json = json!({});
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::Empty);
-        }
-
-        #[test]
-        fn from_json_unrelated_fields() {
-            let json = json!({
-                "status": "completed",
-                "result": 42
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::Empty);
-        }
-
-        #[test]
-        fn from_json_priority_pending_over_response() {
-            // pending_approval should take priority over response field
-            let json = json!({
-                "status": "pending_approval",
-                "approval_id": "req-789",
-                "response": "This should be ignored"
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(
-                response,
-                ComponentResponse::PendingApproval {
-                    approval_id: "req-789",
-                    description: "Awaiting approval"
-                }
-            );
-        }
-
-        #[test]
-        fn from_json_response_priority_over_nested() {
-            // Direct response should take priority over nested data.response
-            let json = json!({
-                "response": "Direct",
-                "data": {
-                    "response": "Nested"
-                }
-            });
-
-            let response = ComponentResponse::from_json(&json);
-
-            assert_eq!(response, ComponentResponse::TextResponse("Direct"));
-        }
-    }
-
-    // --- spawn_blocking integration tests ---
-
-    /// Mock component that returns a specific response format.
-    struct ResponseMockComponent {
-        id: ComponentId,
-        status: Status,
-        response: Value,
-    }
-
-    impl ResponseMockComponent {
-        fn with_response(response: Value) -> Self {
-            Self {
-                id: ComponentId::builtin("response_mock"),
-                status: Status::Idle,
-                response,
-            }
-        }
-    }
-
-    impl Component for ResponseMockComponent {
-        fn id(&self) -> &ComponentId {
-            &self.id
-        }
-
-        fn status(&self) -> Status {
-            self.status
-        }
-
-        fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
-            Ok(self.response.clone())
-        }
-
-        fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
-                self.status = Status::Aborted;
-                SignalResponse::Abort
-            } else {
-                SignalResponse::Handled
-            }
-        }
-
-        fn abort(&mut self) {
-            self.status = Status::Aborted;
-        }
-    }
-
-    #[tokio::test]
-    async fn client_runner_displays_text_response() {
-        use crate::io::{IOInput, IOOutput, OutputStyle};
-        use serde_json::json;
-
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
-        let config = make_config(world_tx.clone(), world, &signal_tx);
-
-        // Component that returns a text response
-        let component = Box::new(ResponseMockComponent::with_response(json!({
-            "response": "Test response from component"
-        })));
-
-        let (runner, _handle) =
-            ClientRunner::new(primary, config, component, port, test_principal());
-
-        let runner_task = tokio::spawn(runner.run());
-        tokio::task::yield_now().await;
-
-        // Send user message to trigger component
-        input_handle
-            .send(IOInput::line("test message"))
-            .await
-            .unwrap();
-
-        // Wait for response
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Check output was received
-        let mut found_response = false;
-        while let Some(output) = output_handle.try_recv() {
-            if let IOOutput::Print { text, style } = output {
-                if style == OutputStyle::Info && text.contains("Test response from component") {
-                    found_response = true;
-                    break;
-                }
-            }
-        }
-        assert!(found_response, "Expected text response to be displayed");
-
-        // Cleanup
-        signal_tx.send(Signal::veto(Principal::System)).unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
-
-        teardown(manager_task, world_tx).await;
-    }
-
-    #[tokio::test]
-    async fn client_runner_displays_nested_response() {
-        use crate::io::{IOInput, IOOutput, OutputStyle};
-        use serde_json::json;
-
-        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
-
-        let (port, input_handle, mut output_handle) = IOPort::with_defaults(primary);
-        let config = make_config(world_tx.clone(), world, &signal_tx);
-
-        // Component that returns nested data.response format (like claude_cli)
-        let component = Box::new(ResponseMockComponent::with_response(json!({
-            "data": {
-                "response": "Nested CLI response",
-                "source": "claude_cli"
-            }
-        })));
-
-        let (runner, _handle) =
-            ClientRunner::new(primary, config, component, port, test_principal());
-
-        let runner_task = tokio::spawn(runner.run());
-        tokio::task::yield_now().await;
-
-        // Send user message
-        input_handle.send(IOInput::line("hello")).await.unwrap();
-
-        // Wait for response
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Check output
-        let mut found_response = false;
-        while let Some(output) = output_handle.try_recv() {
-            if let IOOutput::Print { text, style } = output {
-                if style == OutputStyle::Info && text.contains("Nested CLI response") {
-                    found_response = true;
-                    break;
-                }
-            }
-        }
-        assert!(found_response, "Expected nested response to be displayed");
-
-        // Cleanup
-        signal_tx.send(Signal::veto(Principal::System)).unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
-
-        teardown(manager_task, world_tx).await;
-    }
+    // NOTE: ClientRunner no longer owns a Component.
+    // UserInput is broadcast to all channels, and Output events are received
+    // from other channels for display. Component-specific tests have been
+    // moved to ChannelRunner tests.
 }
