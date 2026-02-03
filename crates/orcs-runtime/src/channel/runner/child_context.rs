@@ -4,22 +4,24 @@
 //! to enable them to interact with the system safely.
 
 use super::child_spawner::ChildSpawner;
-use super::Event;
+use super::{ChannelRunner, Event};
+use crate::channel::{World, WorldCommand};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
-    ChildResult, RunError, SpawnError,
+    ChildResult, Component, ComponentLoader, RunError, SpawnError,
 };
-use orcs_event::EventCategory;
-use orcs_types::ComponentId;
+use orcs_event::{EventCategory, Signal};
+use orcs_types::{ChannelId, ComponentId};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 /// Implementation of ChildContext for the Runner.
 ///
 /// This is injected into Children to provide safe access to:
 /// - Output emission (to parent/IO)
-/// - Child spawning
+/// - Child spawning (in-process)
+/// - Runner spawning (as separate ChannelRunner)
 /// - Status queries
 #[derive(Clone)]
 pub struct ChildContextImpl {
@@ -31,6 +33,16 @@ pub struct ChildContextImpl {
     spawner: Arc<Mutex<ChildSpawner>>,
     /// Lua loader for creating children from scripts.
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
+    /// Component loader for creating components from scripts.
+    component_loader: Option<Arc<dyn ComponentLoader>>,
+
+    // -- Runner spawning support --
+    /// World command sender for creating channels.
+    world_tx: Option<mpsc::Sender<WorldCommand>>,
+    /// World read access.
+    world: Option<Arc<RwLock<World>>>,
+    /// Signal sender for subscribing new runners.
+    signal_tx: Option<broadcast::Sender<Signal>>,
 }
 
 /// Trait for loading Lua children from config.
@@ -64,6 +76,10 @@ impl ChildContextImpl {
             output_tx,
             spawner,
             lua_loader: None,
+            component_loader: None,
+            world_tx: None,
+            world: None,
+            signal_tx: None,
         }
     }
 
@@ -72,6 +88,94 @@ impl ChildContextImpl {
     pub fn with_lua_loader(mut self, loader: Arc<dyn LuaChildLoader>) -> Self {
         self.lua_loader = Some(loader);
         self
+    }
+
+    /// Sets the component loader for runner spawning.
+    #[must_use]
+    pub fn with_component_loader(mut self, loader: Arc<dyn ComponentLoader>) -> Self {
+        self.component_loader = Some(loader);
+        self
+    }
+
+    /// Enables runner spawning by providing world/signal access.
+    #[must_use]
+    pub fn with_runner_support(
+        mut self,
+        world_tx: mpsc::Sender<WorldCommand>,
+        world: Arc<RwLock<World>>,
+        signal_tx: broadcast::Sender<Signal>,
+    ) -> Self {
+        self.world_tx = Some(world_tx);
+        self.world = Some(world);
+        self.signal_tx = Some(signal_tx);
+        self
+    }
+
+    /// Returns true if runner spawning is enabled.
+    #[must_use]
+    pub fn can_spawn_runner(&self) -> bool {
+        self.world_tx.is_some() && self.world.is_some() && self.signal_tx.is_some()
+    }
+
+    /// Spawns a Component as a separate ChannelRunner.
+    ///
+    /// This creates a new Channel in the World and spawns a ChannelRunner
+    /// to execute the Component in parallel.
+    ///
+    /// # Arguments
+    ///
+    /// * `component` - The Component to run
+    ///
+    /// # Returns
+    ///
+    /// The ChannelId of the spawned runner.
+    pub fn spawn_runner(&self, component: Box<dyn Component>) -> Result<ChannelId, SpawnError> {
+        let world_tx = self.world_tx.as_ref().ok_or_else(|| {
+            SpawnError::Internal("runner spawning not enabled (no world_tx)".into())
+        })?;
+        let world = self
+            .world
+            .as_ref()
+            .ok_or_else(|| SpawnError::Internal("runner spawning not enabled (no world)".into()))?;
+        let signal_tx = self.signal_tx.as_ref().ok_or_else(|| {
+            SpawnError::Internal("runner spawning not enabled (no signal_tx)".into())
+        })?;
+
+        // Create a new channel ID
+        let channel_id = ChannelId::new();
+        let component_id = component.id().clone();
+
+        // Clone what we need for the spawned task
+        let world_tx_clone = world_tx.clone();
+        let world_clone = Arc::clone(world);
+        let signal_rx = signal_tx.subscribe();
+        let signal_tx_clone = signal_tx.clone();
+        let output_tx = self.output_tx.clone();
+
+        // Spawn the runner in a new task
+        tokio::spawn(async move {
+            // Build and run the ChannelRunner
+            let (runner, _handle) = ChannelRunner::builder(
+                channel_id,
+                world_tx_clone,
+                world_clone,
+                signal_rx,
+                component,
+            )
+            .with_emitter(signal_tx_clone)
+            .with_output_channel(output_tx)
+            .build();
+
+            tracing::info!(
+                "Spawned child runner: channel={}, component={}",
+                channel_id,
+                component_id.fqn()
+            );
+
+            runner.run().await;
+        });
+
+        Ok(channel_id)
     }
 
     /// Creates an output event.
@@ -94,6 +198,7 @@ impl Debug for ChildContextImpl {
         f.debug_struct("ChildContextImpl")
             .field("parent_id", &self.parent_id)
             .field("has_lua_loader", &self.lua_loader.is_some())
+            .field("can_spawn_runner", &self.can_spawn_runner())
             .finish()
     }
 }
@@ -151,6 +256,24 @@ impl ChildContext for ChildContextImpl {
             .map_err(|e| RunError::ExecutionFailed(format!("spawner lock failed: {}", e)))?;
 
         spawner.run_child(child_id, input)
+    }
+
+    fn spawn_runner_from_script(
+        &self,
+        script: &str,
+        id: Option<&str>,
+    ) -> Result<ChannelId, SpawnError> {
+        // Get component loader
+        let loader = self
+            .component_loader
+            .as_ref()
+            .ok_or_else(|| SpawnError::Internal("no component loader configured".into()))?;
+
+        // Create component from script
+        let component = loader.load_from_script(script, id)?;
+
+        // Spawn as runner
+        self.spawn_runner(component)
     }
 
     fn clone_box(&self) -> Box<dyn ChildContext> {

@@ -41,6 +41,7 @@
 
 use crate::ChildResult;
 use async_trait::async_trait;
+use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -88,6 +89,28 @@ pub enum RunError {
     /// Child was aborted.
     #[error("child aborted")]
     Aborted,
+}
+
+/// Loader for creating Components from scripts.
+///
+/// This trait allows runtime implementations to create Components
+/// without depending on specific implementations (e.g., LuaComponent).
+pub trait ComponentLoader: Send + Sync {
+    /// Creates a Component from inline script content.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - Inline script content
+    /// * `id` - Optional component ID (extracted from script if None)
+    ///
+    /// # Returns
+    ///
+    /// A boxed Component, or an error if loading failed.
+    fn load_from_script(
+        &self,
+        script: &str,
+        id: Option<&str>,
+    ) -> Result<Box<dyn crate::Component>, SpawnError>;
 }
 
 /// Configuration for spawning a child.
@@ -351,6 +374,35 @@ pub trait ChildContext: Send + Sync + Debug {
         child_id: &str,
         input: serde_json::Value,
     ) -> Result<ChildResult, RunError>;
+
+    /// Spawns a Component as a separate ChannelRunner from a script.
+    ///
+    /// This creates a new Channel in the World and spawns a ChannelRunner
+    /// to execute the Component in parallel. The Component is created
+    /// from the provided script content.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - Inline script content (e.g., Lua component script)
+    /// * `id` - Optional component ID (extracted from script if None)
+    ///
+    /// # Returns
+    ///
+    /// The ChannelId of the spawned runner, or an error if spawning failed.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `SpawnError::Internal` indicating runner spawning is not supported.
+    /// Implementations that support runner spawning should override this.
+    fn spawn_runner_from_script(
+        &self,
+        _script: &str,
+        _id: Option<&str>,
+    ) -> Result<ChannelId, SpawnError> {
+        Err(SpawnError::Internal(
+            "runner spawning not supported by this context".into(),
+        ))
+    }
 
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;

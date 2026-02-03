@@ -42,7 +42,7 @@ use super::EventEmitter;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
-use orcs_component::{AsyncChildContext, ChildContext, Component};
+use orcs_component::{AsyncChildContext, ChildContext, Component, ComponentLoader};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
@@ -501,6 +501,8 @@ pub struct ChannelRunnerBuilder {
     enable_child_spawner: bool,
     /// Lua child loader for spawning Lua children.
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
+    /// Component loader for spawning components as runners.
+    component_loader: Option<Arc<dyn ComponentLoader>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -523,6 +525,7 @@ impl ChannelRunnerBuilder {
             output_tx: None,
             enable_child_spawner: false,
             lua_loader: None,
+            component_loader: None,
         }
     }
 
@@ -563,6 +566,19 @@ impl ChannelRunnerBuilder {
     pub fn with_child_spawner(mut self, loader: Option<Arc<dyn LuaChildLoader>>) -> Self {
         self.enable_child_spawner = true;
         self.lua_loader = loader;
+        self
+    }
+
+    /// Sets the component loader for spawning components as runners.
+    ///
+    /// This enables the ChildContext::spawn_runner_from_script() functionality.
+    ///
+    /// # Arguments
+    ///
+    /// * `loader` - Component loader for creating components from scripts
+    #[must_use]
+    pub fn with_component_loader(mut self, loader: Arc<dyn ComponentLoader>) -> Self {
+        self.component_loader = Some(loader);
         self
     }
 
@@ -614,6 +630,28 @@ impl ChannelRunnerBuilder {
             } else {
                 info!(
                     "ChannelRunnerBuilder: created spawner (no Lua loader) for {}",
+                    component_id
+                );
+            }
+
+            // Enable runner spawning if signal emitter is available
+            if let Some(signal_tx) = &self.emitter_signal_tx {
+                ctx = ctx.with_runner_support(
+                    self.world_tx.clone(),
+                    Arc::clone(&self.world),
+                    signal_tx.clone(),
+                );
+                info!(
+                    "ChannelRunnerBuilder: enabled runner spawning for {}",
+                    component_id
+                );
+            }
+
+            // Add component loader for spawn_runner_from_script
+            if let Some(loader) = self.component_loader.take() {
+                ctx = ctx.with_component_loader(loader);
+                info!(
+                    "ChannelRunnerBuilder: enabled component loader for {}",
                     component_id
                 );
             }

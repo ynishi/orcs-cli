@@ -9,7 +9,8 @@ use crate::types::{
 };
 use mlua::{Function, Lua, RegistryKey, Table};
 use orcs_component::{
-    ChildConfig, ChildContext, Component, ComponentError, Emitter, EventCategory, Status,
+    ChildConfig, ChildContext, Component, ComponentError, ComponentLoader, Emitter, EventCategory,
+    SpawnError, Status,
 };
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
@@ -400,8 +401,41 @@ impl LuaComponent {
             })?;
         orcs_table.set("send_to_child", send_to_child_fn)?;
 
+        // orcs.spawn_runner(config) -> { ok, channel_id, error }
+        // config = { script = "...", id = "optional-id" }
+        // Spawns a Component as a separate ChannelRunner for parallel execution
+        let ctx_clone = Arc::clone(&ctx);
+        let spawn_runner_fn = lua.create_function(move |lua, config: Table| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Parse config - script is required
+            let script: String = config
+                .get("script")
+                .map_err(|_| mlua::Error::RuntimeError("config.script required".into()))?;
+
+            // ID is optional
+            let id: Option<String> = config.get("id").ok();
+
+            let result_table = lua.create_table()?;
+            match ctx_guard.spawn_runner_from_script(&script, id.as_deref()) {
+                Ok(channel_id) => {
+                    result_table.set("ok", true)?;
+                    result_table.set("channel_id", channel_id.to_string())?;
+                }
+                Err(e) => {
+                    result_table.set("ok", false)?;
+                    result_table.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result_table)
+        })?;
+        orcs_table.set("spawn_runner", spawn_runner_fn)?;
+
         tracing::debug!(
-            "Registered orcs.spawn_child, child_count, max_children, send_to_child functions"
+            "Registered orcs.spawn_child, child_count, max_children, send_to_child, spawn_runner functions"
         );
         Ok(())
     }
@@ -1116,5 +1150,33 @@ mod tests {
             // Should complete without error
             assert!(result.is_ok());
         }
+    }
+}
+
+/// ComponentLoader implementation for Lua components.
+///
+/// Allows creating LuaComponent instances from inline script content
+/// for use with ChildContext::spawn_runner_from_script().
+#[derive(Clone, Default)]
+pub struct LuaComponentLoader;
+
+impl LuaComponentLoader {
+    /// Creates a new LuaComponentLoader.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ComponentLoader for LuaComponentLoader {
+    fn load_from_script(
+        &self,
+        script: &str,
+        _id: Option<&str>,
+    ) -> Result<Box<dyn Component>, SpawnError> {
+        // Note: id parameter is ignored; LuaComponent extracts ID from script
+        LuaComponent::from_script(script)
+            .map(|c| Box::new(c) as Box<dyn Component>)
+            .map_err(|e| SpawnError::InvalidScript(e.to_string()))
     }
 }

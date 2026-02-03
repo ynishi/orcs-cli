@@ -85,7 +85,7 @@ pub mod testing;
 mod types;
 
 pub use child::LuaChild;
-pub use component::LuaComponent;
+pub use component::{LuaComponent, LuaComponentLoader};
 pub use error::LuaError;
 pub use loader::ScriptLoader;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};
