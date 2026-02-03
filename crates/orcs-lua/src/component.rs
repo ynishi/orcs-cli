@@ -604,6 +604,18 @@ impl Component for LuaComponent {
             }
         }
     }
+
+    fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        let ctx_arc = Arc::new(Mutex::new(ctx));
+        self.child_context = Some(Arc::clone(&ctx_arc));
+
+        // Register child context functions in Lua
+        if let Ok(lua) = self.lua.lock() {
+            if let Err(e) = Self::register_child_context_functions(&lua, ctx_arc) {
+                tracing::warn!("Failed to register child context functions: {}", e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

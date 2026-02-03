@@ -11,6 +11,7 @@ orcs-event = { workspace = true }
 orcs-component = { workspace = true }
 orcs-runtime = { workspace = true }
 orcs-lua = { workspace = true }
+mlua = { version = "0.10", features = ["lua54", "send"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

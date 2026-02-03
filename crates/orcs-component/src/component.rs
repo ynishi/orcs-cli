@@ -324,6 +324,17 @@ pub trait Component: Send + Sync {
         // Default: no-op
     }
 
+    /// Sets the child context for this component.
+    ///
+    /// Override this method if your component needs to spawn children.
+    ///
+    /// # Default
+    ///
+    /// No-op - component does not use child context.
+    fn set_child_context(&mut self, _ctx: Box<dyn crate::ChildContext>) {
+        // Default: no-op
+    }
+
     // === Snapshot Support ===
 
     /// Captures the component's current state as a snapshot.

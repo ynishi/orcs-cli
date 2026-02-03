@@ -35,8 +35,8 @@
 
 use super::eventbus::EventBus;
 use crate::channel::{
-    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, Event, World,
-    WorldCommand, WorldCommandSender, WorldManager,
+    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, Event,
+    LuaChildLoader, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
@@ -285,6 +285,79 @@ impl OrcsEngine {
             "Spawned runner with emitter for channel {} (component={})",
             channel_id,
             component_id.fqn()
+        );
+        handle
+    }
+
+    /// Spawn a ChannelRunner with all options (emitter, output routing, child spawner).
+    ///
+    /// This is the most flexible spawn method that supports:
+    /// - Event emission (signal broadcasting)
+    /// - Output routing to IO channel
+    /// - Child spawning via LuaChildLoader
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind
+    /// * `output_tx` - Optional channel for Output event routing
+    /// * `lua_loader` - Optional loader for spawning Lua children
+    ///
+    /// # Returns
+    ///
+    /// A handle for injecting Events into the Channel.
+    pub fn spawn_runner_full(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+        output_tx: Option<mpsc::Sender<Event>>,
+        lua_loader: Option<Arc<dyn LuaChildLoader>>,
+    ) -> ChannelHandle {
+        let signal_rx = self.signal_tx.subscribe();
+        let component_id = component.id().clone();
+
+        // Use builder with all options
+        let mut builder = ChannelRunner::builder(
+            channel_id,
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            signal_rx,
+            component,
+        )
+        .with_emitter(self.signal_tx.clone());
+
+        // Route Output events to IO channel if specified
+        if let Some(tx) = output_tx {
+            builder = builder.with_output_channel(tx);
+        }
+
+        // Enable child spawning if loader provided
+        let has_child_spawner = lua_loader.is_some();
+        if has_child_spawner {
+            builder = builder.with_child_spawner(lua_loader);
+        }
+
+        let (runner, handle) = builder.build();
+
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!(
+            "Spawned runner (full) for channel {} (component={}, child_spawner={})",
+            channel_id,
+            component_id.fqn(),
+            has_child_spawner
         );
         handle
     }

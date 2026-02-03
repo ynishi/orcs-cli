@@ -64,10 +64,12 @@
 //! ```
 
 use crate::{AppError, CliOverrides};
-use orcs_component::Component;
+use mlua::Lua;
+use orcs_component::{ChildConfig, Component, RunnableChild, SpawnError};
 use orcs_event::Signal;
-use orcs_lua::ScriptLoader;
+use orcs_lua::{LuaChild, ScriptLoader};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
+use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
     ChannelConfig, ConfigLoader, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle,
     IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
@@ -75,7 +77,31 @@ use orcs_runtime::{
 };
 use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// LuaChildLoader implementation for spawning Lua children.
+struct AppLuaChildLoader;
+
+impl LuaChildLoader for AppLuaChildLoader {
+    fn load(&self, config: &ChildConfig) -> Result<Box<dyn RunnableChild>, SpawnError> {
+        // Get script from config (prefer inline over path)
+        let script = config
+            .script_inline
+            .as_ref()
+            .ok_or_else(|| SpawnError::Internal("no script_inline in config".into()))?;
+
+        // Create new Lua instance for this child
+        let lua = Lua::new();
+        let lua_arc = Arc::new(Mutex::new(lua));
+
+        // Create LuaChild from script
+        let child = LuaChild::from_script(lua_arc, script)
+            .map_err(|e| SpawnError::Internal(format!("failed to load Lua child: {}", e)))?;
+
+        Ok(Box::new(child))
+    }
+}
 
 /// Pending approval state.
 ///
@@ -646,11 +672,12 @@ impl OrcsAppBuilder {
         let store = LocalFileStore::new(session_path)
             .map_err(|e| AppError::Config(format!("Failed to create session store: {e}")))?;
 
-        // Create World with IO channel and a channel for claude_cli
+        // Create World with IO channel and channels for components
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
         let claude_channel = world.create_channel(ChannelConfig::default());
         let subagent_channel = world.create_channel(ChannelConfig::default());
+        let agent_mgr_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -685,12 +712,29 @@ impl OrcsAppBuilder {
         let _subagent_handle = engine.spawn_runner_with_emitter(
             subagent_channel,
             Box::new(subagent_component),
-            Some(io_event_tx),
+            Some(io_event_tx.clone()),
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={}",
             subagent_channel,
             subagent_id.fqn()
+        );
+
+        // Spawn ChannelRunner for agent_mgr with child spawning enabled
+        let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr")
+            .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
+        let agent_mgr_id = agent_mgr_component.id().clone();
+        let lua_loader: Arc<dyn LuaChildLoader> = Arc::new(AppLuaChildLoader);
+        let _agent_mgr_handle = engine.spawn_runner_full(
+            agent_mgr_channel,
+            Box::new(agent_mgr_component),
+            Some(io_event_tx),
+            Some(lua_loader),
+        );
+        tracing::info!(
+            "ChannelRunner spawned: channel={}, component={} (child spawner enabled)",
+            agent_mgr_channel,
+            agent_mgr_id.fqn()
         );
 
         // Load or create session

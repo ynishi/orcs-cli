@@ -384,7 +384,7 @@ mod runner_integration {
 
         let (runner, handle) =
             ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
-                .with_child_spawner()
+                .with_child_spawner(None)
                 .build();
 
         assert_eq!(runner.id(), channel_id);
@@ -403,7 +403,7 @@ mod runner_integration {
 
         let (runner, _handle) =
             ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
-                .with_child_spawner()
+                .with_child_spawner(None)
                 .build();
 
         // Create context without loader
@@ -425,7 +425,7 @@ mod runner_integration {
 
         let (runner, _handle) =
             ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
-                .with_child_spawner()
+                .with_child_spawner(None)
                 .build();
 
         let create_count = Arc::new(AtomicUsize::new(0));
@@ -474,7 +474,7 @@ mod runner_integration {
         let (runner, handle) =
             ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
                 .with_emitter(signal_tx.clone())
-                .with_child_spawner()
+                .with_child_spawner(None)
                 .build();
 
         // Should have child spawner
@@ -496,7 +496,7 @@ mod runner_integration {
 
         let (runner, handle) =
             ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
-                .with_child_spawner()
+                .with_child_spawner(None)
                 .build();
 
         // Spawn children via spawner directly for testing

@@ -247,6 +247,14 @@ impl ChannelRunner {
     pub async fn run(mut self) {
         info!("ChannelRunner {} started", self.id);
 
+        // Initialize component
+        {
+            let mut comp = self.component.lock().await;
+            if let Err(e) = comp.init() {
+                warn!("ChannelRunner {}: component init failed: {}", self.id, e);
+            }
+        }
+
         loop {
             tokio::select! {
                 // Priority: signals first
@@ -491,6 +499,8 @@ pub struct ChannelRunnerBuilder {
     output_tx: Option<mpsc::Sender<Event>>,
     /// Enable child spawner.
     enable_child_spawner: bool,
+    /// Lua child loader for spawning Lua children.
+    lua_loader: Option<Arc<dyn LuaChildLoader>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -512,6 +522,7 @@ impl ChannelRunnerBuilder {
             emitter_signal_tx: None,
             output_tx: None,
             enable_child_spawner: false,
+            lua_loader: None,
         }
     }
 
@@ -544,9 +555,14 @@ impl ChannelRunnerBuilder {
     ///
     /// This allows the Component and its Children to spawn sub-children
     /// via ChildContext.
+    ///
+    /// # Arguments
+    ///
+    /// * `loader` - Optional Lua child loader for spawning Lua children
     #[must_use]
-    pub fn with_child_spawner(mut self) -> Self {
+    pub fn with_child_spawner(mut self, loader: Option<Arc<dyn LuaChildLoader>>) -> Self {
         self.enable_child_spawner = true;
+        self.lua_loader = loader;
         self
     }
 
@@ -584,7 +600,25 @@ impl ChannelRunnerBuilder {
             let spawner = ChildSpawner::new(&component_id, event_tx.clone());
             let spawner_arc = Arc::new(StdMutex::new(spawner));
 
-            info!("ChannelRunnerBuilder: created spawner for {}", component_id);
+            // Create ChildContext and inject into Component
+            let mut ctx =
+                ChildContextImpl::new(&component_id, event_tx.clone(), Arc::clone(&spawner_arc));
+
+            // Add Lua loader if provided
+            if let Some(loader) = self.lua_loader.take() {
+                ctx = ctx.with_lua_loader(loader);
+                info!(
+                    "ChannelRunnerBuilder: created spawner with Lua loader for {}",
+                    component_id
+                );
+            } else {
+                info!(
+                    "ChannelRunnerBuilder: created spawner (no Lua loader) for {}",
+                    component_id
+                );
+            }
+
+            self.component.set_child_context(Box::new(ctx));
 
             Some(spawner_arc)
         } else {
@@ -627,7 +661,7 @@ impl ChannelRunner {
     /// ```ignore
     /// let (runner, handle) = ChannelRunner::builder(id, world_tx, world, signal_rx, component)
     ///     .with_emitter(signal_tx)
-    ///     .with_child_spawner()
+    ///     .with_child_spawner(None)
     ///     .build();
     /// ```
     #[must_use]
@@ -1000,7 +1034,7 @@ mod tests {
             signal_rx,
             mock_component(),
         )
-        .with_child_spawner()
+        .with_child_spawner(None)
         .build();
 
         assert_eq!(runner.id(), primary);
@@ -1023,7 +1057,7 @@ mod tests {
             mock_component(),
         )
         .with_emitter(signal_tx.clone())
-        .with_child_spawner()
+        .with_child_spawner(None)
         .build();
 
         assert_eq!(runner.id(), primary);
@@ -1045,7 +1079,7 @@ mod tests {
             signal_rx,
             mock_component(),
         )
-        .with_child_spawner()
+        .with_child_spawner(None)
         .build();
 
         // Should be able to create child context when spawner is enabled

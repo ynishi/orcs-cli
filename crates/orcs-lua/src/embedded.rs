@@ -22,6 +22,11 @@ pub const ECHO_EMITTER: &str = include_str!("../scripts/echo_emitter.lua");
 /// Simple component that echoes user input with "Hello: {message}".
 pub const SUBAGENT: &str = include_str!("../scripts/subagent.lua");
 
+/// Built-in agent manager script.
+///
+/// Component that spawns and manages child agents.
+pub const AGENT_MGR: &str = include_str!("../scripts/agent_mgr.lua");
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
@@ -30,6 +35,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("claude_cli", CLAUDE_CLI);
     scripts.insert("echo_emitter", ECHO_EMITTER);
     scripts.insert("subagent", SUBAGENT);
+    scripts.insert("agent_mgr", AGENT_MGR);
     scripts
 }
 
@@ -41,6 +47,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "claude_cli" => Some(CLAUDE_CLI),
         "echo_emitter" => Some(ECHO_EMITTER),
         "subagent" => Some(SUBAGENT),
+        "agent_mgr" => Some(AGENT_MGR),
         _ => None,
     }
 }
@@ -48,7 +55,13 @@ pub fn get(name: &str) -> Option<&'static str> {
 /// Lists all available embedded script names.
 #[must_use]
 pub fn list() -> Vec<&'static str> {
-    vec!["echo", "claude_cli", "echo_emitter", "subagent"]
+    vec![
+        "echo",
+        "claude_cli",
+        "echo_emitter",
+        "subagent",
+        "agent_mgr",
+    ]
 }
 
 #[cfg(test)]
@@ -121,11 +134,31 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 4);
+        assert_eq!(scripts.len(), 5);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
         assert!(scripts.contains_key("subagent"));
+        assert!(scripts.contains_key("agent_mgr"));
+    }
+
+    #[test]
+    fn agent_mgr_script_embedded() {
+        assert!(AGENT_MGR.contains("id = \"agent_mgr\""));
+        assert!(AGENT_MGR.contains("on_request"));
+        assert!(AGENT_MGR.contains("spawn_child"));
+    }
+
+    #[test]
+    fn get_agent_mgr() {
+        let script = get("agent_mgr").expect("agent_mgr script should exist");
+        assert!(script.contains("agent_mgr"));
+    }
+
+    #[test]
+    fn list_contains_agent_mgr() {
+        let names = list();
+        assert!(names.contains(&"agent_mgr"));
     }
 
     #[test]
