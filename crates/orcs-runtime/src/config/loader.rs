@@ -177,6 +177,7 @@ impl ConfigLoader {
         parse_env_bool!(config, config.hil.auto_approve, "ORCS_AUTO_APPROVE");
         parse_env_bool!(config, config.ui.verbose, "ORCS_VERBOSE");
         parse_env_bool!(config, config.ui.color, "ORCS_COLOR");
+        parse_env_bool!(config, config.scripts.auto_load, "ORCS_SCRIPTS_AUTO_LOAD");
 
         // String environment variables
         if let Ok(val) = std::env::var("ORCS_MODEL") {

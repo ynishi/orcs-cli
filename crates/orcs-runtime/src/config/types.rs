@@ -39,6 +39,9 @@ pub struct OrcsConfig {
 
     /// UI configuration.
     pub ui: UiConfig,
+
+    /// Script configuration.
+    pub scripts: ScriptsConfig,
 }
 
 impl OrcsConfig {
@@ -82,6 +85,7 @@ impl OrcsConfig {
         self.hil.merge(&other.hil);
         self.paths.merge(&other.paths);
         self.ui.merge(&other.ui);
+        self.scripts.merge(&other.scripts);
     }
 }
 
@@ -235,6 +239,70 @@ impl UiConfig {
     }
 }
 
+/// Script loading configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ScriptsConfig {
+    /// Script search directories (in priority order).
+    ///
+    /// Supports:
+    /// - Absolute paths: `/opt/orcs/scripts`
+    /// - Home expansion: `~/.orcs/scripts`
+    /// - Relative paths: `.orcs/scripts` (resolved against project root)
+    pub dirs: Vec<PathBuf>,
+
+    /// Auto-load all scripts from dirs on startup.
+    ///
+    /// When enabled, all `.lua` files in configured directories
+    /// are automatically loaded at application startup.
+    pub auto_load: bool,
+}
+
+impl ScriptsConfig {
+    /// Resolves configured directories with tilde expansion and project root.
+    ///
+    /// - Absolute paths are used as-is
+    /// - `~` is expanded to home directory
+    /// - Relative paths are resolved against project root (if provided)
+    /// - Non-existent directories are filtered out
+    #[must_use]
+    pub fn resolve_dirs(&self, project_root: Option<&std::path::Path>) -> Vec<PathBuf> {
+        self.dirs
+            .iter()
+            .filter_map(|p| {
+                let expanded = expand_tilde(p);
+                if expanded.is_absolute() {
+                    Some(expanded)
+                } else {
+                    project_root.map(|root| root.join(&expanded))
+                }
+            })
+            .filter(|p| p.exists())
+            .collect()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        // Append other's dirs (don't replace, accumulate)
+        if !other.dirs.is_empty() {
+            self.dirs.extend(other.dirs.iter().cloned());
+        }
+        // auto_load: true overrides false
+        if other.auto_load {
+            self.auto_load = true;
+        }
+    }
+}
+
+/// Expands `~` to home directory.
+fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +370,76 @@ default = "custom-model"
 
         // Should keep base value since overlay is default
         assert!(base.debug);
+    }
+
+    // === ScriptsConfig tests ===
+
+    #[test]
+    fn scripts_config_default() {
+        let config = ScriptsConfig::default();
+        assert!(config.dirs.is_empty());
+        assert!(!config.auto_load);
+    }
+
+    #[test]
+    fn scripts_config_toml_parse() {
+        let toml = r#"
+[scripts]
+dirs = ["~/.orcs/scripts", ".orcs/scripts"]
+auto_load = true
+"#;
+        let config = OrcsConfig::from_toml(toml).unwrap();
+        assert_eq!(config.scripts.dirs.len(), 2);
+        assert!(config.scripts.auto_load);
+    }
+
+    #[test]
+    fn scripts_config_merge_accumulates_dirs() {
+        let mut base = ScriptsConfig {
+            dirs: vec![PathBuf::from("/base/scripts")],
+            auto_load: false,
+        };
+        let overlay = ScriptsConfig {
+            dirs: vec![PathBuf::from("/overlay/scripts")],
+            auto_load: true,
+        };
+
+        base.merge(&overlay);
+
+        assert_eq!(base.dirs.len(), 2);
+        assert!(base.dirs.contains(&PathBuf::from("/base/scripts")));
+        assert!(base.dirs.contains(&PathBuf::from("/overlay/scripts")));
+        assert!(base.auto_load);
+    }
+
+    #[test]
+    fn expand_tilde_with_home() {
+        let path = PathBuf::from("~/.orcs/scripts");
+        let expanded = expand_tilde(&path);
+
+        // Should not start with ~
+        assert!(!expanded.starts_with("~"));
+
+        // Should end with .orcs/scripts
+        assert!(expanded.ends_with(".orcs/scripts"));
+    }
+
+    #[test]
+    fn expand_tilde_absolute_unchanged() {
+        let path = PathBuf::from("/absolute/path");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, path);
+    }
+
+    #[test]
+    fn resolve_dirs_filters_nonexistent() {
+        let config = ScriptsConfig {
+            dirs: vec![PathBuf::from("/nonexistent/path")],
+            auto_load: true,
+        };
+        let resolved = config.resolve_dirs(None);
+
+        // Nonexistent paths are filtered out
+        assert!(resolved.is_empty());
     }
 }

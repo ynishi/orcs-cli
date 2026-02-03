@@ -653,6 +653,55 @@ impl OrcsAppBuilder {
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
 
+        // Load user scripts from configured directories (auto_load)
+        if config.scripts.auto_load {
+            let script_dirs = config.scripts.resolve_dirs(self.project_root.as_deref());
+            if !script_dirs.is_empty() {
+                let script_loader = ScriptLoader::new()
+                    .with_paths(script_dirs)
+                    .without_embedded_fallback();
+                let result = script_loader.load_all();
+
+                // Capture counts before consuming
+                let loaded_count = result.loaded_count();
+                let warning_count = result.warning_count();
+
+                // Log warnings but continue
+                for warn in &result.warnings {
+                    tracing::warn!(
+                        path = %warn.path.display(),
+                        error = %warn.error,
+                        "Failed to load user script"
+                    );
+                }
+
+                // Spawn each loaded component on its own channel
+                for (name, component) in result.loaded {
+                    let world_ref = engine.world_read();
+                    let channel_id = {
+                        let mut w = world_ref.blocking_write();
+                        w.create_channel(ChannelConfig::default())
+                    };
+                    let component_id = component.id().clone();
+                    engine.spawn_runner_with_emitter(channel_id, Box::new(component));
+                    tracing::info!(
+                        name = %name,
+                        channel = %channel_id,
+                        component = %component_id.fqn(),
+                        "User script loaded"
+                    );
+                }
+
+                if loaded_count > 0 {
+                    tracing::info!(
+                        "Loaded {} user script(s), {} warning(s)",
+                        loaded_count,
+                        warning_count
+                    );
+                }
+            }
+        }
+
         // Create IO port for ClientRunner
         let (io_port, io_input, io_output) = IOPort::with_defaults(io);
         let principal = Principal::User(PrincipalId::new());
