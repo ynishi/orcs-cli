@@ -28,6 +28,8 @@ return {
         local result = orcs.exec(cmd)
 
         if result.ok then
+            -- Send response to ClientRunner via Output event
+            orcs.output(result.stdout)
             return {
                 success = true,
                 data = {
@@ -36,6 +38,8 @@ return {
                 }
             }
         else
+            -- Send error to ClientRunner via Output event
+            orcs.output("Claude CLI failed: " .. result.stderr, "error")
             return {
                 success = false,
                 error = "Claude CLI failed: " .. result.stderr,
