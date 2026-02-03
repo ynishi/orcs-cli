@@ -15,7 +15,6 @@ use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tokio::process::Command;
 
 /// A component implemented in Lua.
 ///
@@ -372,28 +371,20 @@ impl LuaComponent {
         let orcs_table = lua.create_table()?;
 
         // orcs.exec(cmd) -> {ok, stdout, stderr, code}
-        // Uses tokio::process::Command for non-blocking execution.
-        // When called from spawn_blocking context, uses Handle::current() to run async code.
+        // Uses synchronous std::process::Command.
+        // Note: Cannot use tokio async within Lua callbacks called from async context
+        // as block_on() panics when called from within a runtime.
         let exec_fn = lua.create_function(|lua, cmd: String| {
             tracing::debug!("Lua exec: {}", cmd);
 
-            // Try to get current tokio runtime handle for async execution.
-            // If running in spawn_blocking context, this will succeed.
-            let output = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    // We have a runtime handle - run async command
-                    handle.block_on(async { Command::new("sh").arg("-c").arg(&cmd).output().await })
-                }
-                Err(_) => {
-                    // No runtime available - fallback to sync execution
-                    tracing::warn!("No tokio runtime available, using sync execution");
-                    std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .output()
-                }
-            }
-            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+            // Always use synchronous execution.
+            // Lua callbacks are called from Component.on_request() which runs in async context.
+            // Using block_on() would panic with "Cannot start a runtime from within a runtime".
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
 
             let result = lua.create_table()?;
             result.set("ok", output.status.success())?;
