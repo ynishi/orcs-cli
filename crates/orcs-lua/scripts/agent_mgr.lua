@@ -3,18 +3,14 @@
 --
 -- Usage: Spawns a child agent on init and delegates UserInput to children.
 
--- Child agent script (embedded)
+-- Child worker script (embedded)
+-- Note: Workers use `run` function (not `on_request`) because they are Children, not Components.
 local child_script = [[
 return {
     id = "worker",
-    namespace = "child",
-    subscriptions = {},
 
-    on_request = function(request)
-        local message = request.payload
-        if type(message) == "table" then
-            message = message.message or ""
-        end
+    run = function(input)
+        local message = input.message or ""
         return {
             success = true,
             data = {
@@ -28,7 +24,7 @@ return {
         if signal.kind == "Veto" then
             return "Abort"
         end
-        return "Ignored"
+        return "Handled"
     end,
 }
 ]]
@@ -55,18 +51,32 @@ return {
         -- Check if worker is spawned
         local child_count = orcs.child_count()
         if child_count > 0 then
-            orcs.output("[AgentMgr] Delegating to " .. child_count .. " worker(s): " .. message)
+            -- Delegate to worker
+            local result = orcs.send_to_child("worker-1", { message = message })
+            if result.ok then
+                local response = result.result and result.result.response or "no response"
+                orcs.output("[AgentMgr] Worker response: " .. tostring(response))
+                return {
+                    success = true,
+                    data = {
+                        message = message,
+                        worker_response = response
+                    }
+                }
+            else
+                orcs.output("[AgentMgr] Worker error: " .. (result.error or "unknown"))
+                return { success = false, error = result.error }
+            end
         else
             orcs.output("[AgentMgr] No workers available, message: " .. message)
-        end
-
-        return {
-            success = true,
-            data = {
-                message = message,
-                workers = child_count
+            return {
+                success = true,
+                data = {
+                    message = message,
+                    workers = 0
+                }
             }
-        }
+        end
     end,
 
     on_signal = function(signal)

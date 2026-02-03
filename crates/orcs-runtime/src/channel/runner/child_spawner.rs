@@ -338,6 +338,34 @@ impl ChildSpawner {
     pub fn output_tx(&self) -> &mpsc::Sender<super::Event> {
         &self.output_tx
     }
+
+    /// Runs a child by ID with the given input.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The child ID
+    /// * `input` - Input data to pass to the child
+    ///
+    /// # Returns
+    ///
+    /// The child's result, or an error if:
+    /// - Child not found
+    /// - Child lock failed
+    pub fn run_child(
+        &self,
+        id: &str,
+        input: serde_json::Value,
+    ) -> Result<ChildResult, orcs_component::RunError> {
+        let managed = self.children.get(id).ok_or_else(|| {
+            orcs_component::RunError::ExecutionFailed(format!("child not found: {}", id))
+        })?;
+
+        let mut child = managed.child.lock().map_err(|e| {
+            orcs_component::RunError::ExecutionFailed(format!("child lock failed: {}", e))
+        })?;
+
+        Ok(child.run(input))
+    }
 }
 
 impl Debug for ChildSpawner {

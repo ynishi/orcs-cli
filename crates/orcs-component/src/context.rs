@@ -331,6 +331,27 @@ pub trait ChildContext: Send + Sync + Debug {
     /// Returns the maximum allowed children.
     fn max_children(&self) -> usize;
 
+    /// Sends input to a child by ID and returns its result.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - The child's ID
+    /// * `input` - Input data to pass to the child
+    ///
+    /// # Returns
+    ///
+    /// The child's result.
+    ///
+    /// # Errors
+    ///
+    /// - [`RunError::NotFound`] if child doesn't exist
+    /// - [`RunError::ExecutionFailed`] if child execution fails
+    fn send_to_child(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ChildResult, RunError>;
+
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;
 }
@@ -403,6 +424,18 @@ pub trait AsyncChildContext: Send + Sync + Debug {
 
     /// Returns the maximum allowed children.
     fn max_children(&self) -> usize;
+
+    /// Sends input to a child by ID and returns its result.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - The child's ID
+    /// * `input` - Input data to pass to the child
+    fn send_to_child(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ChildResult, RunError>;
 
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn AsyncChildContext>;

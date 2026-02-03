@@ -207,6 +207,16 @@ impl ChildContext for MockChildContext {
         self.max_children
     }
 
+    fn send_to_child(
+        &self,
+        _child_id: &str,
+        _input: serde_json::Value,
+    ) -> Result<orcs_component::ChildResult, orcs_component::RunError> {
+        Ok(orcs_component::ChildResult::Ok(
+            serde_json::json!({"mock": true}),
+        ))
+    }
+
     fn clone_box(&self) -> Box<dyn ChildContext> {
         Box::new(Self {
             parent_id: self.parent_id.clone(),

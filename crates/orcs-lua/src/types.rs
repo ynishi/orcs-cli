@@ -235,7 +235,7 @@ fn escape_lua_key(key: &str) -> String {
 /// # Security
 ///
 /// All string values are properly escaped to prevent Lua code injection.
-fn json_to_lua(value: &serde_json::Value) -> String {
+pub fn json_to_lua(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "nil".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
@@ -257,7 +257,7 @@ fn json_to_lua(value: &serde_json::Value) -> String {
 
 /// Convert Lua value to JSON.
 #[allow(clippy::only_used_in_recursion)]
-fn lua_to_json(value: Value, lua: &Lua) -> Result<serde_json::Value, mlua::Error> {
+pub fn lua_to_json(value: Value, lua: &Lua) -> Result<serde_json::Value, mlua::Error> {
     match value {
         Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),

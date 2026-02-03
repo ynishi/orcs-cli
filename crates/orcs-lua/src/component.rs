@@ -4,7 +4,8 @@
 
 use crate::error::LuaError;
 use crate::types::{
-    parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
+    json_to_lua, lua_to_json, parse_event_category, parse_signal_response, LuaRequest, LuaResponse,
+    LuaSignal,
 };
 use mlua::{Function, Lua, RegistryKey, Table};
 use orcs_component::{
@@ -356,7 +357,52 @@ impl LuaComponent {
         })?;
         orcs_table.set("max_children", max_children_fn)?;
 
-        tracing::debug!("Registered orcs.spawn_child, child_count, max_children functions");
+        // orcs.send_to_child(child_id, message) -> { ok, result, error }
+        let ctx_clone = Arc::clone(&ctx);
+        let send_to_child_fn =
+            lua.create_function(move |lua, (child_id, message): (String, mlua::Value)| {
+                let ctx_guard = ctx_clone.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("context lock failed: {}", e))
+                })?;
+
+                // Convert Lua value to JSON
+                let input = lua_to_json(message, lua)?;
+
+                let result_table = lua.create_table()?;
+                match ctx_guard.send_to_child(&child_id, input) {
+                    Ok(child_result) => {
+                        result_table.set("ok", true)?;
+                        // Convert ChildResult to Lua
+                        match child_result {
+                            orcs_component::ChildResult::Ok(data) => {
+                                // Convert JSON to Lua value via string eval
+                                let lua_code = format!("return {}", json_to_lua(&data));
+                                let lua_data: mlua::Value = lua.load(&lua_code).eval()?;
+                                result_table.set("result", lua_data)?;
+                            }
+                            orcs_component::ChildResult::Err(e) => {
+                                result_table.set("ok", false)?;
+                                result_table.set("error", e.to_string())?;
+                            }
+                            orcs_component::ChildResult::Aborted => {
+                                result_table.set("ok", false)?;
+                                result_table.set("error", "child aborted")?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        result_table.set("ok", false)?;
+                        result_table.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result_table)
+            })?;
+        orcs_table.set("send_to_child", send_to_child_fn)?;
+
+        tracing::debug!(
+            "Registered orcs.spawn_child, child_count, max_children, send_to_child functions"
+        );
         Ok(())
     }
 

@@ -7,7 +7,7 @@ use super::child_spawner::ChildSpawner;
 use super::Event;
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
-    SpawnError,
+    ChildResult, RunError, SpawnError,
 };
 use orcs_event::EventCategory;
 use orcs_types::ComponentId;
@@ -140,6 +140,19 @@ impl ChildContext for ChildContextImpl {
         self.spawner.lock().map(|s| s.max_children()).unwrap_or(0)
     }
 
+    fn send_to_child(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ChildResult, RunError> {
+        let spawner = self
+            .spawner
+            .lock()
+            .map_err(|e| RunError::ExecutionFailed(format!("spawner lock failed: {}", e)))?;
+
+        spawner.run_child(child_id, input)
+    }
+
     fn clone_box(&self) -> Box<dyn ChildContext> {
         Box::new(self.clone())
     }
@@ -193,6 +206,19 @@ impl AsyncChildContext for ChildContextImpl {
 
     fn max_children(&self) -> usize {
         self.spawner.lock().map(|s| s.max_children()).unwrap_or(0)
+    }
+
+    fn send_to_child(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ChildResult, RunError> {
+        let spawner = self
+            .spawner
+            .lock()
+            .map_err(|e| RunError::ExecutionFailed(format!("spawner lock failed: {}", e)))?;
+
+        spawner.run_child(child_id, input)
     }
 
     fn clone_box(&self) -> Box<dyn AsyncChildContext> {
