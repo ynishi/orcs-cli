@@ -382,15 +382,10 @@ mod runner_integration {
         let signal_rx = signal_tx.subscribe();
         let component = Box::new(SpawnerComponent::new("spawner-test"));
 
-        let (runner, handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_child_spawner()
-        .build();
+        let (runner, handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .with_child_spawner()
+                .build();
 
         assert_eq!(runner.id(), channel_id);
         assert!(runner.child_spawner().is_some());
@@ -406,15 +401,10 @@ mod runner_integration {
         let signal_rx = signal_tx.subscribe();
         let component = Box::new(SpawnerComponent::new("context-test"));
 
-        let (runner, _handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_child_spawner()
-        .build();
+        let (runner, _handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .with_child_spawner()
+                .build();
 
         // Create context without loader
         let ctx = runner.create_child_context("test-child");
@@ -433,15 +423,10 @@ mod runner_integration {
         let signal_rx = signal_tx.subscribe();
         let component = Box::new(SpawnerComponent::new("loader-test"));
 
-        let (runner, _handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_child_spawner()
-        .build();
+        let (runner, _handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .with_child_spawner()
+                .build();
 
         let create_count = Arc::new(AtomicUsize::new(0));
         let loader = Arc::new(TestLoader::with_counter(Arc::clone(&create_count)));
@@ -469,14 +454,9 @@ mod runner_integration {
         let component = Box::new(SpawnerComponent::new("no-spawner"));
 
         // Use builder without child spawner
-        let (runner, _handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .build();
+        let (runner, _handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .build();
 
         assert!(runner.child_spawner().is_none());
         assert!(runner.create_child_context("test").is_none());
@@ -491,16 +471,11 @@ mod runner_integration {
         let signal_rx = signal_tx.subscribe();
         let component = Box::new(SpawnerComponent::new("full-support"));
 
-        let (runner, handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_emitter(signal_tx.clone())
-        .with_child_spawner()
-        .build();
+        let (runner, handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .with_emitter(signal_tx.clone())
+                .with_child_spawner()
+                .build();
 
         // Should have child spawner
         assert!(runner.child_spawner().is_some());
@@ -519,15 +494,10 @@ mod runner_integration {
         let signal_rx = signal_tx.subscribe();
         let component = Box::new(SpawnerComponent::new("signal-test"));
 
-        let (runner, handle) = ChannelRunner::builder(
-            channel_id,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_child_spawner()
-        .build();
+        let (runner, handle) =
+            ChannelRunner::builder(channel_id, world_tx.clone(), world, signal_rx, component)
+                .with_child_spawner()
+                .build();
 
         // Spawn children via spawner directly for testing
         if let Some(spawner) = runner.child_spawner() {

@@ -413,10 +413,7 @@ impl ChannelRunner {
     /// Drains the paused queue and processes all queued events.
     async fn drain_paused_queue(&mut self) {
         // Collect events first to avoid borrow issues with async process_event
-        let events: Vec<_> = self
-            .paused_queue
-            .drain("ChannelRunner", self.id)
-            .collect();
+        let events: Vec<_> = self.paused_queue.drain("ChannelRunner", self.id).collect();
 
         for event in events {
             self.process_event(event).await;
@@ -558,10 +555,7 @@ impl ChannelRunnerBuilder {
             let spawner = ChildSpawner::new(&component_id, event_tx.clone());
             let spawner_arc = Arc::new(StdMutex::new(spawner));
 
-            info!(
-                "ChannelRunnerBuilder: created spawner for {}",
-                component_id
-            );
+            info!("ChannelRunnerBuilder: created spawner for {}", component_id);
 
             Some(spawner_arc)
         } else {
@@ -886,15 +880,10 @@ mod tests {
         let component = Box::new(EmittingComponent::new(StdArc::clone(&call_count)));
 
         let signal_rx = signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::builder(
-            primary,
-            world_tx.clone(),
-            world,
-            signal_rx,
-            component,
-        )
-        .with_emitter(signal_tx.clone())
-        .build();
+        let (runner, handle) =
+            ChannelRunner::builder(primary, world_tx.clone(), world, signal_rx, component)
+                .with_emitter(signal_tx.clone())
+                .build();
 
         let runner_task = tokio::spawn(runner.run());
 
