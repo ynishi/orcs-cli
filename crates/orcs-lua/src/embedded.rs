@@ -17,6 +17,11 @@ pub const CLAUDE_CLI: &str = include_str!("../scripts/claude_cli.lua");
 /// making it suitable for ChannelRunner-based execution.
 pub const ECHO_EMITTER: &str = include_str!("../scripts/echo_emitter.lua");
 
+/// Built-in subagent script.
+///
+/// Simple component that echoes user input with "Hello: {message}".
+pub const SUBAGENT: &str = include_str!("../scripts/subagent.lua");
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
@@ -24,6 +29,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("echo", ECHO);
     scripts.insert("claude_cli", CLAUDE_CLI);
     scripts.insert("echo_emitter", ECHO_EMITTER);
+    scripts.insert("subagent", SUBAGENT);
     scripts
 }
 
@@ -34,6 +40,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "echo" => Some(ECHO),
         "claude_cli" => Some(CLAUDE_CLI),
         "echo_emitter" => Some(ECHO_EMITTER),
+        "subagent" => Some(SUBAGENT),
         _ => None,
     }
 }
@@ -41,7 +48,7 @@ pub fn get(name: &str) -> Option<&'static str> {
 /// Lists all available embedded script names.
 #[must_use]
 pub fn list() -> Vec<&'static str> {
-    vec!["echo", "claude_cli", "echo_emitter"]
+    vec!["echo", "claude_cli", "echo_emitter", "subagent"]
 }
 
 #[cfg(test)]
@@ -114,9 +121,29 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 3);
+        assert_eq!(scripts.len(), 4);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
+        assert!(scripts.contains_key("subagent"));
+    }
+
+    #[test]
+    fn subagent_script_embedded() {
+        assert!(SUBAGENT.contains("id = \"subagent\""));
+        assert!(SUBAGENT.contains("on_request"));
+        assert!(SUBAGENT.contains("orcs.output"));
+    }
+
+    #[test]
+    fn get_subagent() {
+        let script = get("subagent").expect("subagent script should exist");
+        assert!(script.contains("subagent"));
+    }
+
+    #[test]
+    fn list_contains_subagent() {
+        let names = list();
+        assert!(names.contains(&"subagent"));
     }
 }

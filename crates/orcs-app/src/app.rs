@@ -650,6 +650,7 @@ impl OrcsAppBuilder {
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
         let claude_channel = world.create_channel(ChannelConfig::default());
+        let subagent_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -669,12 +670,27 @@ impl OrcsAppBuilder {
         let _claude_handle = engine.spawn_runner_with_emitter(
             claude_channel,
             Box::new(lua_component),
-            Some(io_event_tx),
+            Some(io_event_tx.clone()),
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={}",
             claude_channel,
             component_id.fqn()
+        );
+
+        // Spawn ChannelRunner for subagent with output routed to IO channel
+        let subagent_component = ScriptLoader::load_embedded("subagent")
+            .map_err(|e| AppError::Config(format!("Failed to load subagent script: {e}")))?;
+        let subagent_id = subagent_component.id().clone();
+        let _subagent_handle = engine.spawn_runner_with_emitter(
+            subagent_channel,
+            Box::new(subagent_component),
+            Some(io_event_tx),
+        );
+        tracing::info!(
+            "ChannelRunner spawned: channel={}, component={}",
+            subagent_channel,
+            subagent_id.fqn()
         );
 
         // Load or create session
