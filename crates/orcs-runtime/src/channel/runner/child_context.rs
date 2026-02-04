@@ -258,7 +258,23 @@ impl ChildContextImpl {
     /// # Returns
     ///
     /// The ChannelId of the spawned runner.
+    ///
+    /// # Errors
+    ///
+    /// - [`SpawnError::Internal`] if runner spawning is not enabled
+    /// - [`SpawnError::Internal`] if permission check fails (requires elevated session)
     pub fn spawn_runner(&self, component: Box<dyn Component>) -> Result<ChannelId, SpawnError> {
+        // Permission check: requires elevated session
+        if !self.can_spawn_runner_auth() {
+            tracing::warn!(
+                parent_id = %self.parent_id,
+                "spawn_runner denied: requires elevated privilege"
+            );
+            return Err(SpawnError::Internal(
+                "spawn_runner requires elevated privilege".into(),
+            ));
+        }
+
         let world_tx = self.world_tx.as_ref().ok_or_else(|| {
             SpawnError::Internal("runner spawning not enabled (no world_tx)".into())
         })?;
@@ -281,10 +297,14 @@ impl ChildContextImpl {
         let signal_tx_clone = signal_tx.clone();
         let output_tx = self.output_tx.clone();
 
+        // Clone auth context to propagate to child runner
+        let session_clone = self.session.clone();
+        let checker_clone = self.checker.clone();
+
         // Spawn the runner in a new task
         tokio::spawn(async move {
-            // Build and run the ChannelRunner
-            let (runner, _handle) = ChannelRunner::builder(
+            // Build the ChannelRunner with auth context propagation
+            let mut builder = ChannelRunner::builder(
                 channel_id,
                 world_tx_clone,
                 world_clone,
@@ -292,11 +312,20 @@ impl ChildContextImpl {
                 component,
             )
             .with_emitter(signal_tx_clone)
-            .with_output_channel(output_tx)
-            .build();
+            .with_output_channel(output_tx);
+
+            // Propagate auth context to child runner
+            if let Some(session) = session_clone {
+                builder = builder.with_session_arc(session);
+            }
+            if let Some(checker) = checker_clone {
+                builder = builder.with_checker(checker);
+            }
+
+            let (runner, _handle) = builder.build();
 
             tracing::info!(
-                "Spawned child runner: channel={}, component={}",
+                "Spawned child runner: channel={}, component={} (auth propagated)",
                 channel_id,
                 component_id.fqn()
             );

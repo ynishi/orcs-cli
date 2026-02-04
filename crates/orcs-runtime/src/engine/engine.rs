@@ -560,6 +560,86 @@ impl OrcsEngine {
         handle
     }
 
+    /// Spawn a ChannelRunner with all options including auth.
+    ///
+    /// This is the most complete spawn method that supports:
+    /// - Event emission (signal broadcasting)
+    /// - Output routing to IO channel
+    /// - Child spawning via LuaChildLoader
+    /// - Session-based permission checking
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind
+    /// * `output_tx` - Optional channel for Output event routing
+    /// * `lua_loader` - Optional loader for spawning Lua children
+    /// * `session` - Session for permission checking
+    /// * `checker` - Permission checker policy
+    ///
+    /// # Returns
+    ///
+    /// A handle for injecting Events into the Channel.
+    pub fn spawn_runner_full_auth(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+        output_tx: Option<mpsc::Sender<Event>>,
+        lua_loader: Option<Arc<dyn LuaChildLoader>>,
+        session: Arc<crate::Session>,
+        checker: Arc<dyn crate::auth::PermissionChecker>,
+    ) -> ChannelHandle {
+        let signal_rx = self.signal_tx.subscribe();
+        let component_id = component.id().clone();
+
+        // Use builder with all options including auth
+        let mut builder = ChannelRunner::builder(
+            channel_id,
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            signal_rx,
+            component,
+        )
+        .with_emitter(self.signal_tx.clone())
+        .with_session_arc(session)
+        .with_checker(checker);
+
+        // Route Output events to IO channel if specified
+        if let Some(tx) = output_tx {
+            builder = builder.with_output_channel(tx);
+        }
+
+        // Enable child spawning if loader provided
+        let has_child_spawner = lua_loader.is_some();
+        if has_child_spawner {
+            builder = builder.with_child_spawner(lua_loader);
+        }
+
+        let (runner, handle) = builder.build();
+
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!(
+            "Spawned runner (full+auth) for channel {} (component={}, child_spawner={})",
+            channel_id,
+            component_id.fqn(),
+            has_child_spawner
+        );
+        handle
+    }
+
     /// Returns the read-only World handle for parallel access.
     #[must_use]
     pub fn world_read(&self) -> &Arc<RwLock<World>> {

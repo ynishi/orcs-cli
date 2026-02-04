@@ -68,12 +68,13 @@ use mlua::Lua;
 use orcs_component::{ChildConfig, Component, RunnableChild, SpawnError};
 use orcs_event::Signal;
 use orcs_lua::{LuaChild, ScriptLoader};
+use orcs_runtime::auth::{DefaultPolicy, PermissionChecker};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
     ChannelConfig, ConfigLoader, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle,
-    IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
-    World,
+    IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session,
+    SessionAsset, World,
 };
 use orcs_types::{Principal, PrincipalId};
 use std::path::PathBuf;
@@ -690,17 +691,31 @@ impl OrcsAppBuilder {
         let (_io_handle, io_event_tx) = engine.spawn_client_runner(io, io_port, principal.clone());
         tracing::info!("ClientRunner spawned: channel={} (IO bridge)", io);
 
+        // Create shared auth context for all runners
+        // Session starts elevated for interactive use (user is present)
+        let auth_session: Arc<Session> =
+            Arc::new(Session::new(principal.clone()).elevate(std::time::Duration::from_secs(3600)));
+        let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
+        tracing::info!(
+            "Auth context created: principal={:?}, elevated={}",
+            auth_session.principal(),
+            auth_session.is_elevated()
+        );
+
         // Spawn ChannelRunner for claude_cli with output routed to IO channel
         let lua_component = ScriptLoader::load_embedded("claude_cli")
             .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {e}")))?;
         let component_id = lua_component.id().clone();
-        let _claude_handle = engine.spawn_runner_with_emitter(
+        let _claude_handle = engine.spawn_runner_full_auth(
             claude_channel,
             Box::new(lua_component),
             Some(io_event_tx.clone()),
+            None, // No child spawner for claude_cli
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
         );
         tracing::info!(
-            "ChannelRunner spawned: channel={}, component={}",
+            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
             claude_channel,
             component_id.fqn()
         );
@@ -709,13 +724,16 @@ impl OrcsAppBuilder {
         let subagent_component = ScriptLoader::load_embedded("subagent")
             .map_err(|e| AppError::Config(format!("Failed to load subagent script: {e}")))?;
         let subagent_id = subagent_component.id().clone();
-        let _subagent_handle = engine.spawn_runner_with_emitter(
+        let _subagent_handle = engine.spawn_runner_full_auth(
             subagent_channel,
             Box::new(subagent_component),
             Some(io_event_tx.clone()),
+            None, // No child spawner for subagent
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
         );
         tracing::info!(
-            "ChannelRunner spawned: channel={}, component={}",
+            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
             subagent_channel,
             subagent_id.fqn()
         );
@@ -725,14 +743,16 @@ impl OrcsAppBuilder {
             .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
         let agent_mgr_id = agent_mgr_component.id().clone();
         let lua_loader: Arc<dyn LuaChildLoader> = Arc::new(AppLuaChildLoader);
-        let _agent_mgr_handle = engine.spawn_runner_full(
+        let _agent_mgr_handle = engine.spawn_runner_full_auth(
             agent_mgr_channel,
             Box::new(agent_mgr_component),
             Some(io_event_tx),
             Some(lua_loader),
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
         );
         tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (child spawner enabled)",
+            "ChannelRunner spawned: channel={}, component={} (child spawner + auth enabled)",
             agent_mgr_channel,
             agent_mgr_id.fqn()
         );
