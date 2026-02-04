@@ -5,7 +5,7 @@
 
 use super::child_spawner::ChildSpawner;
 use super::{ChannelRunner, Event};
-use crate::auth::{PermissionChecker, Session};
+use crate::auth::{CommandCheckResult, PermissionChecker, Session};
 use crate::channel::{World, WorldCommand};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
@@ -38,8 +38,8 @@ pub struct ChildContextImpl {
     component_loader: Option<Arc<dyn ComponentLoader>>,
 
     // -- Auth support --
-    /// Session for permission checking.
-    session: Option<Session>,
+    /// Session for permission checking (Arc for shared grant state).
+    session: Option<Arc<Session>>,
     /// Permission checker policy.
     checker: Option<Arc<dyn PermissionChecker>>,
 
@@ -93,8 +93,19 @@ impl ChildContextImpl {
     }
 
     /// Sets the session for permission checking.
+    ///
+    /// Takes ownership of a Session and wraps it in Arc.
     #[must_use]
     pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(Arc::new(session));
+        self
+    }
+
+    /// Sets the session for permission checking (Arc version).
+    ///
+    /// Use this when sharing a Session across multiple contexts.
+    #[must_use]
+    pub fn with_session_arc(mut self, session: Arc<Session>) -> Self {
         self.session = Some(session);
         self
     }
@@ -108,7 +119,7 @@ impl ChildContextImpl {
 
     /// Returns the session if set.
     #[must_use]
-    pub fn session(&self) -> Option<&Session> {
+    pub fn session(&self) -> Option<&Arc<Session>> {
         self.session.as_ref()
     }
 
@@ -128,6 +139,58 @@ impl ChildContextImpl {
         match (&self.session, &self.checker) {
             (Some(session), Some(checker)) => checker.can_execute_command(session, cmd),
             _ => true, // Permissive mode when not configured
+        }
+    }
+
+    /// Checks command with granular result (for HIL integration).
+    ///
+    /// Returns [`CommandCheckResult`] which can be:
+    /// - `Allowed`: Execute immediately
+    /// - `Denied`: Block with reason
+    /// - `RequiresApproval`: Needs HIL approval
+    ///
+    /// # HIL Flow
+    ///
+    /// When `RequiresApproval` is returned:
+    ///
+    /// 1. Submit the `ApprovalRequest` to HilComponent
+    /// 2. Wait for user approval
+    /// 3. If approved, call `session.grant_command(grant_pattern)`
+    /// 4. The command will then be allowed on retry
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match ctx.check_command("rm -rf ./temp") {
+    ///     CommandCheckResult::Allowed => {
+    ///         // Execute command
+    ///     }
+    ///     CommandCheckResult::Denied(reason) => {
+    ///         return Err(Error::PermissionDenied(reason));
+    ///     }
+    ///     CommandCheckResult::RequiresApproval { request, grant_pattern } => {
+    ///         // Submit to HIL, wait for approval
+    ///         // If approved: ctx.grant_command(&grant_pattern);
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn check_command(&self, cmd: &str) -> CommandCheckResult {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.check_command(session, cmd),
+            _ => CommandCheckResult::Allowed, // Permissive mode when not configured
+        }
+    }
+
+    /// Grants a command pattern for future execution.
+    ///
+    /// This is typically called after HIL approval to allow
+    /// the same command pattern without re-approval.
+    ///
+    /// Does nothing if no session is configured.
+    pub fn grant_command(&self, pattern: &str) {
+        if let Some(session) = &self.session {
+            session.grant_command(pattern);
         }
     }
 
@@ -615,5 +678,110 @@ mod tests {
         let cloned: Box<dyn AsyncChildContext> = AsyncChildContext::clone_box(&ctx);
 
         assert_eq!(AsyncChildContext::parent_id(cloned.as_ref()), "test-parent");
+    }
+
+    // --- CommandCheckResult tests (Phase 3D) ---
+
+    mod check_command_tests {
+        use super::*;
+        use crate::auth::{DefaultPolicy, Session};
+        use orcs_types::{Principal, PrincipalId};
+        use std::time::Duration;
+
+        fn setup_with_auth(elevated: bool) -> (ChildContextImpl, mpsc::Receiver<Event>) {
+            let (output_tx, output_rx) = mpsc::channel(64);
+
+            let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let session = if elevated {
+                Session::new(Principal::User(PrincipalId::new())).elevate(Duration::from_secs(60))
+            } else {
+                Session::new(Principal::User(PrincipalId::new()))
+            };
+
+            let ctx = ChildContextImpl::new("test-parent", output_tx, spawner_arc)
+                .with_lua_loader(Arc::new(TestLoader))
+                .with_session(session)
+                .with_checker(Arc::new(DefaultPolicy));
+
+            (ctx, output_rx)
+        }
+
+        #[test]
+        fn check_command_permissive_without_auth() {
+            let (ctx, _) = setup(); // No auth configured
+            let result = ctx.check_command("rm -rf /");
+            assert!(result.is_allowed()); // Permissive mode
+        }
+
+        #[test]
+        fn check_command_blocked_with_auth() {
+            let (ctx, _) = setup_with_auth(true); // Elevated
+            let result = ctx.check_command("rm -rf /");
+            assert!(result.is_denied()); // Blocked even for elevated
+        }
+
+        #[test]
+        fn check_command_safe_allowed() {
+            let (ctx, _) = setup_with_auth(false); // Standard
+            let result = ctx.check_command("ls -la");
+            assert!(result.is_allowed()); // Safe command
+        }
+
+        #[test]
+        fn check_command_dangerous_requires_approval() {
+            let (ctx, _) = setup_with_auth(false); // Standard
+            let result = ctx.check_command("rm -rf ./temp");
+            assert!(result.requires_approval());
+            assert!(result.approval_request().is_some());
+        }
+
+        #[test]
+        fn check_command_elevated_allows_dangerous() {
+            let (ctx, _) = setup_with_auth(true); // Elevated
+            let result = ctx.check_command("rm -rf ./temp");
+            assert!(result.is_allowed());
+        }
+
+        #[test]
+        fn grant_command_allows_future_execution() {
+            let (ctx, _) = setup_with_auth(false); // Standard
+
+            // First check requires approval
+            let result = ctx.check_command("rm -rf ./temp");
+            assert!(result.requires_approval());
+
+            // Grant the pattern
+            ctx.grant_command("rm -rf");
+
+            // Now allowed
+            let result = ctx.check_command("rm -rf ./temp");
+            assert!(result.is_allowed());
+        }
+
+        #[test]
+        fn shared_session_shares_grants() {
+            let (output_tx, _) = mpsc::channel(64);
+            let spawner = ChildSpawner::new("test", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let session = Arc::new(Session::new(Principal::User(PrincipalId::new())));
+
+            let ctx1 = ChildContextImpl::new("ctx1", output_tx.clone(), Arc::clone(&spawner_arc))
+                .with_session_arc(Arc::clone(&session))
+                .with_checker(Arc::new(DefaultPolicy));
+
+            let ctx2 = ChildContextImpl::new("ctx2", output_tx, spawner_arc)
+                .with_session_arc(Arc::clone(&session))
+                .with_checker(Arc::new(DefaultPolicy));
+
+            // Grant via ctx1
+            ctx1.grant_command("rm -rf");
+
+            // Should be allowed in ctx2
+            let result = ctx2.check_command("rm -rf ./temp");
+            assert!(result.is_allowed());
+        }
     }
 }
