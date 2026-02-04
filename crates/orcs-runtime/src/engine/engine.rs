@@ -652,6 +652,23 @@ impl OrcsEngine {
         &self.world_tx
     }
 
+    /// Injects an event to a specific channel (targeted delivery).
+    ///
+    /// Unlike signal broadcast, this sends to a single channel only.
+    /// Used for `@component message` routing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::ChannelNotFound`] if channel doesn't exist,
+    /// or [`EngineError::SendFailed`] if the buffer is full.
+    pub fn inject_event(
+        &self,
+        channel_id: ChannelId,
+        event: crate::channel::Event,
+    ) -> Result<(), super::EngineError> {
+        self.eventbus.try_inject(channel_id, event)
+    }
+
     /// Send signal (from external, e.g., human input)
     ///
     /// Broadcasts to all ChannelRunners via signal_tx.

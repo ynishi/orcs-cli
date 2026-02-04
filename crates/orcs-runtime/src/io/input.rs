@@ -46,6 +46,18 @@ pub enum InputCommand {
     /// Distinct from Unknown - indicates user pressed Enter without input.
     Empty,
 
+    /// Direct message to a specific component.
+    ///
+    /// Format: `@component_name message`
+    ///
+    /// Routes to the named component only, bypassing broadcast.
+    ComponentMessage {
+        /// Target component name (lowercase).
+        target: String,
+        /// Message to send to the component.
+        message: String,
+    },
+
     /// Unknown or invalid input.
     Unknown {
         /// The original input line.
@@ -85,7 +97,7 @@ impl InputCommand {
                 // These require a channel ID which we don't have here
                 None
             }
-            Self::Quit | Self::Empty | Self::Unknown { .. } => None,
+            Self::Quit | Self::Empty | Self::Unknown { .. } | Self::ComponentMessage { .. } => None,
         }
     }
 
@@ -317,6 +329,17 @@ mod tests {
             reason: None
         }
         .is_hil_response());
+    }
+
+    #[test]
+    fn to_signal_component_message_returns_none() {
+        let cmd = InputCommand::ComponentMessage {
+            target: "shell".to_string(),
+            message: "ls".to_string(),
+        };
+        let principal = Principal::User(PrincipalId::new());
+        let signal = cmd.to_signal(principal, None);
+        assert!(signal.is_none());
     }
 
     #[test]

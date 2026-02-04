@@ -58,6 +58,19 @@ impl InputParser {
             return InputCommand::Empty;
         }
 
+        // Check for @component message (targeted routing)
+        if let Some(rest) = line.strip_prefix('@') {
+            let mut parts = rest.splitn(2, ' ');
+            let target = parts.next().unwrap_or("").to_lowercase();
+            if target.is_empty() {
+                return InputCommand::Unknown {
+                    input: line.to_string(),
+                };
+            }
+            let message = parts.next().unwrap_or("").to_string();
+            return InputCommand::ComponentMessage { target, message };
+        }
+
         let parts: Vec<&str> = line.splitn(MAX_INPUT_PARTS, ' ').collect();
         let cmd = parts[0].to_lowercase();
 
@@ -227,6 +240,48 @@ mod tests {
 
         let cmd = InputParser.parse("   ");
         assert!(matches!(cmd, InputCommand::Empty));
+    }
+
+    #[test]
+    fn parse_component_message() {
+        let cmd = InputParser.parse("@shell ls -la");
+        assert!(matches!(
+            cmd,
+            InputCommand::ComponentMessage {
+                ref target,
+                ref message,
+            } if target == "shell" && message == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn parse_component_message_uppercase() {
+        let cmd = InputParser.parse("@Shell echo hello");
+        assert!(matches!(
+            cmd,
+            InputCommand::ComponentMessage {
+                ref target,
+                ref message,
+            } if target == "shell" && message == "echo hello"
+        ));
+    }
+
+    #[test]
+    fn parse_component_message_no_message() {
+        let cmd = InputParser.parse("@shell");
+        assert!(matches!(
+            cmd,
+            InputCommand::ComponentMessage {
+                ref target,
+                ref message,
+            } if target == "shell" && message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parse_at_only_is_unknown() {
+        let cmd = InputParser.parse("@");
+        assert!(matches!(cmd, InputCommand::Unknown { .. }));
     }
 
     #[test]

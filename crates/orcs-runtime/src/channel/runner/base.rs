@@ -721,6 +721,32 @@ impl ChannelRunnerBuilder {
             self.component.set_child_context(Box::new(ctx));
 
             Some(spawner_arc)
+        } else if self.session.is_some() || self.checker.is_some() {
+            // No child spawner, but auth context is needed for permission-checked orcs.exec()
+            let component_id = self.component.id().fqn();
+            let dummy_spawner = ChildSpawner::new(&component_id, event_tx.clone());
+            let dummy_arc = Arc::new(StdMutex::new(dummy_spawner));
+            let mut ctx =
+                ChildContextImpl::new(&component_id, event_tx.clone(), Arc::clone(&dummy_arc));
+
+            if let Some(session) = self.session.take() {
+                ctx = ctx.with_session_arc(session);
+                info!("ChannelRunnerBuilder: enabled session for {}", component_id);
+            }
+            if let Some(checker) = self.checker.take() {
+                ctx = ctx.with_checker(checker);
+                info!(
+                    "ChannelRunnerBuilder: enabled permission checker for {}",
+                    component_id
+                );
+            }
+
+            self.component.set_child_context(Box::new(ctx));
+            info!(
+                "ChannelRunnerBuilder: auth-only context injected for {}",
+                component_id
+            );
+            None
         } else {
             None
         };

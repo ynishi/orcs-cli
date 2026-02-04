@@ -76,7 +76,8 @@ use orcs_runtime::{
     IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session,
     SessionAsset, World,
 };
-use orcs_types::{Principal, PrincipalId};
+use orcs_types::{ChannelId, Principal, PrincipalId};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -152,6 +153,10 @@ pub struct OrcsApp {
     is_resumed: bool,
     /// Number of components restored (if resumed).
     restored_count: usize,
+    /// Component name → ChannelId routing table.
+    ///
+    /// Used by `@component message` syntax for targeted delivery.
+    component_routes: HashMap<String, ChannelId>,
 }
 
 impl OrcsApp {
@@ -343,7 +348,8 @@ impl OrcsApp {
     ///
     /// - **Control signals** (Approve/Reject/Veto): → IOInput経由でClientRunner
     /// - **App-local commands** (Quit/Pause/Resume/Help): → App内で処理
-    /// - **User messages** (Unknown): → IOInput経由でClientRunner → Component
+    /// - **Component messages** (`@name msg`): → Engine.inject_event → 特定Channel
+    /// - **User messages** (Unknown): → IOInput経由でClientRunner → 全Component
     ///
     /// Returns control flow instruction for the main loop.
     fn handle_input(&mut self, line: &str) -> LoopControl {
@@ -386,6 +392,9 @@ impl OrcsApp {
             }
             InputCommand::Empty => {
                 // Blank line - ignore
+            }
+            InputCommand::ComponentMessage { target, message } => {
+                self.handle_component_message(target, message);
             }
             InputCommand::Unknown { input } => {
                 if input == "help" {
@@ -432,6 +441,45 @@ impl OrcsApp {
         if let Err(e) = self.io_input.try_send(io_input) {
             self.renderer
                 .render_output(&IOOutput::error(format!("Failed to send message: {e:?}")));
+        }
+    }
+
+    /// Routes a message to a specific component via `@component message`.
+    ///
+    /// Looks up the component name in `component_routes` and injects
+    /// a UserInput event directly to the target channel.
+    fn handle_component_message(&mut self, target: &str, message: &str) {
+        let channel_id = match self.component_routes.get(target) {
+            Some(id) => *id,
+            None => {
+                let available: Vec<&str> =
+                    self.component_routes.keys().map(|k| k.as_str()).collect();
+                self.renderer.render_output(&IOOutput::error(format!(
+                    "Unknown component: @{}. Available: {}",
+                    target,
+                    available.join(", ")
+                )));
+                return;
+            }
+        };
+
+        let event = orcs_runtime::Event {
+            category: orcs_event::EventCategory::UserInput,
+            operation: "input".to_string(),
+            source: orcs_types::ComponentId::builtin("app"),
+            payload: serde_json::json!({ "message": message }),
+        };
+
+        match self.engine.inject_event(channel_id, event) {
+            Ok(()) => {
+                tracing::debug!("Routed @{} to channel {}", target, channel_id);
+            }
+            Err(e) => {
+                self.renderer.render_output(&IOOutput::error(format!(
+                    "Failed to route to @{}: {}",
+                    target, e
+                )));
+            }
         }
     }
 
@@ -679,6 +727,7 @@ impl OrcsAppBuilder {
         let claude_channel = world.create_channel(ChannelConfig::default());
         let subagent_channel = world.create_channel(ChannelConfig::default());
         let agent_mgr_channel = world.create_channel(ChannelConfig::default());
+        let shell_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -738,6 +787,24 @@ impl OrcsAppBuilder {
             subagent_id.fqn()
         );
 
+        // Spawn ChannelRunner for shell component (auth verification)
+        let shell_component = ScriptLoader::load_embedded("shell")
+            .map_err(|e| AppError::Config(format!("Failed to load shell script: {e}")))?;
+        let shell_id = shell_component.id().clone();
+        let _shell_handle = engine.spawn_runner_full_auth(
+            shell_channel,
+            Box::new(shell_component),
+            Some(io_event_tx.clone()),
+            None,
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
+        );
+        tracing::info!(
+            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
+            shell_channel,
+            shell_id.fqn()
+        );
+
         // Spawn ChannelRunner for agent_mgr with child spawning enabled
         let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr")
             .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
@@ -775,6 +842,17 @@ impl OrcsAppBuilder {
             ConsoleRenderer::new()
         };
 
+        // Build component routing table (name → channel_id)
+        let mut component_routes = HashMap::new();
+        component_routes.insert("claude_cli".to_string(), claude_channel);
+        component_routes.insert("subagent".to_string(), subagent_channel);
+        component_routes.insert("shell".to_string(), shell_channel);
+        component_routes.insert("agent_mgr".to_string(), agent_mgr_channel);
+        tracing::info!(
+            "Component routes registered: {:?}",
+            component_routes.keys().collect::<Vec<_>>()
+        );
+
         tracing::debug!("OrcsApp created with config: debug={}", config.debug);
 
         Ok(OrcsApp {
@@ -789,6 +867,7 @@ impl OrcsAppBuilder {
             session,
             is_resumed,
             restored_count,
+            component_routes,
         })
     }
 }

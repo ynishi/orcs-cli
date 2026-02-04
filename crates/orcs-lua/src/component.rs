@@ -292,6 +292,8 @@ impl LuaComponent {
     ///
     /// Adds:
     /// - `orcs.exec(cmd)` - Execute shell command (permission-checked override)
+    /// - `orcs.check_command(cmd)` - Check command permission without executing
+    /// - `orcs.grant_command(pattern)` - Grant a command pattern (after HIL approval)
     /// - `orcs.spawn_child(config)` - Spawn a child
     /// - `orcs.child_count()` - Get current child count
     /// - `orcs.max_children()` - Get max allowed children
@@ -394,6 +396,48 @@ impl LuaComponent {
             Ok(result)
         })?;
         orcs_table.set("spawn_child", spawn_child_fn)?;
+
+        // orcs.check_command(cmd) -> { status, reason?, grant_pattern?, description? }
+        let ctx_clone = Arc::clone(&ctx);
+        let check_command_fn = lua.create_function(move |lua, cmd: String| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            let permission = ctx_guard.check_command_permission(&cmd);
+            let result = lua.create_table()?;
+            result.set("status", permission.status_str())?;
+
+            match &permission {
+                orcs_component::CommandPermission::Denied(reason) => {
+                    result.set("reason", reason.as_str())?;
+                }
+                orcs_component::CommandPermission::RequiresApproval {
+                    grant_pattern,
+                    description,
+                } => {
+                    result.set("grant_pattern", grant_pattern.as_str())?;
+                    result.set("description", description.as_str())?;
+                }
+                orcs_component::CommandPermission::Allowed => {}
+            }
+
+            Ok(result)
+        })?;
+        orcs_table.set("check_command", check_command_fn)?;
+
+        // orcs.grant_command(pattern) -> nil
+        let ctx_clone = Arc::clone(&ctx);
+        let grant_command_fn = lua.create_function(move |_, pattern: String| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            ctx_guard.grant_command(&pattern);
+            tracing::info!("Lua grant_command: {}", pattern);
+            Ok(())
+        })?;
+        orcs_table.set("grant_command", grant_command_fn)?;
 
         // orcs.child_count() -> number
         let ctx_clone = Arc::clone(&ctx);

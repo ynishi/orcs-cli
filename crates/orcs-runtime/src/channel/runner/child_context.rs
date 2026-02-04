@@ -443,6 +443,33 @@ impl ChildContext for ChildContextImpl {
         }
     }
 
+    fn check_command_permission(&self, cmd: &str) -> orcs_component::CommandPermission {
+        use orcs_component::CommandPermission;
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => {
+                let result = checker.check_command(session, cmd);
+                match result {
+                    CommandCheckResult::Allowed => CommandPermission::Allowed,
+                    CommandCheckResult::Denied(reason) => CommandPermission::Denied(reason),
+                    CommandCheckResult::RequiresApproval {
+                        request,
+                        grant_pattern,
+                    } => CommandPermission::RequiresApproval {
+                        grant_pattern,
+                        description: request.description.clone(),
+                    },
+                }
+            }
+            _ => CommandPermission::Allowed, // Permissive mode when not configured
+        }
+    }
+
+    fn grant_command(&self, pattern: &str) {
+        if let Some(session) = &self.session {
+            session.grant_command(pattern);
+        }
+    }
+
     fn can_spawn_child_auth(&self) -> bool {
         match (&self.session, &self.checker) {
             (Some(session), Some(checker)) => checker.can_spawn_child(session),
@@ -811,6 +838,70 @@ mod tests {
             // Should be allowed in ctx2
             let result = ctx2.check_command("rm -rf ./temp");
             assert!(result.is_allowed());
+        }
+
+        // --- Trait-level check_command_permission / grant_command tests ---
+
+        #[test]
+        fn trait_check_command_permission_allowed() {
+            let (ctx, _) = setup_with_auth(false);
+            let ctx_dyn: &dyn ChildContext = &ctx;
+            let perm = ctx_dyn.check_command_permission("ls -la");
+            assert!(perm.is_allowed());
+            assert_eq!(perm.status_str(), "allowed");
+        }
+
+        #[test]
+        fn trait_check_command_permission_denied() {
+            let (ctx, _) = setup_with_auth(true); // Elevated
+            let ctx_dyn: &dyn ChildContext = &ctx;
+            let perm = ctx_dyn.check_command_permission("rm -rf /");
+            assert!(perm.is_denied());
+            assert_eq!(perm.status_str(), "denied");
+        }
+
+        #[test]
+        fn trait_check_command_permission_requires_approval() {
+            let (ctx, _) = setup_with_auth(false); // Standard
+            let ctx_dyn: &dyn ChildContext = &ctx;
+            let perm = ctx_dyn.check_command_permission("rm -rf ./temp");
+            assert!(perm.requires_approval());
+            assert_eq!(perm.status_str(), "requires_approval");
+            if let orcs_component::CommandPermission::RequiresApproval {
+                grant_pattern,
+                description,
+            } = &perm
+            {
+                assert!(!grant_pattern.is_empty());
+                assert!(!description.is_empty());
+            } else {
+                panic!("expected RequiresApproval");
+            }
+        }
+
+        #[test]
+        fn trait_grant_command_then_allowed() {
+            let (ctx, _) = setup_with_auth(false);
+            let ctx_dyn: &dyn ChildContext = &ctx;
+
+            // Initially requires approval
+            let perm = ctx_dyn.check_command_permission("rm -rf ./temp");
+            assert!(perm.requires_approval());
+
+            // Grant via trait
+            ctx_dyn.grant_command("rm -rf");
+
+            // Now allowed
+            let perm = ctx_dyn.check_command_permission("rm -rf ./temp");
+            assert!(perm.is_allowed());
+        }
+
+        #[test]
+        fn trait_permissive_without_auth() {
+            let (ctx, _) = setup(); // No auth configured
+            let ctx_dyn: &dyn ChildContext = &ctx;
+            let perm = ctx_dyn.check_command_permission("rm -rf /");
+            assert!(perm.is_allowed()); // Permissive mode
         }
     }
 }

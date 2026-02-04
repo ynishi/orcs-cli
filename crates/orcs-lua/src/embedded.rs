@@ -27,6 +27,12 @@ pub const SUBAGENT: &str = include_str!("../scripts/subagent.lua");
 /// Component that spawns and manages child agents.
 pub const AGENT_MGR: &str = include_str!("../scripts/agent_mgr.lua");
 
+/// Built-in shell component for auth verification.
+///
+/// Executes shell commands prefixed with `!` through the permission checker.
+/// Displays OK/NG results to verify auth works end-to-end.
+pub const SHELL: &str = include_str!("../scripts/shell.lua");
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
@@ -36,6 +42,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("echo_emitter", ECHO_EMITTER);
     scripts.insert("subagent", SUBAGENT);
     scripts.insert("agent_mgr", AGENT_MGR);
+    scripts.insert("shell", SHELL);
     scripts
 }
 
@@ -48,6 +55,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "echo_emitter" => Some(ECHO_EMITTER),
         "subagent" => Some(SUBAGENT),
         "agent_mgr" => Some(AGENT_MGR),
+        "shell" => Some(SHELL),
         _ => None,
     }
 }
@@ -61,6 +69,7 @@ pub fn list() -> Vec<&'static str> {
         "echo_emitter",
         "subagent",
         "agent_mgr",
+        "shell",
     ]
 }
 
@@ -134,12 +143,13 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 5);
+        assert_eq!(scripts.len(), 6);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
         assert!(scripts.contains_key("subagent"));
         assert!(scripts.contains_key("agent_mgr"));
+        assert!(scripts.contains_key("shell"));
     }
 
     #[test]
@@ -178,5 +188,25 @@ mod tests {
     fn list_contains_subagent() {
         let names = list();
         assert!(names.contains(&"subagent"));
+    }
+
+    #[test]
+    fn shell_script_embedded() {
+        assert!(SHELL.contains("id = \"shell\""));
+        assert!(SHELL.contains("on_request"));
+        assert!(SHELL.contains("orcs.exec"));
+        assert!(SHELL.contains("orcs.output"));
+    }
+
+    #[test]
+    fn get_shell() {
+        let script = get("shell").expect("shell script should exist");
+        assert!(script.contains("shell"));
+    }
+
+    #[test]
+    fn list_contains_shell() {
+        let names = list();
+        assert!(names.contains(&"shell"));
     }
 }

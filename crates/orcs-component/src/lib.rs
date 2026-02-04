@@ -227,8 +227,8 @@ pub use async_trait::async_trait;
 
 // Re-export child context types
 pub use context::{
-    AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle, ComponentLoader,
-    RunError, SpawnError,
+    AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle, CommandPermission,
+    ComponentLoader, RunError, SpawnError,
 };
 
 // Re-export status types

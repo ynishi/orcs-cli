@@ -274,6 +274,61 @@ pub trait AsyncChildHandle: Send + Sync + Debug {
     fn is_finished(&self) -> bool;
 }
 
+/// Result of a command permission check (trait-level type).
+///
+/// This is a simplified version suitable for the trait boundary.
+/// Runtime implementations convert from their internal types.
+///
+/// # Variants
+///
+/// - `Allowed`: Command can execute immediately
+/// - `Denied`: Command is permanently blocked (e.g., denylist)
+/// - `RequiresApproval`: Command needs user approval before execution
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandPermission {
+    /// Command is allowed to execute.
+    Allowed,
+    /// Command is denied with a reason.
+    Denied(String),
+    /// Command requires user approval via HIL.
+    RequiresApproval {
+        /// The pattern to grant if approved.
+        grant_pattern: String,
+        /// Human-readable description of why approval is needed.
+        description: String,
+    },
+}
+
+impl CommandPermission {
+    /// Returns `true` if the command is allowed.
+    #[must_use]
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+
+    /// Returns `true` if the command is denied.
+    #[must_use]
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Self::Denied(_))
+    }
+
+    /// Returns `true` if the command requires approval.
+    #[must_use]
+    pub fn requires_approval(&self) -> bool {
+        matches!(self, Self::RequiresApproval { .. })
+    }
+
+    /// Returns the status as a string ("allowed", "denied", "requires_approval").
+    #[must_use]
+    pub fn status_str(&self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied(_) => "denied",
+            Self::RequiresApproval { .. } => "requires_approval",
+        }
+    }
+}
+
 /// Context provided to Children for runtime interaction.
 ///
 /// This trait defines the safe interface that Children can use
@@ -413,6 +468,30 @@ pub trait ChildContext: Send + Sync + Debug {
     fn can_execute_command(&self, _cmd: &str) -> bool {
         true
     }
+
+    /// Checks command with granular permission result.
+    ///
+    /// Returns [`CommandPermission`] with three possible states:
+    /// - `Allowed`: Execute immediately
+    /// - `Denied`: Block with reason
+    /// - `RequiresApproval`: Needs user approval before execution
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `Allowed` (permissive mode for backward compatibility).
+    fn check_command_permission(&self, _cmd: &str) -> CommandPermission {
+        CommandPermission::Allowed
+    }
+
+    /// Grants a command pattern for future execution.
+    ///
+    /// After HIL approval, call this to allow matching commands
+    /// without re-approval.
+    ///
+    /// # Default Implementation
+    ///
+    /// No-op (for backward compatibility).
+    fn grant_command(&self, _pattern: &str) {}
 
     /// Checks if child spawning is allowed.
     ///
@@ -708,5 +787,50 @@ mod tests {
 
         assert_eq!(handle.id(), "async-boxed");
         assert_eq!(handle.status(), crate::Status::Idle);
+    }
+
+    // --- CommandPermission tests ---
+
+    #[test]
+    fn command_permission_allowed() {
+        let p = CommandPermission::Allowed;
+        assert!(p.is_allowed());
+        assert!(!p.is_denied());
+        assert!(!p.requires_approval());
+        assert_eq!(p.status_str(), "allowed");
+    }
+
+    #[test]
+    fn command_permission_denied() {
+        let p = CommandPermission::Denied("blocked".to_string());
+        assert!(!p.is_allowed());
+        assert!(p.is_denied());
+        assert!(!p.requires_approval());
+        assert_eq!(p.status_str(), "denied");
+    }
+
+    #[test]
+    fn command_permission_requires_approval() {
+        let p = CommandPermission::RequiresApproval {
+            grant_pattern: "rm -rf".to_string(),
+            description: "destructive operation".to_string(),
+        };
+        assert!(!p.is_allowed());
+        assert!(!p.is_denied());
+        assert!(p.requires_approval());
+        assert_eq!(p.status_str(), "requires_approval");
+    }
+
+    #[test]
+    fn command_permission_eq() {
+        assert_eq!(CommandPermission::Allowed, CommandPermission::Allowed);
+        assert_eq!(
+            CommandPermission::Denied("x".into()),
+            CommandPermission::Denied("x".into())
+        );
+        assert_ne!(
+            CommandPermission::Allowed,
+            CommandPermission::Denied("x".into())
+        );
     }
 }
