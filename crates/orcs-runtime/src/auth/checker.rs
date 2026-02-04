@@ -162,6 +162,46 @@ pub trait PermissionChecker: Send + Sync {
     fn can_spawn_runner(&self, session: &Session) -> bool;
 }
 
+/// Dangerous command patterns that are always blocked.
+///
+/// These patterns are blocked even for elevated sessions because
+/// they are either:
+/// - Extremely destructive (rm -rf /)
+/// - Security risks (eval with untrusted input)
+/// - System-level operations that should never be automated
+const BLOCKED_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    ":(){ :|:& };:", // Fork bomb
+    "> /dev/sda",
+    "dd if=/dev/zero of=/dev/sda",
+    "mkfs.",
+    "chmod -R 777 /",
+    "chown -R",
+];
+
+/// Dangerous command patterns that require elevated session.
+///
+/// These patterns are allowed for elevated sessions but blocked
+/// for standard sessions.
+const ELEVATED_REQUIRED_PATTERNS: &[&str] = &[
+    "rm -rf",
+    "rm -r",
+    "git reset --hard",
+    "git push --force",
+    "git push -f",
+    "git clean -fd",
+    "git checkout .",
+    "git restore .",
+    "> ", // Redirect (overwrite)
+    ">> ",
+    "| sh",
+    "| bash",
+    "curl | sh",
+    "wget | sh",
+    "sudo ",
+];
+
 /// Default permission policy.
 ///
 /// # Rules
@@ -171,49 +211,173 @@ pub trait PermissionChecker: Send + Sync {
 /// | Global signal | Denied | Allowed |
 /// | Channel signal | Allowed | Allowed |
 /// | Destructive ops | Denied | Allowed |
+/// | Blocked commands | Denied | Denied |
+/// | Elevated commands | Denied | Allowed |
 ///
-/// # Future Extensions
+/// # Command Filtering
 ///
-/// This policy may be extended to support:
+/// Commands are checked against two lists:
 ///
-/// - Channel ownership checks
-/// - Component-specific permissions
-/// - Time-based restrictions
+/// 1. **Blocked patterns**: Always denied (even for elevated)
+/// 2. **Elevated patterns**: Require elevated session
+///
+/// # Audit Logging
+///
+/// All permission checks are logged for audit:
+/// - Allowed operations: debug level
+/// - Denied operations: warn level
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultPolicy;
 
+impl DefaultPolicy {
+    /// Checks if a command contains any blocked patterns.
+    fn is_blocked_command(cmd: &str) -> bool {
+        let cmd_lower = cmd.to_lowercase();
+        BLOCKED_PATTERNS
+            .iter()
+            .any(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
+    }
+
+    /// Checks if a command requires elevated session.
+    fn requires_elevation(cmd: &str) -> bool {
+        let cmd_lower = cmd.to_lowercase();
+        ELEVATED_REQUIRED_PATTERNS
+            .iter()
+            .any(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
+    }
+}
+
 impl PermissionChecker for DefaultPolicy {
     fn can_signal(&self, session: &Session, scope: &SignalScope) -> bool {
-        match scope {
+        let allowed = match scope {
             SignalScope::Global => session.is_elevated(),
-            SignalScope::Channel(_) | SignalScope::WithChildren(_) => {
-                // M1: Allow all channel signals
-                // Future: Check channel ownership
-                true
-            }
+            SignalScope::Channel(_) | SignalScope::WithChildren(_) => true,
+        };
+
+        // Audit logging
+        if allowed {
+            tracing::debug!(
+                principal = ?session.principal(),
+                elevated = session.is_elevated(),
+                scope = ?scope,
+                "signal allowed"
+            );
+        } else {
+            tracing::warn!(
+                principal = ?session.principal(),
+                elevated = session.is_elevated(),
+                scope = ?scope,
+                "signal denied: requires elevation"
+            );
         }
+
+        allowed
     }
 
-    fn can_destructive(&self, session: &Session, _action: &str) -> bool {
-        session.is_elevated()
+    fn can_destructive(&self, session: &Session, action: &str) -> bool {
+        let allowed = session.is_elevated();
+
+        // Audit logging
+        if allowed {
+            tracing::info!(
+                principal = ?session.principal(),
+                action = action,
+                "destructive operation allowed"
+            );
+        } else {
+            tracing::warn!(
+                principal = ?session.principal(),
+                action = action,
+                "destructive operation denied: requires elevation"
+            );
+        }
+
+        allowed
     }
 
-    fn can_execute_command(&self, session: &Session, _cmd: &str) -> bool {
-        // Phase 1: Only elevated sessions can execute shell commands
-        // Future: Command allowlist/denylist
-        session.is_elevated()
+    fn can_execute_command(&self, session: &Session, cmd: &str) -> bool {
+        // Phase 2: Check blocked patterns first (even for elevated)
+        if Self::is_blocked_command(cmd) {
+            tracing::error!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                "command BLOCKED: matches dangerous pattern"
+            );
+            return false;
+        }
+
+        // Check if command requires elevation
+        let requires_elevation = Self::requires_elevation(cmd);
+        let allowed = if requires_elevation {
+            session.is_elevated()
+        } else {
+            // Non-dangerous commands still require elevation in default policy
+            session.is_elevated()
+        };
+
+        // Audit logging
+        if allowed {
+            if requires_elevation {
+                tracing::info!(
+                    principal = ?session.principal(),
+                    cmd = cmd,
+                    "elevated command allowed"
+                );
+            } else {
+                tracing::debug!(
+                    principal = ?session.principal(),
+                    cmd = cmd,
+                    "command allowed"
+                );
+            }
+        } else {
+            tracing::warn!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                requires_elevation = requires_elevation,
+                "command denied: requires elevation"
+            );
+        }
+
+        allowed
     }
 
     fn can_spawn_child(&self, session: &Session) -> bool {
-        // Phase 1: Only elevated sessions can spawn children
-        // Future: Per-component spawn limits
-        session.is_elevated()
+        let allowed = session.is_elevated();
+
+        // Audit logging
+        if allowed {
+            tracing::debug!(
+                principal = ?session.principal(),
+                "spawn_child allowed"
+            );
+        } else {
+            tracing::warn!(
+                principal = ?session.principal(),
+                "spawn_child denied: requires elevation"
+            );
+        }
+
+        allowed
     }
 
     fn can_spawn_runner(&self, session: &Session) -> bool {
-        // Phase 1: Only elevated sessions can spawn runners
-        // Future: Runner quotas per session
-        session.is_elevated()
+        let allowed = session.is_elevated();
+
+        // Audit logging
+        if allowed {
+            tracing::debug!(
+                principal = ?session.principal(),
+                "spawn_runner allowed"
+            );
+        } else {
+            tracing::warn!(
+                principal = ?session.principal(),
+                "spawn_runner denied: requires elevation"
+            );
+        }
+
+        allowed
     }
 }
 
@@ -316,7 +480,38 @@ mod tests {
         let session = elevated_session();
 
         assert!(policy.can_execute_command(&session, "ls -la"));
-        assert!(policy.can_execute_command(&session, "rm -rf /"));
+        // Elevated can use rm -rf on non-root paths
+        assert!(policy.can_execute_command(&session, "rm -rf ./target"));
+    }
+
+    #[test]
+    fn blocked_commands_denied_even_for_elevated() {
+        let policy = DefaultPolicy;
+        let session = elevated_session();
+
+        // These are blocked even for elevated sessions
+        assert!(!policy.can_execute_command(&session, "rm -rf /"));
+        assert!(!policy.can_execute_command(&session, "rm -rf /*"));
+        assert!(!policy.can_execute_command(&session, "dd if=/dev/zero of=/dev/sda"));
+        assert!(!policy.can_execute_command(&session, "chmod -R 777 /"));
+    }
+
+    #[test]
+    fn elevated_required_patterns() {
+        let policy = DefaultPolicy;
+        let standard = standard_session();
+        let elevated = elevated_session();
+
+        // git destructive commands require elevation
+        assert!(!policy.can_execute_command(&standard, "git reset --hard"));
+        assert!(policy.can_execute_command(&elevated, "git reset --hard"));
+
+        assert!(!policy.can_execute_command(&standard, "git push --force"));
+        assert!(policy.can_execute_command(&elevated, "git push --force"));
+
+        // Shell pipes to sh/bash require elevation
+        assert!(!policy.can_execute_command(&standard, "curl http://example.com | sh"));
+        assert!(policy.can_execute_command(&elevated, "curl http://example.com | sh"));
     }
 
     #[test]
