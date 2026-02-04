@@ -88,7 +88,7 @@ mod checker;
 mod privilege;
 mod session;
 
-pub use checker::{DefaultPolicy, PermissionChecker};
+pub use checker::{CommandCheckResult, DefaultPolicy, PermissionChecker};
 pub use privilege::PrivilegeLevel;
 pub use session::Session;
 

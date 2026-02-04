@@ -40,7 +40,9 @@
 //! ```
 
 use super::Session;
+use crate::components::ApprovalRequest;
 use orcs_types::SignalScope;
+use std::sync::Arc;
 
 /// Policy for permission checking.
 ///
@@ -160,6 +162,38 @@ pub trait PermissionChecker: Send + Sync {
     ///
     /// `true` if the session is allowed to spawn runners.
     fn can_spawn_runner(&self, session: &Session) -> bool;
+
+    /// Check command with granular result including HIL approval flow.
+    ///
+    /// This is the preferred method for command checking as it supports:
+    ///
+    /// - Dynamic grants (previously approved commands)
+    /// - HIL approval flow (RequiresApproval)
+    /// - Detailed denial reasons
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation wraps `can_execute_command`:
+    /// - Returns `Allowed` if `can_execute_command` returns true
+    /// - Returns `Denied` otherwise
+    ///
+    /// Override this method to implement HIL integration.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The session (Arc for grant_command access)
+    /// * `cmd` - The shell command to check
+    ///
+    /// # Returns
+    ///
+    /// [`CommandCheckResult`] with granular permission information.
+    fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
+        if self.can_execute_command(session, cmd) {
+            CommandCheckResult::Allowed
+        } else {
+            CommandCheckResult::Denied("permission denied".to_string())
+        }
+    }
 }
 
 /// Dangerous command patterns that are always blocked.
@@ -201,6 +235,105 @@ const ELEVATED_REQUIRED_PATTERNS: &[&str] = &[
     "wget | sh",
     "sudo ",
 ];
+
+// =============================================================================
+// Command Check Result (Phase 3B)
+// =============================================================================
+
+/// Result of a command permission check.
+///
+/// Unlike `can_execute_command` which returns a simple bool, this enum
+/// provides more granular control:
+///
+/// - `Allowed`: Command can execute immediately
+/// - `Denied`: Command is permanently blocked
+/// - `RequiresApproval`: Command needs HIL approval before execution
+///
+/// # HIL Integration
+///
+/// When `RequiresApproval` is returned, the caller should:
+///
+/// 1. Submit the `ApprovalRequest` to `HilComponent`
+/// 2. Wait for user approval/rejection
+/// 3. If approved, call `session.grant_command(grant_pattern)`
+/// 4. Retry the command (which will now return `Allowed`)
+///
+/// # Example
+///
+/// ```ignore
+/// match checker.check_command(&session, "rm -rf ./temp") {
+///     CommandCheckResult::Allowed => execute(cmd),
+///     CommandCheckResult::Denied(reason) => error!("{}", reason),
+///     CommandCheckResult::RequiresApproval { request, grant_pattern } => {
+///         let id = hil.submit(request);
+///         if await_approval(id) {
+///             session.grant_command(&grant_pattern);
+///             execute(cmd);
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub enum CommandCheckResult {
+    /// Command is allowed to execute.
+    Allowed,
+    /// Command is denied with a reason.
+    Denied(String),
+    /// Command requires user approval via HIL.
+    RequiresApproval {
+        /// The approval request to submit to HilComponent.
+        request: ApprovalRequest,
+        /// The pattern to grant if approved (for future commands).
+        grant_pattern: String,
+    },
+}
+
+impl CommandCheckResult {
+    /// Returns `true` if the command is allowed.
+    #[must_use]
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+
+    /// Returns `true` if the command is denied.
+    #[must_use]
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Self::Denied(_))
+    }
+
+    /// Returns `true` if the command requires approval.
+    #[must_use]
+    pub fn requires_approval(&self) -> bool {
+        matches!(self, Self::RequiresApproval { .. })
+    }
+
+    /// Returns the denial reason if denied.
+    #[must_use]
+    pub fn denial_reason(&self) -> Option<&str> {
+        match self {
+            Self::Denied(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Returns the approval request if requires approval.
+    #[must_use]
+    pub fn approval_request(&self) -> Option<&ApprovalRequest> {
+        match self {
+            Self::RequiresApproval { request, .. } => Some(request),
+            _ => None,
+        }
+    }
+
+    /// Returns the grant pattern if requires approval.
+    #[must_use]
+    pub fn grant_pattern(&self) -> Option<&str> {
+        match self {
+            Self::RequiresApproval { grant_pattern, .. } => Some(grant_pattern),
+            _ => None,
+        }
+    }
+}
 
 /// Default permission policy.
 ///
@@ -244,6 +377,17 @@ impl DefaultPolicy {
         ELEVATED_REQUIRED_PATTERNS
             .iter()
             .any(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
+    }
+
+    /// Returns the matching elevation pattern if the command requires elevation.
+    ///
+    /// This is used for HIL approval to grant future commands matching the same pattern.
+    fn matching_elevation_pattern(cmd: &str) -> Option<&'static str> {
+        let cmd_lower = cmd.to_lowercase();
+        ELEVATED_REQUIRED_PATTERNS
+            .iter()
+            .find(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
+            .copied()
     }
 }
 
@@ -378,6 +522,80 @@ impl PermissionChecker for DefaultPolicy {
         }
 
         allowed
+    }
+
+    /// Check command with dynamic grants and HIL approval support.
+    ///
+    /// Flow:
+    /// 1. Check blocked patterns → Denied
+    /// 2. Check dynamic grants → Allowed (if previously approved)
+    /// 3. Check elevated session → Allowed
+    /// 4. Check elevation required → RequiresApproval
+    /// 5. Otherwise → Allowed (safe commands for standard session)
+    fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
+        // Step 1: Always block dangerous patterns
+        if Self::is_blocked_command(cmd) {
+            tracing::error!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                "command BLOCKED: matches dangerous pattern"
+            );
+            return CommandCheckResult::Denied(
+                "command blocked: matches dangerous pattern".to_string(),
+            );
+        }
+
+        // Step 2: Check dynamic grants (previously approved via HIL)
+        if session.is_command_granted(cmd) {
+            tracing::debug!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                "command allowed: previously granted"
+            );
+            return CommandCheckResult::Allowed;
+        }
+
+        // Step 3: Elevated sessions can execute anything (except blocked)
+        if session.is_elevated() {
+            tracing::debug!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                "command allowed: elevated session"
+            );
+            return CommandCheckResult::Allowed;
+        }
+
+        // Step 4: Check if command requires elevation
+        if let Some(pattern) = Self::matching_elevation_pattern(cmd) {
+            tracing::info!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                pattern = pattern,
+                "command requires approval"
+            );
+
+            let request = ApprovalRequest::new(
+                "bash",
+                format!("Execute command: {}", cmd),
+                serde_json::json!({
+                    "command": cmd,
+                    "pattern": pattern,
+                }),
+            );
+
+            return CommandCheckResult::RequiresApproval {
+                request,
+                grant_pattern: pattern.to_string(),
+            };
+        }
+
+        // Step 5: Safe commands are allowed for standard sessions
+        tracing::debug!(
+            principal = ?session.principal(),
+            cmd = cmd,
+            "command allowed: safe command"
+        );
+        CommandCheckResult::Allowed
     }
 }
 
@@ -544,5 +762,104 @@ mod tests {
         let session = elevated_session();
 
         assert!(policy.can_spawn_runner(&session));
+    }
+
+    // =========================================================================
+    // CommandCheckResult Tests (Phase 3B)
+    // =========================================================================
+
+    #[test]
+    fn check_command_blocked_returns_denied() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(elevated_session());
+
+        let result = policy.check_command(&session, "rm -rf /");
+        assert!(result.is_denied());
+        assert!(result.denial_reason().is_some());
+    }
+
+    #[test]
+    fn check_command_safe_command_allowed() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(standard_session());
+
+        let result = policy.check_command(&session, "ls -la");
+        assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn check_command_elevated_pattern_requires_approval() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(standard_session());
+
+        let result = policy.check_command(&session, "rm -rf ./temp");
+        assert!(result.requires_approval());
+        assert!(result.approval_request().is_some());
+        assert_eq!(result.grant_pattern(), Some("rm -rf"));
+    }
+
+    #[test]
+    fn check_command_elevated_session_allowed() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(elevated_session());
+
+        let result = policy.check_command(&session, "rm -rf ./temp");
+        assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn check_command_granted_command_allowed() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(standard_session());
+
+        // Grant the pattern
+        session.grant_command("rm -rf");
+
+        // Now should be allowed without elevation
+        let result = policy.check_command(&session, "rm -rf ./temp");
+        assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn check_command_git_reset_requires_approval() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(standard_session());
+
+        let result = policy.check_command(&session, "git reset --hard HEAD~1");
+        assert!(result.requires_approval());
+        assert_eq!(result.grant_pattern(), Some("git reset --hard"));
+    }
+
+    #[test]
+    fn check_command_git_push_force_requires_approval() {
+        let policy = DefaultPolicy;
+        let session = Arc::new(standard_session());
+
+        let result = policy.check_command(&session, "git push --force origin main");
+        assert!(result.requires_approval());
+        assert_eq!(result.grant_pattern(), Some("git push --force"));
+    }
+
+    #[test]
+    fn command_check_result_helpers() {
+        let allowed = CommandCheckResult::Allowed;
+        assert!(allowed.is_allowed());
+        assert!(!allowed.is_denied());
+        assert!(!allowed.requires_approval());
+
+        let denied = CommandCheckResult::Denied("test".to_string());
+        assert!(!denied.is_allowed());
+        assert!(denied.is_denied());
+        assert_eq!(denied.denial_reason(), Some("test"));
+
+        let request = ApprovalRequest::new("bash", "test", serde_json::json!({}));
+        let requires = CommandCheckResult::RequiresApproval {
+            request: request.clone(),
+            grant_pattern: "test".to_string(),
+        };
+        assert!(!requires.is_allowed());
+        assert!(requires.requires_approval());
+        assert!(requires.approval_request().is_some());
+        assert_eq!(requires.grant_pattern(), Some("test"));
     }
 }

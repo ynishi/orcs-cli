@@ -3,6 +3,8 @@
 use super::PrivilegeLevel;
 use orcs_types::Principal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::RwLock;
 use std::time::Duration;
 
 /// An active security context combining identity and privilege.
@@ -51,12 +53,36 @@ use std::time::Duration;
 /// let standard = elevated.drop_privilege();
 /// assert!(!standard.is_elevated());
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// The actor performing operations.
     principal: Principal,
     /// Current privilege level.
     privilege: PrivilegeLevel,
+    /// Dynamically granted command patterns (runtime only, not serialized).
+    ///
+    /// When a user approves a command via HIL, the pattern is added here
+    /// so subsequent identical commands don't require re-approval.
+    #[serde(skip)]
+    granted_commands: RwLock<HashSet<String>>,
+}
+
+impl Clone for Session {
+    /// Clones the session.
+    ///
+    /// Note: `granted_commands` is **not** cloned. The new session starts
+    /// with an empty grant list. This is intentional:
+    ///
+    /// - Grants are tied to a specific session instance
+    /// - Elevate/drop operations create new sessions without inheriting grants
+    /// - Use `Arc<Session>` for shared grant state
+    fn clone(&self) -> Self {
+        Self {
+            principal: self.principal.clone(),
+            privilege: self.privilege.clone(),
+            granted_commands: RwLock::new(HashSet::new()),
+        }
+    }
 }
 
 impl Session {
@@ -79,6 +105,7 @@ impl Session {
         Self {
             principal,
             privilege: PrivilegeLevel::Standard,
+            granted_commands: RwLock::new(HashSet::new()),
         }
     }
 
@@ -144,6 +171,7 @@ impl Session {
         Self {
             principal: self.principal.clone(),
             privilege: PrivilegeLevel::elevated_for(duration),
+            granted_commands: RwLock::new(HashSet::new()),
         }
     }
 
@@ -171,6 +199,7 @@ impl Session {
         Self {
             principal: self.principal.clone(),
             privilege: PrivilegeLevel::Standard,
+            granted_commands: RwLock::new(HashSet::new()),
         }
     }
 
@@ -178,6 +207,120 @@ impl Session {
     #[must_use]
     pub fn remaining_elevation(&self) -> Option<Duration> {
         self.privilege.remaining()
+    }
+
+    // =========================================================================
+    // Dynamic Command Grants (HIL integration)
+    // =========================================================================
+
+    /// Grants permission for a command pattern.
+    ///
+    /// Once granted, commands matching this pattern will be allowed without
+    /// requiring further HIL approval (until the session is dropped or
+    /// [`clear_grants`](Self::clear_grants) is called).
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called from multiple threads.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{Principal, Session};
+    /// use orcs_types::PrincipalId;
+    ///
+    /// let session = Session::new(Principal::User(PrincipalId::new()));
+    ///
+    /// session.grant_command("rm -rf");
+    /// assert!(session.is_command_granted("rm -rf ./temp"));
+    /// ```
+    pub fn grant_command(&self, pattern: &str) {
+        if let Ok(mut grants) = self.granted_commands.write() {
+            grants.insert(pattern.to_string());
+        }
+    }
+
+    /// Checks if a command is allowed by a previously granted pattern.
+    ///
+    /// Returns `true` if any granted pattern is contained within the command.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called from multiple threads.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{Principal, Session};
+    /// use orcs_types::PrincipalId;
+    ///
+    /// let session = Session::new(Principal::User(PrincipalId::new()));
+    ///
+    /// assert!(!session.is_command_granted("rm -rf ./temp"));
+    ///
+    /// session.grant_command("rm -rf");
+    /// assert!(session.is_command_granted("rm -rf ./temp"));
+    /// assert!(session.is_command_granted("rm -rf /var/log"));
+    /// assert!(!session.is_command_granted("ls -la"));
+    /// ```
+    #[must_use]
+    pub fn is_command_granted(&self, command: &str) -> bool {
+        if let Ok(grants) = self.granted_commands.read() {
+            grants.iter().any(|pattern| command.contains(pattern))
+        } else {
+            false
+        }
+    }
+
+    /// Revokes a previously granted command pattern.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{Principal, Session};
+    /// use orcs_types::PrincipalId;
+    ///
+    /// let session = Session::new(Principal::User(PrincipalId::new()));
+    ///
+    /// session.grant_command("rm -rf");
+    /// assert!(session.is_command_granted("rm -rf ./temp"));
+    ///
+    /// session.revoke_command("rm -rf");
+    /// assert!(!session.is_command_granted("rm -rf ./temp"));
+    /// ```
+    pub fn revoke_command(&self, pattern: &str) {
+        if let Ok(mut grants) = self.granted_commands.write() {
+            grants.remove(pattern);
+        }
+    }
+
+    /// Clears all granted command patterns.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_runtime::{Principal, Session};
+    /// use orcs_types::PrincipalId;
+    ///
+    /// let session = Session::new(Principal::User(PrincipalId::new()));
+    ///
+    /// session.grant_command("rm -rf");
+    /// session.grant_command("git reset");
+    ///
+    /// session.clear_grants();
+    /// assert!(!session.is_command_granted("rm -rf ./temp"));
+    /// assert!(!session.is_command_granted("git reset --hard"));
+    /// ```
+    pub fn clear_grants(&self) {
+        if let Ok(mut grants) = self.granted_commands.write() {
+            grants.clear();
+        }
+    }
+
+    /// Returns the number of granted command patterns.
+    #[must_use]
+    pub fn grant_count(&self) -> usize {
+        self.granted_commands.read().map(|g| g.len()).unwrap_or(0)
     }
 }
 
@@ -255,5 +398,101 @@ mod tests {
         let session = Session::new(Principal::System);
         assert!(session.principal().is_system());
         assert!(!session.is_elevated());
+    }
+
+    // =========================================================================
+    // Dynamic Command Grants Tests
+    // =========================================================================
+
+    #[test]
+    fn grant_command_allows_matching() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+
+        assert!(!session.is_command_granted("rm -rf ./temp"));
+
+        session.grant_command("rm -rf");
+        assert!(session.is_command_granted("rm -rf ./temp"));
+        assert!(session.is_command_granted("rm -rf /var/log"));
+    }
+
+    #[test]
+    fn grant_does_not_match_unrelated_commands() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+
+        session.grant_command("rm -rf");
+        assert!(!session.is_command_granted("ls -la"));
+        assert!(!session.is_command_granted("git status"));
+    }
+
+    #[test]
+    fn revoke_command_removes_grant() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+
+        session.grant_command("rm -rf");
+        assert!(session.is_command_granted("rm -rf ./temp"));
+
+        session.revoke_command("rm -rf");
+        assert!(!session.is_command_granted("rm -rf ./temp"));
+    }
+
+    #[test]
+    fn clear_grants_removes_all() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+
+        session.grant_command("rm -rf");
+        session.grant_command("git reset");
+        session.grant_command("sudo");
+        assert_eq!(session.grant_count(), 3);
+
+        session.clear_grants();
+        assert_eq!(session.grant_count(), 0);
+        assert!(!session.is_command_granted("rm -rf ./temp"));
+    }
+
+    #[test]
+    fn clone_does_not_inherit_grants() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        session.grant_command("rm -rf");
+
+        let cloned = session.clone();
+        assert!(!cloned.is_command_granted("rm -rf ./temp"));
+        assert_eq!(cloned.grant_count(), 0);
+    }
+
+    #[test]
+    fn elevate_does_not_inherit_grants() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        session.grant_command("rm -rf");
+
+        let elevated = session.elevate(Duration::from_secs(60));
+        assert!(!elevated.is_command_granted("rm -rf ./temp"));
+    }
+
+    #[test]
+    fn multiple_patterns_can_match() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+
+        session.grant_command("rm");
+        session.grant_command("git");
+
+        assert!(session.is_command_granted("rm -rf ./temp"));
+        assert!(session.is_command_granted("git push --force"));
+        assert!(!session.is_command_granted("ls -la"));
+    }
+
+    #[test]
+    fn grant_count_tracks_patterns() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        assert_eq!(session.grant_count(), 0);
+
+        session.grant_command("rm -rf");
+        assert_eq!(session.grant_count(), 1);
+
+        session.grant_command("git reset");
+        assert_eq!(session.grant_count(), 2);
+
+        // Duplicate grant doesn't increase count
+        session.grant_command("rm -rf");
+        assert_eq!(session.grant_count(), 2);
     }
 }
