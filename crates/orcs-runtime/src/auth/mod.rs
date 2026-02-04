@@ -84,11 +84,14 @@
 //! implicit full access. Human users must elevate like any other
 //! principal to perform privileged operations.
 
+mod blocked_patterns;
 mod checker;
+mod command_check;
 mod privilege;
 mod session;
 
-pub use checker::{CommandCheckResult, DefaultPolicy, PermissionChecker};
+pub use checker::{DefaultPolicy, PermissionChecker};
+pub use command_check::CommandCheckResult;
 pub use privilege::PrivilegeLevel;
 pub use session::Session;
 

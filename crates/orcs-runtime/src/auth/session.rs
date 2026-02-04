@@ -235,8 +235,13 @@ impl Session {
     /// assert!(session.is_command_granted("rm -rf ./temp"));
     /// ```
     pub fn grant_command(&self, pattern: &str) {
-        if let Ok(mut grants) = self.granted_commands.write() {
-            grants.insert(pattern.to_string());
+        match self.granted_commands.write() {
+            Ok(mut grants) => {
+                grants.insert(pattern.to_string());
+            }
+            Err(e) => {
+                tracing::error!("grant_command failed: RwLock poisoned: {}", e);
+            }
         }
     }
 
@@ -265,10 +270,12 @@ impl Session {
     /// ```
     #[must_use]
     pub fn is_command_granted(&self, command: &str) -> bool {
-        if let Ok(grants) = self.granted_commands.read() {
-            grants.iter().any(|pattern| command.contains(pattern))
-        } else {
-            false
+        match self.granted_commands.read() {
+            Ok(grants) => grants.iter().any(|pattern| command.contains(pattern)),
+            Err(e) => {
+                tracing::error!("is_command_granted failed: RwLock poisoned: {}", e);
+                false
+            }
         }
     }
 
@@ -289,8 +296,13 @@ impl Session {
     /// assert!(!session.is_command_granted("rm -rf ./temp"));
     /// ```
     pub fn revoke_command(&self, pattern: &str) {
-        if let Ok(mut grants) = self.granted_commands.write() {
-            grants.remove(pattern);
+        match self.granted_commands.write() {
+            Ok(mut grants) => {
+                grants.remove(pattern);
+            }
+            Err(e) => {
+                tracing::error!("revoke_command failed: RwLock poisoned: {}", e);
+            }
         }
     }
 
@@ -312,15 +324,26 @@ impl Session {
     /// assert!(!session.is_command_granted("git reset --hard"));
     /// ```
     pub fn clear_grants(&self) {
-        if let Ok(mut grants) = self.granted_commands.write() {
-            grants.clear();
+        match self.granted_commands.write() {
+            Ok(mut grants) => {
+                grants.clear();
+            }
+            Err(e) => {
+                tracing::error!("clear_grants failed: RwLock poisoned: {}", e);
+            }
         }
     }
 
     /// Returns the number of granted command patterns.
     #[must_use]
     pub fn grant_count(&self) -> usize {
-        self.granted_commands.read().map(|g| g.len()).unwrap_or(0)
+        match self.granted_commands.read() {
+            Ok(grants) => grants.len(),
+            Err(e) => {
+                tracing::error!("grant_count failed: RwLock poisoned: {}", e);
+                0
+            }
+        }
     }
 }
 

@@ -1168,4 +1168,93 @@ mod tests {
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
         let _ = engine2.world_tx().send(WorldCommand::Shutdown).await;
     }
+
+    // === spawn_channel_with_auth Tests ===
+
+    mod spawn_channel_with_auth_tests {
+        use super::*;
+        use crate::auth::{DefaultPolicy, Session};
+        use orcs_types::PrincipalId;
+        use std::time::Duration;
+
+        fn standard_session() -> Arc<Session> {
+            Arc::new(Session::new(Principal::User(PrincipalId::new())))
+        }
+
+        fn elevated_session() -> Arc<Session> {
+            Arc::new(
+                Session::new(Principal::User(PrincipalId::new())).elevate(Duration::from_secs(60)),
+            )
+        }
+
+        fn default_checker() -> Arc<dyn crate::auth::PermissionChecker> {
+            Arc::new(DefaultPolicy)
+        }
+
+        #[tokio::test]
+        async fn spawn_channel_with_auth_denied_for_standard_session() {
+            let (world, io) = test_world();
+            let mut engine = OrcsEngine::new(world, io);
+
+            let session = standard_session();
+            let checker = default_checker();
+            let config = ChannelConfig::new(100, true);
+            let component = Box::new(EchoComponent::new());
+
+            // Standard session should be denied
+            let result = engine
+                .spawn_channel_with_auth(io, config, component, session, checker)
+                .await;
+
+            assert!(result.is_none(), "standard session should be denied");
+
+            // Cleanup
+            let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+        }
+
+        #[tokio::test]
+        async fn spawn_channel_with_auth_allowed_for_elevated_session() {
+            let (world, io) = test_world();
+            let mut engine = OrcsEngine::new(world, io);
+
+            let session = elevated_session();
+            let checker = default_checker();
+            let config = ChannelConfig::new(100, true);
+            let component = Box::new(EchoComponent::new());
+
+            // Elevated session should be allowed
+            let result = engine
+                .spawn_channel_with_auth(io, config, component, session, checker)
+                .await;
+
+            assert!(result.is_some(), "elevated session should be allowed");
+
+            let child_id = result.unwrap();
+            // Verify child was created in world
+            let w = engine.world_read().read().await;
+            assert!(w.get(&child_id).is_some());
+            drop(w);
+
+            // Cleanup
+            let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+        }
+
+        #[tokio::test]
+        async fn spawn_runner_with_auth_creates_runner() {
+            let (world, io) = test_world();
+            let mut engine = OrcsEngine::new(world, io);
+
+            let session = elevated_session();
+            let checker = default_checker();
+            let component = Box::new(EchoComponent::new());
+
+            let handle = engine.spawn_runner_with_auth(io, component, session, checker);
+
+            assert_eq!(handle.id, io);
+            assert!(engine.runner_components.contains_key(&io));
+
+            // Cleanup
+            let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
+        }
+    }
 }
