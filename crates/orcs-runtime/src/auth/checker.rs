@@ -72,9 +72,21 @@ use orcs_types::SignalScope;
 ///     fn can_destructive(&self, session: &Session, _action: &str) -> bool {
 ///         session.is_elevated()
 ///     }
+///
+///     fn can_execute_command(&self, session: &Session, _cmd: &str) -> bool {
+///         session.is_elevated()
+///     }
+///
+///     fn can_spawn_child(&self, session: &Session) -> bool {
+///         session.is_elevated()
+///     }
+///
+///     fn can_spawn_runner(&self, session: &Session) -> bool {
+///         session.is_elevated()
+///     }
 /// }
 /// ```
-pub trait PermissionChecker {
+pub trait PermissionChecker: Send + Sync {
     /// Check if session can send a signal with the given scope.
     ///
     /// # Arguments
@@ -105,6 +117,49 @@ pub trait PermissionChecker {
     ///
     /// `true` if the session is allowed to perform the action.
     fn can_destructive(&self, session: &Session, action: &str) -> bool;
+
+    /// Check if session can execute a shell command.
+    ///
+    /// Shell commands are potentially dangerous as they can:
+    /// - Read/write arbitrary files
+    /// - Spawn network connections
+    /// - Modify system state
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The session attempting the action
+    /// * `cmd` - The shell command to execute
+    ///
+    /// # Returns
+    ///
+    /// `true` if the session is allowed to execute the command.
+    fn can_execute_command(&self, session: &Session, cmd: &str) -> bool;
+
+    /// Check if session can spawn a child entity.
+    ///
+    /// Child spawning allows code execution within the parent's context.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The session attempting the action
+    ///
+    /// # Returns
+    ///
+    /// `true` if the session is allowed to spawn children.
+    fn can_spawn_child(&self, session: &Session) -> bool;
+
+    /// Check if session can spawn a runner (parallel execution).
+    ///
+    /// Runner spawning creates a new ChannelRunner for parallel execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The session attempting the action
+    ///
+    /// # Returns
+    ///
+    /// `true` if the session is allowed to spawn runners.
+    fn can_spawn_runner(&self, session: &Session) -> bool;
 }
 
 /// Default permission policy.
@@ -140,6 +195,24 @@ impl PermissionChecker for DefaultPolicy {
     }
 
     fn can_destructive(&self, session: &Session, _action: &str) -> bool {
+        session.is_elevated()
+    }
+
+    fn can_execute_command(&self, session: &Session, _cmd: &str) -> bool {
+        // Phase 1: Only elevated sessions can execute shell commands
+        // Future: Command allowlist/denylist
+        session.is_elevated()
+    }
+
+    fn can_spawn_child(&self, session: &Session) -> bool {
+        // Phase 1: Only elevated sessions can spawn children
+        // Future: Per-component spawn limits
+        session.is_elevated()
+    }
+
+    fn can_spawn_runner(&self, session: &Session) -> bool {
+        // Phase 1: Only elevated sessions can spawn runners
+        // Future: Runner quotas per session
         session.is_elevated()
     }
 }
@@ -226,5 +299,55 @@ mod tests {
         let session = elevated_session().drop_privilege();
 
         assert!(!policy.can_signal(&session, &SignalScope::Global));
+    }
+
+    #[test]
+    fn standard_cannot_execute_command() {
+        let policy = DefaultPolicy;
+        let session = standard_session();
+
+        assert!(!policy.can_execute_command(&session, "ls -la"));
+        assert!(!policy.can_execute_command(&session, "rm -rf /"));
+    }
+
+    #[test]
+    fn elevated_can_execute_command() {
+        let policy = DefaultPolicy;
+        let session = elevated_session();
+
+        assert!(policy.can_execute_command(&session, "ls -la"));
+        assert!(policy.can_execute_command(&session, "rm -rf /"));
+    }
+
+    #[test]
+    fn standard_cannot_spawn_child() {
+        let policy = DefaultPolicy;
+        let session = standard_session();
+
+        assert!(!policy.can_spawn_child(&session));
+    }
+
+    #[test]
+    fn elevated_can_spawn_child() {
+        let policy = DefaultPolicy;
+        let session = elevated_session();
+
+        assert!(policy.can_spawn_child(&session));
+    }
+
+    #[test]
+    fn standard_cannot_spawn_runner() {
+        let policy = DefaultPolicy;
+        let session = standard_session();
+
+        assert!(!policy.can_spawn_runner(&session));
+    }
+
+    #[test]
+    fn elevated_can_spawn_runner() {
+        let policy = DefaultPolicy;
+        let session = elevated_session();
+
+        assert!(policy.can_spawn_runner(&session));
     }
 }

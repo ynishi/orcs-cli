@@ -291,6 +291,7 @@ impl LuaComponent {
     /// Registers child context functions in Lua's orcs table.
     ///
     /// Adds:
+    /// - `orcs.exec(cmd)` - Execute shell command (permission-checked override)
     /// - `orcs.spawn_child(config)` - Spawn a child
     /// - `orcs.child_count()` - Get current child count
     /// - `orcs.max_children()` - Get max allowed children
@@ -300,6 +301,51 @@ impl LuaComponent {
     ) -> Result<(), LuaError> {
         let orcs_table: Table = lua.globals().get("orcs")?;
 
+        // Override orcs.exec with permission-checked version
+        // This replaces the basic exec from register_orcs_functions
+        let ctx_clone = Arc::clone(&ctx);
+        let exec_fn = lua.create_function(move |lua, cmd: String| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Permission check
+            if !ctx_guard.can_execute_command(&cmd) {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("stdout", "")?;
+                result.set(
+                    "stderr",
+                    "permission denied: exec requires elevated session",
+                )?;
+                result.set("code", -1)?;
+                return Ok(result);
+            }
+
+            tracing::debug!("Lua exec (authorized): {}", cmd);
+
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+
+            let result = lua.create_table()?;
+            result.set("ok", output.status.success())?;
+            result.set(
+                "stdout",
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )?;
+            result.set(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )?;
+            result.set("code", output.status.code().unwrap_or(-1))?;
+
+            Ok(result)
+        })?;
+        orcs_table.set("exec", exec_fn)?;
+
         // orcs.spawn_child(config) -> { ok, id, handle, error }
         // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
         let ctx_clone = Arc::clone(&ctx);
@@ -307,6 +353,17 @@ impl LuaComponent {
             let ctx_guard = ctx_clone
                 .lock()
                 .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Permission check
+            if !ctx_guard.can_spawn_child_auth() {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set(
+                    "error",
+                    "permission denied: spawn_child requires elevated session",
+                )?;
+                return Ok(result);
+            }
 
             // Parse config
             let id: String = config
@@ -409,6 +466,17 @@ impl LuaComponent {
             let ctx_guard = ctx_clone
                 .lock()
                 .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Permission check
+            if !ctx_guard.can_spawn_runner_auth() {
+                let result_table = lua.create_table()?;
+                result_table.set("ok", false)?;
+                result_table.set(
+                    "error",
+                    "permission denied: spawn_runner requires elevated session",
+                )?;
+                return Ok(result_table);
+            }
 
             // Parse config - script is required
             let script: String = config

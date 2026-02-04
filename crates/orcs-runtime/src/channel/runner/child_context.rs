@@ -5,6 +5,7 @@
 
 use super::child_spawner::ChildSpawner;
 use super::{ChannelRunner, Event};
+use crate::auth::{PermissionChecker, Session};
 use crate::channel::{World, WorldCommand};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
@@ -35,6 +36,12 @@ pub struct ChildContextImpl {
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
     /// Component loader for creating components from scripts.
     component_loader: Option<Arc<dyn ComponentLoader>>,
+
+    // -- Auth support --
+    /// Session for permission checking.
+    session: Option<Session>,
+    /// Permission checker policy.
+    checker: Option<Arc<dyn PermissionChecker>>,
 
     // -- Runner spawning support --
     /// World command sender for creating channels.
@@ -77,9 +84,68 @@ impl ChildContextImpl {
             spawner,
             lua_loader: None,
             component_loader: None,
+            session: None,
+            checker: None,
             world_tx: None,
             world: None,
             signal_tx: None,
+        }
+    }
+
+    /// Sets the session for permission checking.
+    #[must_use]
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Sets the permission checker policy.
+    #[must_use]
+    pub fn with_checker(mut self, checker: Arc<dyn PermissionChecker>) -> Self {
+        self.checker = Some(checker);
+        self
+    }
+
+    /// Returns the session if set.
+    #[must_use]
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Returns the permission checker if set.
+    #[must_use]
+    pub fn checker(&self) -> Option<&Arc<dyn PermissionChecker>> {
+        self.checker.as_ref()
+    }
+
+    /// Checks if command execution is allowed.
+    ///
+    /// Returns `true` if:
+    /// - No session/checker configured (permissive mode for backward compat)
+    /// - Session is elevated and checker allows
+    #[must_use]
+    pub fn can_execute_command(&self, cmd: &str) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_execute_command(session, cmd),
+            _ => true, // Permissive mode when not configured
+        }
+    }
+
+    /// Checks if child spawning is allowed.
+    #[must_use]
+    pub fn can_spawn_child_auth(&self) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_spawn_child(session),
+            _ => true, // Permissive mode when not configured
+        }
+    }
+
+    /// Checks if runner spawning is allowed.
+    #[must_use]
+    pub fn can_spawn_runner_auth(&self) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_spawn_runner(session),
+            _ => true, // Permissive mode when not configured
         }
     }
 
@@ -198,6 +264,8 @@ impl Debug for ChildContextImpl {
         f.debug_struct("ChildContextImpl")
             .field("parent_id", &self.parent_id)
             .field("has_lua_loader", &self.lua_loader.is_some())
+            .field("has_session", &self.session.is_some())
+            .field("has_checker", &self.checker.is_some())
             .field("can_spawn_runner", &self.can_spawn_runner())
             .finish()
     }
@@ -274,6 +342,27 @@ impl ChildContext for ChildContextImpl {
 
         // Spawn as runner
         self.spawn_runner(component)
+    }
+
+    fn can_execute_command(&self, cmd: &str) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_execute_command(session, cmd),
+            _ => true, // Permissive mode when not configured
+        }
+    }
+
+    fn can_spawn_child_auth(&self) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_spawn_child(session),
+            _ => true, // Permissive mode when not configured
+        }
+    }
+
+    fn can_spawn_runner_auth(&self) -> bool {
+        match (&self.session, &self.checker) {
+            (Some(session), Some(checker)) => checker.can_spawn_runner(session),
+            _ => true, // Permissive mode when not configured
+        }
     }
 
     fn clone_box(&self) -> Box<dyn ChildContext> {

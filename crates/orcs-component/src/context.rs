@@ -404,6 +404,34 @@ pub trait ChildContext: Send + Sync + Debug {
         ))
     }
 
+    /// Checks if command execution is allowed.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `true` (permissive mode for backward compatibility).
+    /// Implementations with session/checker support should override this.
+    fn can_execute_command(&self, _cmd: &str) -> bool {
+        true
+    }
+
+    /// Checks if child spawning is allowed.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `true` (permissive mode for backward compatibility).
+    fn can_spawn_child_auth(&self) -> bool {
+        true
+    }
+
+    /// Checks if runner spawning is allowed.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `true` (permissive mode for backward compatibility).
+    fn can_spawn_runner_auth(&self) -> bool {
+        true
+    }
+
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;
 }

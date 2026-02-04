@@ -39,6 +39,7 @@ use super::common::{
 };
 use super::paused_queue::PausedEventQueue;
 use super::EventEmitter;
+use crate::auth::{PermissionChecker, Session};
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
@@ -503,6 +504,10 @@ pub struct ChannelRunnerBuilder {
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
     /// Component loader for spawning components as runners.
     component_loader: Option<Arc<dyn ComponentLoader>>,
+    /// Session for permission checking.
+    session: Option<Session>,
+    /// Permission checker policy.
+    checker: Option<Arc<dyn PermissionChecker>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -526,6 +531,8 @@ impl ChannelRunnerBuilder {
             enable_child_spawner: false,
             lua_loader: None,
             component_loader: None,
+            session: None,
+            checker: None,
         }
     }
 
@@ -579,6 +586,31 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_component_loader(mut self, loader: Arc<dyn ComponentLoader>) -> Self {
         self.component_loader = Some(loader);
+        self
+    }
+
+    /// Sets the session for permission checking.
+    ///
+    /// When set, operations like `orcs.exec()`, `spawn_child()`, and `spawn_runner()`
+    /// will be checked against the session's privilege level.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - Session to use for permission checks
+    #[must_use]
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Sets the permission checker policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `checker` - Permission checker implementation
+    #[must_use]
+    pub fn with_checker(mut self, checker: Arc<dyn PermissionChecker>) -> Self {
+        self.checker = Some(checker);
         self
     }
 
@@ -652,6 +684,19 @@ impl ChannelRunnerBuilder {
                 ctx = ctx.with_component_loader(loader);
                 info!(
                     "ChannelRunnerBuilder: enabled component loader for {}",
+                    component_id
+                );
+            }
+
+            // Add session and checker for permission checking
+            if let Some(session) = self.session.take() {
+                ctx = ctx.with_session(session);
+                info!("ChannelRunnerBuilder: enabled session for {}", component_id);
+            }
+            if let Some(checker) = self.checker.take() {
+                ctx = ctx.with_checker(checker);
+                info!(
+                    "ChannelRunnerBuilder: enabled permission checker for {}",
                     component_id
                 );
             }
