@@ -444,6 +444,122 @@ impl OrcsEngine {
         Some(child_id)
     }
 
+    /// Spawn a child channel with authentication/authorization.
+    ///
+    /// Creates a new channel in World and spawns its runner with
+    /// Session and PermissionChecker configured.
+    ///
+    /// # Authorization Check
+    ///
+    /// Before spawning, checks if the session is allowed to spawn children
+    /// using the provided checker. Returns `None` if unauthorized.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent` - Parent channel ID
+    /// * `config` - Channel configuration
+    /// * `component` - Component to bind to the new channel (1:1)
+    /// * `session` - Session for permission checking (Arc for shared grants)
+    /// * `checker` - Permission checker policy
+    ///
+    /// # Returns
+    ///
+    /// - `Some(ChannelId)` if spawn succeeded
+    /// - `None` if parent doesn't exist or permission denied
+    pub async fn spawn_channel_with_auth(
+        &mut self,
+        parent: ChannelId,
+        config: ChannelConfig,
+        component: Box<dyn Component>,
+        session: Arc<crate::Session>,
+        checker: Arc<dyn crate::auth::PermissionChecker>,
+    ) -> Option<ChannelId> {
+        // Permission check: can this session spawn children?
+        if !checker.can_spawn_child(&session) {
+            warn!(
+                principal = ?session.principal(),
+                "spawn_channel denied: permission denied"
+            );
+            return None;
+        }
+
+        // Send spawn command
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = WorldCommand::Spawn {
+            parent,
+            config,
+            reply: reply_tx,
+        };
+
+        if self.world_tx.send(cmd).await.is_err() {
+            return None;
+        }
+
+        // Wait for reply
+        let child_id = reply_rx.await.ok()??;
+
+        // Spawn runner with auth configured
+        self.spawn_runner_with_auth(child_id, component, session, checker);
+
+        Some(child_id)
+    }
+
+    /// Spawn a runner with Session and PermissionChecker.
+    ///
+    /// The Session and Checker are passed to the ChildContext for
+    /// command permission checking.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel_id` - The channel to run
+    /// * `component` - The Component to bind
+    /// * `session` - Session for permission checking
+    /// * `checker` - Permission checker policy
+    pub fn spawn_runner_with_auth(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+        session: Arc<crate::Session>,
+        checker: Arc<dyn crate::auth::PermissionChecker>,
+    ) -> ChannelHandle {
+        let signal_rx = self.signal_tx.subscribe();
+        let component_id = component.id().clone();
+
+        // Build runner with auth
+        let (runner, handle) = ChannelRunner::builder(
+            channel_id,
+            self.world_tx.clone(),
+            Arc::clone(&self.world_read),
+            signal_rx,
+            component,
+        )
+        .with_emitter(self.signal_tx.clone())
+        .with_session_arc(session)
+        .with_checker(checker)
+        .build();
+
+        // Store Component reference for snapshot access
+        let component_ref = Arc::clone(runner.component());
+        self.runner_components.insert(channel_id, component_ref);
+
+        // Register handle with EventBus for event injection
+        self.eventbus.register_channel(handle.clone());
+
+        // Store handle
+        self.channel_handles.insert(channel_id, handle.clone());
+
+        // Spawn runner task
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+
+        info!(
+            "Spawned runner (with auth) for channel {} (component={})",
+            channel_id,
+            component_id.fqn(),
+        );
+        handle
+    }
+
     /// Returns the read-only World handle for parallel access.
     #[must_use]
     pub fn world_read(&self) -> &Arc<RwLock<World>> {

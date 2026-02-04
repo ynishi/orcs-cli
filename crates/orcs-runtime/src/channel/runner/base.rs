@@ -504,8 +504,8 @@ pub struct ChannelRunnerBuilder {
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
     /// Component loader for spawning components as runners.
     component_loader: Option<Arc<dyn ComponentLoader>>,
-    /// Session for permission checking.
-    session: Option<Session>,
+    /// Session for permission checking (Arc for shared grants).
+    session: Option<Arc<Session>>,
     /// Permission checker policy.
     checker: Option<Arc<dyn PermissionChecker>>,
 }
@@ -591,6 +591,9 @@ impl ChannelRunnerBuilder {
 
     /// Sets the session for permission checking.
     ///
+    /// Takes ownership of a Session and wraps it in Arc.
+    /// For sharing a Session across multiple runners, use [`with_session_arc`].
+    ///
     /// When set, operations like `orcs.exec()`, `spawn_child()`, and `spawn_runner()`
     /// will be checked against the session's privilege level.
     ///
@@ -599,6 +602,20 @@ impl ChannelRunnerBuilder {
     /// * `session` - Session to use for permission checks
     #[must_use]
     pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(Arc::new(session));
+        self
+    }
+
+    /// Sets the session for permission checking (Arc version).
+    ///
+    /// Use this when sharing a Session across multiple runners,
+    /// so that dynamic grants (via HIL) are shared.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - Arc-wrapped Session for shared access
+    #[must_use]
+    pub fn with_session_arc(mut self, session: Arc<Session>) -> Self {
         self.session = Some(session);
         self
     }
@@ -690,7 +707,7 @@ impl ChannelRunnerBuilder {
 
             // Add session and checker for permission checking
             if let Some(session) = self.session.take() {
-                ctx = ctx.with_session(session);
+                ctx = ctx.with_session_arc(session);
                 info!("ChannelRunnerBuilder: enabled session for {}", component_id);
             }
             if let Some(checker) = self.checker.take() {
