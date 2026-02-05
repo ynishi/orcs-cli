@@ -378,6 +378,30 @@ impl ChildContext for ChildContextImpl {
         let _ = self.output_tx.try_send(event);
     }
 
+    fn emit_approval_request(&self, operation: &str, description: &str) -> String {
+        let approval_id = uuid::Uuid::new_v4().to_string();
+        let event = Event {
+            category: EventCategory::Output,
+            operation: "approval_request".to_string(),
+            source: ComponentId::child(&self.parent_id),
+            payload: serde_json::json!({
+                "type": "approval_request",
+                "approval_id": approval_id,
+                "operation": operation,
+                "description": description,
+                "source": self.parent_id,
+            }),
+        };
+        let _ = self.output_tx.try_send(event);
+        tracing::info!(
+            approval_id = %approval_id,
+            operation = %operation,
+            "Emitted approval request: {}",
+            description
+        );
+        approval_id
+    }
+
     fn spawn_child(&self, config: ChildConfig) -> Result<Box<dyn ChildHandle>, SpawnError> {
         // Get Lua loader
         let loader = self

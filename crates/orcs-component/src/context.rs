@@ -383,6 +383,22 @@ pub trait ChildContext: Send + Sync + Debug {
     /// * `level` - Log level ("info", "warn", "error")
     fn emit_output_with_level(&self, message: &str, level: &str);
 
+    /// Emits an approval request for HIL flow.
+    ///
+    /// Generates a unique approval ID and emits the request to the output
+    /// channel so it can be displayed to the user.
+    ///
+    /// # Returns
+    ///
+    /// The generated approval ID that can be matched in `on_signal`.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns empty string (no-op for backward compatibility).
+    fn emit_approval_request(&self, _operation: &str, _description: &str) -> String {
+        String::new()
+    }
+
     /// Spawns a child and returns a sync handle to control it.
     ///
     /// For async spawning, see [`AsyncChildContext::spawn_child`].

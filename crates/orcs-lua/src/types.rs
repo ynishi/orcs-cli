@@ -55,16 +55,32 @@ pub struct LuaSignal {
     pub scope: String,
     /// Optional target ID.
     pub target_id: Option<String>,
+    /// Approval ID (for Approve/Reject/Modify signals).
+    pub approval_id: Option<String>,
+    /// Rejection reason (for Reject signals).
+    pub reason: Option<String>,
 }
 
 impl LuaSignal {
     /// Creates from orcs Signal.
     #[must_use]
     pub fn from_signal(signal: &Signal) -> Self {
+        let (approval_id, reason) = match &signal.kind {
+            SignalKind::Approve { approval_id } => (Some(approval_id.clone()), None),
+            SignalKind::Reject {
+                approval_id,
+                reason,
+            } => (Some(approval_id.clone()), reason.clone()),
+            SignalKind::Modify { approval_id, .. } => (Some(approval_id.clone()), None),
+            _ => (None, None),
+        };
+
         Self {
             kind: signal_kind_to_string(&signal.kind),
             scope: signal.scope.to_string(),
             target_id: None,
+            approval_id,
+            reason,
         }
     }
 }
@@ -90,6 +106,12 @@ impl IntoLua for LuaSignal {
         table.set("scope", self.scope)?;
         if let Some(id) = self.target_id {
             table.set("target_id", id)?;
+        }
+        if let Some(id) = self.approval_id {
+            table.set("approval_id", id)?;
+        }
+        if let Some(reason) = self.reason {
+            table.set("reason", reason)?;
         }
         Ok(Value::Table(table))
     }

@@ -788,6 +788,8 @@ impl OrcsAppBuilder {
         );
 
         // Spawn ChannelRunner for shell component (auth verification)
+        // Shell uses a non-elevated session so dangerous commands require HIL approval
+        let shell_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
         let shell_component = ScriptLoader::load_embedded("shell")
             .map_err(|e| AppError::Config(format!("Failed to load shell script: {e}")))?;
         let shell_id = shell_component.id().clone();
@@ -796,7 +798,7 @@ impl OrcsAppBuilder {
             Box::new(shell_component),
             Some(io_event_tx.clone()),
             None,
-            Arc::clone(&auth_session),
+            shell_session,
             Arc::clone(&auth_checker),
         );
         tracing::info!(

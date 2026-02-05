@@ -439,6 +439,19 @@ impl LuaComponent {
         })?;
         orcs_table.set("grant_command", grant_command_fn)?;
 
+        // orcs.request_approval(operation, description) -> approval_id
+        let ctx_clone = Arc::clone(&ctx);
+        let request_approval_fn =
+            lua.create_function(move |_, (operation, description): (String, String)| {
+                let ctx_guard = ctx_clone.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("context lock failed: {}", e))
+                })?;
+
+                let approval_id = ctx_guard.emit_approval_request(&operation, &description);
+                Ok(approval_id)
+            })?;
+        orcs_table.set("request_approval", request_approval_fn)?;
+
         // orcs.child_count() -> number
         let ctx_clone = Arc::clone(&ctx);
         let child_count_fn = lua.create_function(move |_, ()| {

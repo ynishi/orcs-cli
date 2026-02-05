@@ -410,6 +410,22 @@ impl ClientRunner {
 
     /// Handles Output category events by sending to IOBridge.
     async fn handle_output_event(&self, event: &Event) {
+        // Check for approval_request type events
+        if event.payload.get("type").and_then(|v| v.as_str()) == Some("approval_request") {
+            let approval_id = event.payload["approval_id"].as_str().unwrap_or("");
+            let operation = event.payload["operation"].as_str().unwrap_or("exec");
+            let description = event.payload["description"].as_str().unwrap_or("");
+
+            let request = crate::components::ApprovalRequest::with_id(
+                approval_id,
+                operation,
+                description,
+                event.payload.clone(),
+            );
+            let _ = self.io_bridge.show_approval_request(&request).await;
+            return;
+        }
+
         let message = event
             .payload
             .get("message")
