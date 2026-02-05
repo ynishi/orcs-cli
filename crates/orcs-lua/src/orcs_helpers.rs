@@ -8,6 +8,10 @@
 //! |----------|-------------|
 //! | `orcs.log(level, msg)` | Log a message at specified level |
 //! | `orcs.exec(cmd)` | Execute shell command and return output |
+//! | `orcs.read(path)` | Read file contents (native Rust) |
+//! | `orcs.write(path, content)` | Write file contents (atomic, native Rust) |
+//! | `orcs.grep(pattern, path)` | Search with regex (native Rust) |
+//! | `orcs.glob(pattern, dir?)` | Find files by pattern (native Rust) |
 //!
 //! # Usage
 //!
@@ -97,6 +101,9 @@ pub fn register_base_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
         })?;
         orcs_table.set("exec", exec_fn)?;
     }
+
+    // Register native Rust tools (read, write, grep, glob)
+    crate::tools::register_tool_functions(lua)?;
 
     Ok(())
 }

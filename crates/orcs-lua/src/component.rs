@@ -655,6 +655,9 @@ impl LuaComponent {
 
         lua.globals().set("orcs", orcs_table)?;
 
+        // Register native Rust tools (read, write, grep, glob)
+        crate::tools::register_tool_functions(lua)?;
+
         Ok(())
     }
 
