@@ -636,6 +636,9 @@ impl ChannelRunnerBuilder {
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
 
+        // Clone output_tx for ChildContext IO routing (before emitter takes it)
+        let io_output_tx = self.output_tx.as_ref().cloned();
+
         // Set up emitter if enabled
         if let Some(signal_tx) = &self.emitter_signal_tx {
             let component_id = self.component.id().clone();
@@ -718,6 +721,15 @@ impl ChannelRunnerBuilder {
                 );
             }
 
+            // Route Output events from ChildContext to IO channel
+            if let Some(io_tx) = io_output_tx.clone() {
+                ctx = ctx.with_io_output_channel(io_tx);
+                info!(
+                    "ChannelRunnerBuilder: enabled IO output routing for {}",
+                    component_id
+                );
+            }
+
             self.component.set_child_context(Box::new(ctx));
 
             Some(spawner_arc)
@@ -737,6 +749,15 @@ impl ChannelRunnerBuilder {
                 ctx = ctx.with_checker(checker);
                 info!(
                     "ChannelRunnerBuilder: enabled permission checker for {}",
+                    component_id
+                );
+            }
+
+            // Route Output events from ChildContext to IO channel
+            if let Some(io_tx) = io_output_tx.clone() {
+                ctx = ctx.with_io_output_channel(io_tx);
+                info!(
+                    "ChannelRunnerBuilder: enabled IO output routing for {}",
                     component_id
                 );
             }

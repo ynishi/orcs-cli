@@ -28,8 +28,11 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 pub struct ChildContextImpl {
     /// Parent ID (Component or Child).
     parent_id: String,
-    /// Output sender for events.
+    /// Output sender for events (to owning ChannelRunner).
     output_tx: mpsc::Sender<Event>,
+    /// IO output sender for Output events (to ClientRunner).
+    /// When set, Output events are routed here instead of output_tx.
+    io_output_tx: Option<mpsc::Sender<Event>>,
     /// Child spawner (shared, locked).
     spawner: Arc<Mutex<ChildSpawner>>,
     /// Lua loader for creating children from scripts.
@@ -81,6 +84,7 @@ impl ChildContextImpl {
         Self {
             parent_id: parent_id.into(),
             output_tx,
+            io_output_tx: None,
             spawner,
             lua_loader: None,
             component_loader: None,
@@ -89,6 +93,25 @@ impl ChildContextImpl {
             world_tx: None,
             world: None,
             signal_tx: None,
+        }
+    }
+
+    /// Sets the IO output channel for routing Output events to ClientRunner.
+    ///
+    /// When set, Output events (display, approval_request) are sent to
+    /// the IO channel instead of the owning ChannelRunner.
+    #[must_use]
+    pub fn with_io_output_channel(mut self, tx: mpsc::Sender<Event>) -> Self {
+        self.io_output_tx = Some(tx);
+        self
+    }
+
+    /// Sends an Output event to the IO channel if available, otherwise to the owning channel.
+    fn send_to_output(&self, event: Event) {
+        if let Some(io_tx) = &self.io_output_tx {
+            let _ = io_tx.try_send(event);
+        } else {
+            let _ = self.output_tx.try_send(event);
         }
     }
 
@@ -370,12 +393,12 @@ impl ChildContext for ChildContextImpl {
 
     fn emit_output(&self, message: &str) {
         let event = self.create_output_event(message, "info");
-        let _ = self.output_tx.try_send(event);
+        self.send_to_output(event);
     }
 
     fn emit_output_with_level(&self, message: &str, level: &str) {
         let event = self.create_output_event(message, level);
-        let _ = self.output_tx.try_send(event);
+        self.send_to_output(event);
     }
 
     fn emit_approval_request(&self, operation: &str, description: &str) -> String {
@@ -392,7 +415,7 @@ impl ChildContext for ChildContextImpl {
                 "source": self.parent_id,
             }),
         };
-        let _ = self.output_tx.try_send(event);
+        self.send_to_output(event);
         tracing::info!(
             approval_id = %approval_id,
             operation = %operation,
@@ -803,10 +826,10 @@ mod tests {
         }
 
         #[test]
-        fn check_command_safe_allowed() {
-            let (ctx, _) = setup_with_auth(false); // Standard
+        fn check_command_safe_requires_approval_not_elevated() {
+            let (ctx, _) = setup_with_auth(false); // Standard (non-elevated)
             let result = ctx.check_command("ls -la");
-            assert!(result.is_allowed()); // Safe command
+            assert!(result.requires_approval()); // All commands need approval
         }
 
         #[test]
@@ -867,12 +890,12 @@ mod tests {
         // --- Trait-level check_command_permission / grant_command tests ---
 
         #[test]
-        fn trait_check_command_permission_allowed() {
+        fn trait_check_command_permission_requires_approval_not_elevated() {
             let (ctx, _) = setup_with_auth(false);
             let ctx_dyn: &dyn ChildContext = &ctx;
             let perm = ctx_dyn.check_command_permission("ls -la");
-            assert!(perm.is_allowed());
-            assert_eq!(perm.status_str(), "allowed");
+            assert!(perm.requires_approval());
+            assert_eq!(perm.status_str(), "requires_approval");
         }
 
         #[test]

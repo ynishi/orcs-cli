@@ -423,13 +423,30 @@ impl PermissionChecker for DefaultPolicy {
             };
         }
 
-        // Step 5: Safe commands are allowed for standard sessions
-        tracing::debug!(
+        // Step 5: Non-elevated sessions require approval for ALL commands
+        // This is consistent with can_execute_command() which returns false
+        // for all commands on non-elevated sessions.
+        let cmd_base = cmd.split_whitespace().next().unwrap_or(cmd);
+        tracing::info!(
             principal = ?session.principal(),
             cmd = cmd,
-            "command allowed: safe command"
+            pattern = cmd_base,
+            "command requires approval (non-elevated session)"
         );
-        CommandCheckResult::Allowed
+
+        let request = ApprovalRequest::new(
+            "exec",
+            format!("Execute command: {}", cmd),
+            serde_json::json!({
+                "command": cmd,
+                "pattern": cmd_base,
+            }),
+        );
+
+        CommandCheckResult::RequiresApproval {
+            request,
+            grant_pattern: cmd_base.to_string(),
+        }
     }
 }
 
@@ -613,12 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn check_command_safe_command_allowed() {
+    fn check_command_safe_command_requires_approval_when_not_elevated() {
         let policy = DefaultPolicy;
         let session = Arc::new(standard_session());
 
         let result = policy.check_command(&session, "ls -la");
-        assert!(result.is_allowed());
+        assert!(result.requires_approval());
+        assert_eq!(result.grant_pattern(), Some("ls"));
     }
 
     #[test]

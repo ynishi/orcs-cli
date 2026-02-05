@@ -483,34 +483,25 @@ impl OrcsApp {
         }
     }
 
-    /// Handles an approve command via IOInput.
+    /// Handles an approve command by broadcasting Signal::Approve.
     ///
-    /// Sends to ClientRunner via IOInput with approval ID in context.
-    /// ClientRunner will convert to Approve Signal and broadcast.
-    fn handle_approve_via_io(&mut self, line: &str, explicit_id: Option<&str>) {
-        // Determine approval ID: explicit > pending
+    /// Broadcasts the signal to all channels via the Engine's signal bus.
+    /// The shell's ChannelRunner receives it and dispatches to on_signal.
+    fn handle_approve_via_io(&mut self, _line: &str, explicit_id: Option<&str>) {
         let approval_id = explicit_id
             .map(String::from)
             .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
         if let Some(id) = approval_id {
-            // Build context with approval ID
-            let context = InputContext::with_approval_id(&id);
-            let io_input = IOInput::line_with_context(line, context);
+            // Broadcast signal to all channels (shell receives via signal_rx)
+            let signal = Signal::approve(&id, self.principal.clone());
+            self.engine.signal(signal);
+            tracing::info!(approval_id = %id, "Approved");
+            self.renderer.render_output(&IOOutput::approved(&id));
 
-            match self.io_input.try_send(io_input) {
-                Ok(()) => {
-                    tracing::debug!("Sent approve via IOInput: {}", id);
-                    // Clear pending approval after sending
-                    if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
-                        self.pending_approval = None;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to send approve via IOInput: {:?}", e);
-                    // Fallback: broadcast directly via engine
-                    self.handle_approve_fallback(&id);
-                }
+            // Clear pending approval
+            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
+                self.pending_approval = None;
             }
         } else {
             self.renderer
@@ -518,59 +509,29 @@ impl OrcsApp {
         }
     }
 
-    /// Handles a reject command via IOInput.
+    /// Handles a reject command by broadcasting Signal::Reject.
     ///
-    /// Sends to ClientRunner via IOInput with approval ID in context.
-    /// ClientRunner will convert to Reject Signal and broadcast.
-    fn handle_reject_via_io(&mut self, line: &str, explicit_id: Option<&str>) {
-        // Determine approval ID: explicit > pending
+    /// Broadcasts the signal to all channels via the Engine's signal bus.
+    fn handle_reject_via_io(&mut self, _line: &str, explicit_id: Option<&str>) {
         let approval_id = explicit_id
             .map(String::from)
             .or_else(|| self.pending_approval.as_ref().map(|p| p.id.clone()));
 
         if let Some(id) = approval_id {
-            // Build context with approval ID
-            let context = InputContext::with_approval_id(&id);
-            let io_input = IOInput::line_with_context(line, context);
+            // Broadcast signal to all channels
+            let signal = Signal::reject(&id, None, self.principal.clone());
+            self.engine.signal(signal);
+            tracing::info!(approval_id = %id, "Rejected");
+            self.renderer.render_output(&IOOutput::rejected(&id, None));
 
-            match self.io_input.try_send(io_input) {
-                Ok(()) => {
-                    tracing::debug!("Sent reject via IOInput: {}", id);
-                    // Clear pending approval after sending
-                    if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
-                        self.pending_approval = None;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to send reject via IOInput: {:?}", e);
-                    // Fallback: broadcast directly via engine
-                    self.handle_reject_fallback(&id, None);
-                }
+            // Clear pending approval
+            if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
+                self.pending_approval = None;
             }
         } else {
             self.renderer
                 .render_output(&IOOutput::warn("No pending approval. Use: n <id> [reason]"));
         }
-    }
-
-    /// Fallback: Broadcast approve signal directly via engine.
-    ///
-    /// Used when IOInput channel is full/closed.
-    fn handle_approve_fallback(&mut self, approval_id: &str) {
-        let signal = Signal::approve(approval_id, self.principal.clone());
-        self.engine.signal(signal);
-        self.renderer
-            .render_output(&IOOutput::approved(approval_id));
-    }
-
-    /// Fallback: Broadcast reject signal directly via engine.
-    ///
-    /// Used when IOInput channel is full/closed.
-    fn handle_reject_fallback(&mut self, approval_id: &str, reason: Option<String>) {
-        let signal = Signal::reject(approval_id, reason.clone(), self.principal.clone());
-        self.engine.signal(signal);
-        self.renderer
-            .render_output(&IOOutput::rejected(approval_id, reason));
     }
 
     /// Shows help text.

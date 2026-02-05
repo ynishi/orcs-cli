@@ -305,23 +305,38 @@ impl LuaComponent {
 
         // Override orcs.exec with permission-checked version
         // This replaces the basic exec from register_orcs_functions
+        // Uses check_command_permission() which respects dynamic grants from HIL approval
         let ctx_clone = Arc::clone(&ctx);
         let exec_fn = lua.create_function(move |lua, cmd: String| {
             let ctx_guard = ctx_clone
                 .lock()
                 .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
 
-            // Permission check
-            if !ctx_guard.can_execute_command(&cmd) {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("stdout", "")?;
-                result.set(
-                    "stderr",
-                    "permission denied: exec requires elevated session",
-                )?;
-                result.set("code", -1)?;
-                return Ok(result);
+            // Permission check via check_command_permission (respects dynamic grants)
+            let permission = ctx_guard.check_command_permission(&cmd);
+            match &permission {
+                orcs_component::CommandPermission::Allowed => {
+                    // Proceed to execution
+                }
+                orcs_component::CommandPermission::Denied(reason) => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("stdout", "")?;
+                    result.set("stderr", format!("permission denied: {}", reason))?;
+                    result.set("code", -1)?;
+                    return Ok(result);
+                }
+                orcs_component::CommandPermission::RequiresApproval { .. } => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("stdout", "")?;
+                    result.set(
+                        "stderr",
+                        "permission denied: command requires approval (use orcs.check_command first)",
+                    )?;
+                    result.set("code", -1)?;
+                    return Ok(result);
+                }
             }
 
             tracing::debug!("Lua exec (authorized): {}", cmd);
