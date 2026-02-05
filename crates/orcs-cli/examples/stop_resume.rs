@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use orcs_app::OrcsApp;
+use orcs_app::{NoOpResolver, OrcsApp};
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
     println!("=== ORCS Stop/Resume Example ===");
     println!();
 
-    // Build application
-    let mut builder = OrcsApp::builder();
+    // Build application with default config
+    let mut builder = OrcsApp::builder(NoOpResolver);
 
     if let Some(ref session_id) = args.resume {
         println!("Resuming session: {}", session_id);

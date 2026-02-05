@@ -9,11 +9,11 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use orcs_app::OrcsApp;
+//! use orcs_app::{OrcsApp, NoOpResolver};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let mut app = OrcsApp::builder().build()?;
+//!     let mut app = OrcsApp::builder(NoOpResolver).build().await?;
 //!     app.run_interactive().await?;
 //!     Ok(())
 //! }
@@ -58,11 +58,9 @@
 //! ```
 
 mod app;
-mod cli_overrides;
 mod error;
 
 pub use app::{OrcsApp, OrcsAppBuilder};
-pub use cli_overrides::CliOverrides;
 pub use error::AppError;
 
 // Re-export from Plugin SDK Layer

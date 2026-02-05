@@ -1,63 +1,62 @@
-//! Configuration resolver trait for layered overrides.
+//! Configuration resolver trait.
 //!
 //! # Architecture
 //!
+//! The `ConfigResolver` trait abstracts configuration resolution.
+//! Each call to `resolve()` produces a fully-merged `OrcsConfig`
+//! from all available sources (files, env, CLI flags, etc.).
+//!
+//! The application layer holds a resolver and controls **when** to
+//! call `resolve()`, enabling hot-reload without process restart.
+//!
 //! ```text
-//! ConfigLoader.load()  →  OrcsConfig (base)
-//!                              │
-//!                              ▼
-//!                     ConfigResolver.apply()
-//!                              │
-//!                              ▼
-//!                     OrcsConfig (final)
+//! impl ConfigResolver (CLI / test / GUI / ...)
+//!          │
+//!          ▼
+//!   resolve() → Result<OrcsConfig>
+//!          │
+//!          ▼
+//!   OrcsApp holds resolver → reload_config() at any time
 //! ```
 //!
 //! # Example
 //!
 //! ```ignore
-//! use orcs_runtime::config::{ConfigLoader, ConfigResolver, OrcsConfig};
+//! use orcs_runtime::config::{ConfigResolver, ConfigLoader, OrcsConfig, ConfigError};
 //!
-//! struct CliOverrides {
-//!     verbose: Option<bool>,
-//! }
+//! struct MyResolver;
 //!
-//! impl ConfigResolver for CliOverrides {
-//!     fn apply(&self, config: &mut OrcsConfig) {
-//!         if let Some(v) = self.verbose {
-//!             config.ui.verbose = v;
-//!         }
+//! impl ConfigResolver for MyResolver {
+//!     fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
+//!         ConfigLoader::new().load()
 //!     }
 //! }
-//!
-//! let mut config = ConfigLoader::new().load()?;
-//! let cli = CliOverrides { verbose: Some(true) };
-//! cli.apply(&mut config);
 //! ```
 
-use super::OrcsConfig;
+use super::{ConfigError, OrcsConfig};
 
-/// Trait for applying configuration overrides.
+/// Trait for resolving configuration from all sources.
 ///
-/// Implementors can modify an existing config with their specific overrides.
-/// This enables a clean separation between config loading (file/env) and
-/// runtime overrides (CLI flags, programmatic settings).
-pub trait ConfigResolver {
-    /// Applies overrides to the given configuration.
+/// Each invocation of `resolve()` returns a fresh, fully-merged
+/// `OrcsConfig`. This allows the application to re-resolve at any
+/// time (e.g., after a config file edit) without restarting.
+pub trait ConfigResolver: Send + Sync {
+    /// Resolves and returns the current configuration.
     ///
-    /// Only non-None values should be applied, preserving existing values
-    /// for unspecified options.
-    fn apply(&self, config: &mut OrcsConfig);
+    /// Implementations should merge all layers (file, env, flags)
+    /// and return the final result.
+    fn resolve(&self) -> Result<OrcsConfig, ConfigError>;
 }
 
-/// No-op resolver that makes no changes.
+/// No-op resolver that returns default configuration.
 ///
-/// Useful as a default or for testing.
+/// Useful as a fallback or for testing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoOpResolver;
 
 impl ConfigResolver for NoOpResolver {
-    fn apply(&self, _config: &mut OrcsConfig) {
-        // No changes
+    fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
+        Ok(OrcsConfig::default())
     }
 }
 
@@ -66,35 +65,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn noop_resolver_does_nothing() {
-        let mut config = OrcsConfig::default();
-        let original = config.clone();
-
-        NoOpResolver.apply(&mut config);
-
-        assert_eq!(config, original);
+    fn noop_resolver_returns_default() {
+        let config = NoOpResolver.resolve().unwrap();
+        assert_eq!(config, OrcsConfig::default());
     }
 
     #[test]
     fn custom_resolver() {
         struct TestResolver {
-            debug: Option<bool>,
+            debug: bool,
         }
 
         impl ConfigResolver for TestResolver {
-            fn apply(&self, config: &mut OrcsConfig) {
-                if let Some(d) = self.debug {
-                    config.debug = d;
-                }
+            fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
+                let mut config = OrcsConfig::default();
+                config.debug = self.debug;
+                Ok(config)
             }
         }
 
-        let mut config = OrcsConfig::default();
-        assert!(!config.debug);
-
-        let resolver = TestResolver { debug: Some(true) };
-        resolver.apply(&mut config);
-
+        let config = TestResolver { debug: true }.resolve().unwrap();
         assert!(config.debug);
     }
 }

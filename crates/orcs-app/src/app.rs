@@ -53,17 +53,17 @@
 //! # Example
 //!
 //! ```ignore
-//! use orcs_app::OrcsApp;
+//! use orcs_app::{OrcsApp, NoOpResolver};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let mut app = OrcsApp::builder().build().await?;
+//!     let mut app = OrcsApp::builder(NoOpResolver).build().await?;
 //!     app.run_interactive().await?;
 //!     Ok(())
 //! }
 //! ```
 
-use crate::{AppError, CliOverrides};
+use crate::AppError;
 use mlua::Lua;
 use orcs_component::{ChildConfig, Component, RunnableChild, SpawnError};
 use orcs_event::Signal;
@@ -72,13 +72,12 @@ use orcs_runtime::auth::{DefaultPolicy, PermissionChecker};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
-    ChannelConfig, ConfigLoader, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle,
-    IOPort, InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session,
-    SessionAsset, World,
+    ChannelConfig, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
+    InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session, SessionAsset,
+    World,
 };
 use orcs_types::{ChannelId, Principal, PrincipalId};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -131,6 +130,8 @@ enum LoopControl {
 pub struct OrcsApp {
     /// Loaded configuration (merged from all sources).
     config: OrcsConfig,
+    /// Configuration resolver (retained for hot-reload).
+    resolver: Box<dyn ConfigResolver>,
     engine: OrcsEngine,
     /// Principal for signal creation.
     principal: Principal,
@@ -161,9 +162,12 @@ pub struct OrcsApp {
 
 impl OrcsApp {
     /// Creates a new builder for OrcsApp.
+    ///
+    /// The resolver is required and controls how configuration is loaded.
+    /// The application retains the resolver for hot-reload support.
     #[must_use]
-    pub fn builder() -> OrcsAppBuilder {
-        OrcsAppBuilder::new()
+    pub fn builder(resolver: impl ConfigResolver + 'static) -> OrcsAppBuilder {
+        OrcsAppBuilder::new(resolver)
     }
 
     /// Returns a reference to the engine.
@@ -181,6 +185,22 @@ impl OrcsApp {
     #[must_use]
     pub fn config(&self) -> &OrcsConfig {
         &self.config
+    }
+
+    /// Re-resolves configuration from all sources (hot-reload).
+    ///
+    /// Calls the retained `ConfigResolver::resolve()` to get a fresh
+    /// config reflecting any file/env changes since last resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Config`] if resolution fails.
+    pub fn reload_config(&mut self) -> Result<(), AppError> {
+        self.config = self
+            .resolver
+            .resolve()
+            .map_err(|e| AppError::Config(e.to_string()))?;
+        Ok(())
     }
 
     /// Returns the console renderer.
@@ -570,80 +590,41 @@ impl OrcsApp {
 
 /// Builder for [`OrcsApp`].
 ///
-/// # Configuration Loading
-///
-/// Configuration is loaded from multiple sources with priority:
-///
-/// 1. CLI overrides (via builder methods like `verbose()`)
-/// 2. Environment variables (`ORCS_*`)
-/// 3. Project config (`.orcs/config.toml`)
-/// 4. Global config (`~/.orcs/config.toml`)
-/// 5. Default values
+/// Accepts a [`ConfigResolver`] that encapsulates all config resolution
+/// logic (file loading, env vars, CLI overrides). The builder only
+/// handles launch parameters (e.g., session resume).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let app = OrcsApp::builder()
-///     .with_project_root("/path/to/project")
-///     .verbose()  // CLI override
+/// use orcs_runtime::{ConfigResolver, OrcsConfig, ConfigError};
+///
+/// struct MyResolver;
+/// impl ConfigResolver for MyResolver {
+///     fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
+///         Ok(OrcsConfig::default())
+///     }
+/// }
+///
+/// let app = OrcsApp::builder(MyResolver)
 ///     .build()
 ///     .await?;
 /// ```
 pub struct OrcsAppBuilder {
-    /// Project root directory for project-local config.
-    project_root: Option<PathBuf>,
-    /// Session ID to resume from.
+    /// Configuration resolver (owned, moved into OrcsApp).
+    resolver: Box<dyn ConfigResolver>,
+    /// Session ID to resume from (launch parameter).
     resume_session_id: Option<String>,
-    /// CLI overrides (applied after config loading).
-    cli_overrides: CliOverrides,
 }
 
 impl OrcsAppBuilder {
-    /// Creates a new builder with default settings.
+    /// Creates a new builder with the given resolver.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(resolver: impl ConfigResolver + 'static) -> Self {
         Self {
-            project_root: None,
+            resolver: Box::new(resolver),
             resume_session_id: None,
-            cli_overrides: CliOverrides::new(),
         }
-    }
-
-    /// Sets the project root directory.
-    ///
-    /// Project config will be loaded from `<project_root>/.orcs/config.toml`.
-    #[must_use]
-    pub fn with_project_root(mut self, path: impl Into<PathBuf>) -> Self {
-        self.project_root = Some(path.into());
-        self
-    }
-
-    /// Enables verbose output (CLI override).
-    #[must_use]
-    pub fn verbose(mut self) -> Self {
-        self.cli_overrides = self.cli_overrides.verbose(true);
-        self
-    }
-
-    /// Enables debug mode (CLI override).
-    #[must_use]
-    pub fn debug(mut self) -> Self {
-        self.cli_overrides = self.cli_overrides.debug(true);
-        self
-    }
-
-    /// Sets a custom session storage path (CLI override).
-    #[must_use]
-    pub fn with_session_path(mut self, path: PathBuf) -> Self {
-        self.cli_overrides = self.cli_overrides.session_path(path);
-        self
-    }
-
-    /// Sets CLI overrides directly.
-    #[must_use]
-    pub fn with_cli_overrides(mut self, overrides: CliOverrides) -> Self {
-        self.cli_overrides = overrides;
-        self
     }
 
     /// Sets a session ID to resume from.
@@ -655,27 +636,18 @@ impl OrcsAppBuilder {
 
     /// Builds the application.
     ///
-    /// Loads configuration from all sources, creates the World, Engine,
-    /// and spawns the IO channel runner with EchoWithHilComponent.
-    ///
-    /// # Configuration Priority
-    ///
-    /// CLI overrides > Environment > Project > Global > Default
+    /// Resolves configuration via the provided [`ConfigResolver`],
+    /// creates the World, Engine, and spawns component runners.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Config`] if configuration loading fails.
+    /// Returns [`AppError::Config`] if configuration resolution fails.
     pub async fn build(self) -> Result<OrcsApp, AppError> {
-        // Load configuration with hierarchical merging
-        let mut loader = ConfigLoader::new();
-        if let Some(ref project_root) = self.project_root {
-            loader = loader.with_project_root(project_root);
-        }
-
-        let mut config = loader.load().map_err(|e| AppError::Config(e.to_string()))?;
-
-        // Apply CLI overrides (highest priority)
-        self.cli_overrides.apply(&mut config);
+        // Resolve configuration (all layers handled by the resolver)
+        let config = self
+            .resolver
+            .resolve()
+            .map_err(|e| AppError::Config(e.to_string()))?;
 
         // Create session store
         let session_path = config.paths.session_dir_or_default();
@@ -820,6 +792,7 @@ impl OrcsAppBuilder {
 
         Ok(OrcsApp {
             config,
+            resolver: self.resolver,
             engine,
             principal,
             renderer,
@@ -835,41 +808,43 @@ impl OrcsAppBuilder {
     }
 }
 
-impl Default for OrcsAppBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_runtime::NoOpResolver;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn builder_default() {
-        let app = OrcsApp::builder().build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
         assert!(app.pending_approval_id().is_none());
     }
 
     #[tokio::test]
-    async fn builder_verbose() {
-        let app = OrcsApp::builder().verbose().build().await.unwrap();
-        assert!(app.pending_approval_id().is_none());
+    async fn builder_with_custom_resolver() {
+        struct VerboseResolver;
+        impl ConfigResolver for VerboseResolver {
+            fn resolve(&self) -> Result<OrcsConfig, orcs_runtime::ConfigError> {
+                let mut config = OrcsConfig::default();
+                config.ui.verbose = true;
+                Ok(config)
+            }
+        }
+
+        let app = OrcsApp::builder(VerboseResolver).build().await.unwrap();
+        assert!(app.config().ui.verbose);
     }
 
     #[tokio::test]
     async fn app_engine_access() {
-        let app = OrcsApp::builder().build().await.unwrap();
-        // Engine is not running until run() is called
+        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
         assert!(!app.engine().is_running());
     }
 
     #[tokio::test]
     async fn app_engine_parallel_access() {
-        let app = OrcsApp::builder().build().await.unwrap();
-        // WorldManager starts immediately in new(), io_channel is always set
+        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
         let io = app.engine().io_channel();
-        // Verify the channel exists in World
         let world = app.engine().world_read();
         let w = world.read().await;
         assert!(w.get(&io).is_some());
@@ -877,51 +852,57 @@ mod tests {
 
     #[tokio::test]
     async fn app_session_id() {
-        let app = OrcsApp::builder().build().await.unwrap();
-        // Session ID is generated at build time
+        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
         assert!(!app.session_id().is_empty());
     }
 
     #[tokio::test]
     async fn app_new_session_not_resumed() {
-        let app = OrcsApp::builder().build().await.unwrap();
-        // New session is not resumed
+        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
         assert!(!app.is_resumed());
         assert_eq!(app.restored_count(), 0);
     }
 
     #[tokio::test]
     async fn app_save_and_load_session() {
-        // Use a unique temp directory for this test
         let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Create and save a session
+        struct SessionResolver {
+            session_dir: PathBuf,
+        }
+        impl ConfigResolver for SessionResolver {
+            fn resolve(&self) -> Result<OrcsConfig, orcs_runtime::ConfigError> {
+                let mut config = OrcsConfig::default();
+                config.paths.session_dir = Some(self.session_dir.clone());
+                Ok(config)
+            }
+        }
+
         let session_id = {
-            let mut app = OrcsApp::builder()
-                .with_session_path(temp_dir.clone())
-                .build()
-                .await
-                .unwrap();
+            let mut app = OrcsApp::builder(SessionResolver {
+                session_dir: temp_dir.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
 
             let id = app.session_id().to_string();
             app.save_session().await.unwrap();
             id
         };
 
-        // Resume the session
-        let app = OrcsApp::builder()
-            .with_session_path(temp_dir.clone())
-            .resume(&session_id)
-            .build()
-            .await
-            .unwrap();
+        let app = OrcsApp::builder(SessionResolver {
+            session_dir: temp_dir.clone(),
+        })
+        .resume(&session_id)
+        .build()
+        .await
+        .unwrap();
 
-        // Verify resumed state
         assert!(app.is_resumed());
         assert_eq!(app.session_id(), session_id);
 
-        // Cleanup
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
@@ -930,15 +911,57 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let result = OrcsApp::builder()
-            .with_session_path(temp_dir.clone())
-            .resume("nonexistent-session-id")
-            .build()
-            .await;
+        struct SessionResolver {
+            session_dir: PathBuf,
+        }
+        impl ConfigResolver for SessionResolver {
+            fn resolve(&self) -> Result<OrcsConfig, orcs_runtime::ConfigError> {
+                let mut config = OrcsConfig::default();
+                config.paths.session_dir = Some(self.session_dir.clone());
+                Ok(config)
+            }
+        }
+
+        let result = OrcsApp::builder(SessionResolver {
+            session_dir: temp_dir.clone(),
+        })
+        .resume("nonexistent-session-id")
+        .build()
+        .await;
 
         assert!(result.is_err());
 
-        // Cleanup
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn app_reload_config() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct ToggleResolver {
+            debug: Arc<AtomicBool>,
+        }
+        impl ConfigResolver for ToggleResolver {
+            fn resolve(&self) -> Result<OrcsConfig, orcs_runtime::ConfigError> {
+                let mut config = OrcsConfig::default();
+                config.debug = self.debug.load(Ordering::Relaxed);
+                Ok(config)
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut app = OrcsApp::builder(ToggleResolver {
+            debug: Arc::clone(&flag),
+        })
+        .build()
+        .await
+        .unwrap();
+
+        assert!(!app.config().debug);
+
+        flag.store(true, Ordering::Relaxed);
+        app.reload_config().unwrap();
+
+        assert!(app.config().debug);
     }
 }
