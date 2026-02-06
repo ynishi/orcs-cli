@@ -107,8 +107,48 @@ pub fn register_base_orcs_functions(
         orcs_table.set("exec", exec_fn)?;
     }
 
+    // orcs.pwd - sandbox root as string (always available)
+    orcs_table.set("pwd", sandbox.root().display().to_string())?;
+
     // Register native Rust tools (read, write, grep, glob)
     crate::tools::register_tool_functions(lua, sandbox)?;
+
+    // Disable dangerous Lua stdlib functions
+    sandbox_lua_globals(lua)?;
+
+    Ok(())
+}
+
+/// Disables dangerous Lua standard library functions.
+///
+/// Removes filesystem and process access that would bypass the sandbox:
+/// - `io.*` — entire module replaced with nil (use `orcs.read`/`orcs.write` instead)
+/// - `os.execute`, `os.remove`, `os.rename`, `os.exit`, `os.tmpname`
+/// - `loadfile`, `dofile` — arbitrary file loading
+///
+/// Preserves safe `os` functions: `os.time`, `os.clock`, `os.date`, `os.difftime`.
+fn sandbox_lua_globals(lua: &Lua) -> Result<(), LuaError> {
+    lua.load(
+        r#"
+        -- Remove entire io module (orcs.read/write replaces it)
+        io = nil
+
+        -- Remove dangerous os functions, keep time-related ones
+        if os then
+            os.execute = nil
+            os.remove = nil
+            os.rename = nil
+            os.exit = nil
+            os.tmpname = nil
+        end
+
+        -- Remove arbitrary file loading
+        loadfile = nil
+        dofile = nil
+        "#,
+    )
+    .exec()
+    .map_err(LuaError::Runtime)?;
 
     Ok(())
 }
