@@ -51,6 +51,20 @@
 //! }
 //! ```
 //!
+//! # Sandbox
+//!
+//! All file operations (`orcs.read`, `orcs.write`, `orcs.grep`, `orcs.glob`,
+//! `orcs.mkdir`, `orcs.remove`, `orcs.mv`) are sandboxed via
+//! [`SandboxPolicy`](orcs_runtime::sandbox::SandboxPolicy). The sandbox is
+//! injected at construction time and controls:
+//!
+//! - Which filesystem paths are accessible for reads and writes
+//! - The working directory for `orcs.exec()` commands
+//! - The value of `orcs.pwd` in Lua
+//!
+//! Dangerous Lua stdlib functions (`io.*`, `os.execute`, `loadfile`, etc.)
+//! are disabled after registration to prevent sandbox bypass.
+//!
 //! # Hot Reload
 //!
 //! `LuaComponent::reload()` allows reloading the script from file.
@@ -66,12 +80,16 @@
 //!
 //! ```ignore
 //! use orcs_lua::ScriptLoader;
+//! use orcs_runtime::sandbox::ProjectSandbox;
+//! use std::sync::Arc;
+//!
+//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
 //!
 //! // Load embedded script
-//! let component = ScriptLoader::load_embedded("echo")?;
+//! let component = ScriptLoader::load_embedded("echo", sandbox.clone())?;
 //!
 //! // Load with runtime fallback
-//! let loader = ScriptLoader::new().with_path("./scripts");
+//! let loader = ScriptLoader::new(sandbox).with_path("./scripts");
 //! let component = loader.load("echo")?;
 //! ```
 

@@ -1,29 +1,44 @@
 //! Common orcs helper functions for Lua.
 //!
 //! Provides base orcs functions that are shared between LuaComponent and LuaChild.
+//! All functions are registered under the `orcs` global table in Lua.
 //!
 //! # Available Functions
 //!
 //! | Function | Description |
 //! |----------|-------------|
 //! | `orcs.log(level, msg)` | Log a message at specified level |
-//! | `orcs.exec(cmd)` | Execute shell command and return output |
+//! | `orcs.exec(cmd)` | Execute shell command (cwd = sandbox root) |
+//! | `orcs.pwd` | Sandbox root path as string |
 //! | `orcs.read(path)` | Read file contents (native Rust) |
 //! | `orcs.write(path, content)` | Write file contents (atomic, native Rust) |
 //! | `orcs.grep(pattern, path)` | Search with regex (native Rust) |
 //! | `orcs.glob(pattern, dir?)` | Find files by pattern (native Rust) |
+//! | `orcs.mkdir(path)` | Create directory with parents (native Rust) |
+//! | `orcs.remove(path)` | Remove file or directory (native Rust) |
+//! | `orcs.mv(src, dst)` | Move / rename (native Rust) |
+//!
+//! # Globals Sandboxing
+//!
+//! After registration, `sandbox_lua_globals` is called to disable
+//! dangerous Lua stdlib functions (`io.*`, `os.execute`, `loadfile`, etc.)
+//! that would bypass the sandbox.
 //!
 //! # Usage
 //!
 //! ```ignore
 //! use orcs_lua::orcs_helpers::register_base_orcs_functions;
+//! use orcs_runtime::sandbox::ProjectSandbox;
+//! use std::sync::Arc;
 //!
 //! let lua = Lua::new();
-//! register_base_orcs_functions(&lua)?;
+//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
+//! register_base_orcs_functions(&lua, sandbox)?;
 //!
 //! // Now Lua scripts can use:
 //! // orcs.log("info", "Hello")
 //! // orcs.exec("ls -la")
+//! // orcs.pwd  -- sandbox root path
 //! ```
 
 use crate::error::LuaError;
@@ -39,11 +54,17 @@ const ORCS_TABLE_NAME: &str = "orcs";
 ///
 /// Creates the `orcs` global table if it doesn't exist and adds:
 /// - `orcs.log(level, msg)` - Log a message at specified level
-/// - `orcs.exec(cmd)` - Execute shell command and return output
+/// - `orcs.exec(cmd)` - Execute shell command (cwd = sandbox root)
+/// - `orcs.pwd` - Sandbox root path as string
+///
+/// Then delegates to [`register_tool_functions`](crate::tools::register_tool_functions)
+/// for native file operations (`read`, `write`, `grep`, `glob`, `mkdir`, `remove`, `mv`)
+/// and calls `sandbox_lua_globals` to disable dangerous Lua stdlib functions.
 ///
 /// # Arguments
 ///
 /// * `lua` - The Lua runtime
+/// * `sandbox` - Sandbox policy controlling file access and exec cwd
 ///
 /// # Errors
 ///

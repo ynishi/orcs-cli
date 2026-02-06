@@ -106,6 +106,7 @@ impl LuaComponent {
     /// # Arguments
     ///
     /// * `path` - Path to the Lua script
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     ///
     /// # Errors
     ///
@@ -131,6 +132,7 @@ impl LuaComponent {
     /// # Arguments
     ///
     /// * `script` - Lua script content
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     ///
     /// # Errors
     ///

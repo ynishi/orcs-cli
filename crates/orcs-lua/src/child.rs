@@ -111,6 +111,7 @@ impl LuaChild {
     ///
     /// * `lua` - Shared Lua runtime
     /// * `table` - Lua table defining the child
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     ///
     /// # Errors
     ///
@@ -194,6 +195,7 @@ impl LuaChild {
     ///
     /// * `lua` - Shared Lua runtime
     /// * `table` - Lua table defining the child (must have `run` function)
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     ///
     /// # Errors
     ///
@@ -219,6 +221,12 @@ impl LuaChild {
     /// Creates a simple LuaChild with just an ID.
     ///
     /// The on_signal callback will return Ignored for all signals.
+    ///
+    /// # Arguments
+    ///
+    /// * `lua` - Shared Lua runtime
+    /// * `id` - Child identifier
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     pub fn simple(
         lua: Arc<Mutex<Lua>>,
         id: impl Into<String>,
@@ -260,6 +268,7 @@ impl LuaChild {
     ///
     /// * `lua` - Shared Lua runtime
     /// * `script` - Inline Lua script
+    /// * `sandbox` - Sandbox policy for file operations and exec cwd
     ///
     /// # Errors
     ///

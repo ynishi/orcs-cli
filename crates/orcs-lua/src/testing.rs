@@ -74,6 +74,7 @@ impl LuaTestHarness {
     /// # Arguments
     ///
     /// * `script` - Lua script content
+    /// * `sandbox` - Sandbox policy for file operations
     ///
     /// # Errors
     ///
@@ -112,6 +113,7 @@ impl LuaTestHarness {
     /// # Arguments
     ///
     /// * `path` - Path to the Lua script file
+    /// * `sandbox` - Sandbox policy for file operations
     ///
     /// # Errors
     ///

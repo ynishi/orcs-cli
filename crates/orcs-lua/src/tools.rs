@@ -81,6 +81,9 @@ struct GrepMatch {
 }
 
 /// Searches a file (or directory recursively) for a regex pattern.
+///
+/// When searching a directory, uses `sandbox.root()` as the symlink
+/// boundary to prevent recursive traversal from escaping the sandbox.
 fn tool_grep(
     pattern: &str,
     path: &str,
@@ -119,6 +122,11 @@ fn grep_file(re: &regex::Regex, path: &Path, matches: &mut Vec<GrepMatch>) -> Re
     Ok(())
 }
 
+/// Recursively greps a directory for regex matches.
+///
+/// `sandbox_root` is used as the symlink boundary: any path that
+/// canonicalizes outside `sandbox_root` is silently skipped.
+/// Binary files (detected by null bytes in the first 512 bytes) are also skipped.
 fn grep_dir(
     re: &regex::Regex,
     dir: &Path,
@@ -192,12 +200,17 @@ fn tool_glob(
 }
 
 /// Creates a directory (and all parents) under the sandbox.
+///
+/// The path is validated via `sandbox.validate_write()` before creation.
 fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&target).map_err(|e| format!("mkdir failed: {path} ({e})"))
 }
 
 /// Removes a file or directory under the sandbox.
+///
+/// Uses `remove_file` for files and `remove_dir_all` for directories.
+/// The path is validated via `sandbox.validate_read()` before removal.
 fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
 
@@ -211,6 +224,9 @@ fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
 }
 
 /// Moves (renames) a file or directory within the sandbox.
+///
+/// Both source and destination are validated through the sandbox.
+/// Creates destination parent directories if they don't exist.
 fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     let src_canonical = sandbox.validate_read(src).map_err(|e| e.to_string())?;
     let dst_target = sandbox.validate_write(dst).map_err(|e| e.to_string())?;

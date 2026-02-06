@@ -47,6 +47,8 @@ pub struct ScriptLoader {
 
 impl ScriptLoader {
     /// Creates a new loader with embedded fallback enabled.
+    ///
+    /// The sandbox is passed to all components loaded by this loader.
     #[must_use]
     pub fn new(sandbox: Arc<dyn SandboxPolicy>) -> Self {
         Self {
