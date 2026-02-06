@@ -113,8 +113,8 @@ pub mod session;
 
 // Re-exports for convenience
 pub use auth::{
-    AccessDenied, CommandPermission, DefaultPolicy, PermissionChecker, PermissionPolicy,
-    PrivilegeLevel, Session,
+    AccessDenied, CommandPermission, DefaultGrantStore, DefaultPolicy, GrantPolicy,
+    PermissionChecker, PermissionPolicy, PrivilegeLevel, Session,
 };
 pub use channel::{
     priority, BaseChannel, Channel, ChannelConfig, ChannelCore, ChannelError, ChannelHandle,

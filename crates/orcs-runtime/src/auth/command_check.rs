@@ -20,7 +20,7 @@ use crate::components::ApprovalRequest;
 ///
 /// 1. Submit the `ApprovalRequest` to `HilComponent`
 /// 2. Wait for user approval/rejection
-/// 3. If approved, call `session.grant_command(grant_pattern)`
+/// 3. If approved, call `grants.grant(CommandGrant::persistent(grant_pattern))`
 /// 4. Retry the command (which will now return `Allowed`)
 ///
 /// # Example

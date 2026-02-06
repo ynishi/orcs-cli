@@ -7,6 +7,7 @@ use super::child_spawner::ChildSpawner;
 use super::{ChannelRunner, Event};
 use crate::auth::{CommandCheckResult, PermissionChecker, Session};
 use crate::channel::{World, WorldCommand};
+use orcs_auth::{CommandGrant, GrantPolicy};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
     ChildResult, Component, ComponentLoader, RunError, SpawnError,
@@ -41,10 +42,12 @@ pub struct ChildContextImpl {
     component_loader: Option<Arc<dyn ComponentLoader>>,
 
     // -- Auth support --
-    /// Session for permission checking (Arc for shared grant state).
+    /// Session for permission checking (identity + privilege level).
     session: Option<Arc<Session>>,
     /// Permission checker policy.
     checker: Option<Arc<dyn PermissionChecker>>,
+    /// Dynamic command grants (shared across contexts).
+    grants: Option<Arc<dyn GrantPolicy>>,
 
     // -- Runner spawning support --
     /// World command sender for creating channels.
@@ -90,6 +93,7 @@ impl ChildContextImpl {
             component_loader: None,
             session: None,
             checker: None,
+            grants: None,
             world_tx: None,
             world: None,
             signal_tx: None,
@@ -140,6 +144,13 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the dynamic grant store for command permission management.
+    #[must_use]
+    pub fn with_grants(mut self, grants: Arc<dyn GrantPolicy>) -> Self {
+        self.grants = Some(grants);
+        self
+    }
+
     /// Returns the session if set.
     #[must_use]
     pub fn session(&self) -> Option<&Arc<Session>> {
@@ -178,7 +189,7 @@ impl ChildContextImpl {
     ///
     /// 1. Submit the `ApprovalRequest` to HilComponent
     /// 2. Wait for user approval
-    /// 3. If approved, call `session.grant_command(grant_pattern)`
+    /// 3. If approved, call `ctx.grant_command(&grant_pattern)`
     /// 4. The command will then be allowed on retry
     ///
     /// # Example
@@ -200,7 +211,18 @@ impl ChildContextImpl {
     #[must_use]
     pub fn check_command(&self, cmd: &str) -> CommandCheckResult {
         match (&self.session, &self.checker) {
-            (Some(session), Some(checker)) => checker.check_command(session, cmd),
+            (Some(session), Some(checker)) => {
+                // grants 未注入時は空 store をfallback（grant_command が効かない）
+                let empty;
+                let grants: &dyn GrantPolicy = match &self.grants {
+                    Some(g) => g.as_ref(),
+                    None => {
+                        empty = crate::auth::DefaultGrantStore::new();
+                        &empty
+                    }
+                };
+                checker.check_command(session, grants, cmd)
+            }
             _ => CommandCheckResult::Allowed, // Permissive mode when not configured
         }
     }
@@ -210,10 +232,10 @@ impl ChildContextImpl {
     /// This is typically called after HIL approval to allow
     /// the same command pattern without re-approval.
     ///
-    /// Does nothing if no session is configured.
+    /// Does nothing if no grants store is configured.
     pub fn grant_command(&self, pattern: &str) {
-        if let Some(session) = &self.session {
-            session.grant_command(pattern);
+        if let Some(grants) = &self.grants {
+            grants.grant(CommandGrant::persistent(pattern));
         }
     }
 
@@ -323,6 +345,7 @@ impl ChildContextImpl {
         // Clone auth context to propagate to child runner
         let session_clone = self.session.clone();
         let checker_clone = self.checker.clone();
+        let grants_clone = self.grants.clone();
 
         // Spawn the runner in a new task
         tokio::spawn(async move {
@@ -343,6 +366,9 @@ impl ChildContextImpl {
             }
             if let Some(checker) = checker_clone {
                 builder = builder.with_checker(checker);
+            }
+            if let Some(grants) = grants_clone {
+                builder = builder.with_grants(grants);
             }
 
             let (runner, _handle) = builder.build();
@@ -381,6 +407,7 @@ impl Debug for ChildContextImpl {
             .field("has_lua_loader", &self.lua_loader.is_some())
             .field("has_session", &self.session.is_some())
             .field("has_checker", &self.checker.is_some())
+            .field("has_grants", &self.grants.is_some())
             .field("can_spawn_runner", &self.can_spawn_runner())
             .finish()
     }
@@ -494,7 +521,15 @@ impl ChildContext for ChildContextImpl {
         use orcs_component::CommandPermission;
         match (&self.session, &self.checker) {
             (Some(session), Some(checker)) => {
-                let result = checker.check_command(session, cmd);
+                let empty;
+                let grants: &dyn GrantPolicy = match &self.grants {
+                    Some(g) => g.as_ref(),
+                    None => {
+                        empty = crate::auth::DefaultGrantStore::new();
+                        &empty
+                    }
+                };
+                let result = checker.check_command(session, grants, cmd);
                 match result {
                     CommandCheckResult::Allowed => CommandPermission::Allowed,
                     CommandCheckResult::Denied(reason) => CommandPermission::Denied(reason),
@@ -512,8 +547,8 @@ impl ChildContext for ChildContextImpl {
     }
 
     fn grant_command(&self, pattern: &str) {
-        if let Some(session) = &self.session {
-            session.grant_command(pattern);
+        if let Some(grants) = &self.grants {
+            grants.grant(CommandGrant::persistent(pattern));
         }
     }
 
@@ -787,7 +822,7 @@ mod tests {
 
     mod check_command_tests {
         use super::*;
-        use crate::auth::{DefaultPolicy, Session};
+        use crate::auth::{DefaultGrantStore, DefaultPolicy, Session};
         use orcs_types::{Principal, PrincipalId};
         use std::time::Duration;
 
@@ -803,10 +838,13 @@ mod tests {
                 Session::new(Principal::User(PrincipalId::new()))
             };
 
+            let grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+
             let ctx = ChildContextImpl::new("test-parent", output_tx, spawner_arc)
                 .with_lua_loader(Arc::new(TestLoader))
                 .with_session(session)
-                .with_checker(Arc::new(DefaultPolicy));
+                .with_checker(Arc::new(DefaultPolicy))
+                .with_grants(grants);
 
             (ctx, output_rx)
         }
@@ -864,25 +902,28 @@ mod tests {
         }
 
         #[test]
-        fn shared_session_shares_grants() {
+        fn shared_grants_across_contexts() {
             let (output_tx, _) = mpsc::channel(64);
             let spawner = ChildSpawner::new("test", output_tx.clone());
             let spawner_arc = Arc::new(Mutex::new(spawner));
 
             let session = Arc::new(Session::new(Principal::User(PrincipalId::new())));
+            let grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
 
             let ctx1 = ChildContextImpl::new("ctx1", output_tx.clone(), Arc::clone(&spawner_arc))
                 .with_session_arc(Arc::clone(&session))
-                .with_checker(Arc::new(DefaultPolicy));
+                .with_checker(Arc::new(DefaultPolicy))
+                .with_grants(Arc::clone(&grants));
 
             let ctx2 = ChildContextImpl::new("ctx2", output_tx, spawner_arc)
                 .with_session_arc(Arc::clone(&session))
-                .with_checker(Arc::new(DefaultPolicy));
+                .with_checker(Arc::new(DefaultPolicy))
+                .with_grants(Arc::clone(&grants));
 
             // Grant via ctx1
             ctx1.grant_command("rm -rf");
 
-            // Should be allowed in ctx2
+            // Should be allowed in ctx2 (shared grants)
             let result = ctx2.check_command("rm -rf ./temp");
             assert!(result.is_allowed());
         }

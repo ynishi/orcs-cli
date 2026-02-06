@@ -3,17 +3,23 @@
 //! This crate provides the unified permission model for ORCS,
 //! sitting at the same level as `orcs-event` in the dependency graph.
 //!
-//! # Three-Layer Permission Model
+//! # Permission Model
 //!
 //! ```text
-//! Effective Permission = Capability(WHAT) ∩ ResourcePolicy(WHERE) ∩ Session(WHO+WHEN)
+//! Effective Permission =
+//!     Capability(static WHAT)
+//!   ∩ SandboxPolicy(WHERE)
+//!   ∩ Session(WHO + WHEN)
+//!   ∩ GrantPolicy(dynamic WHAT — modified by Grant/Revoke)
 //! ```
 //!
 //! | Layer | Type | Controls |
 //! |-------|------|----------|
-//! | [`Capability`] | Bitflags | What operations are allowed (READ, WRITE, EXECUTE, ...) |
+//! | [`Capability`] | Bitflags | What operations are allowed (static, inherited) |
 //! | [`SandboxPolicy`] | Trait | Where operations can target (filesystem boundary, etc.) |
-//! | [`Session`] + [`PermissionPolicy`] | Struct + Trait | Who is acting, with what privilege level |
+//! | [`Session`] | Struct | Who is acting, with what privilege level |
+//! | [`GrantPolicy`] | Trait | Dynamic command permissions (grant/revoke at runtime) |
+//! | [`PermissionPolicy`] | Trait | Combines all layers for permission decisions |
 //!
 //! # Crate Architecture
 //!
@@ -21,11 +27,11 @@
 //! orcs-types  (IDs, Principal)
 //!     ↑            ↑
 //! orcs-event   orcs-auth  ◄── THIS CRATE
-//! (Signal)     (Capability, SandboxPolicy, Session, PermissionPolicy)
+//! (Signal)     (Capability, SandboxPolicy, Session, GrantPolicy, PermissionPolicy)
 //!     ↑            ↑
 //!     orcs-component (Component, ChildContext — uses orcs-auth)
 //!          ↑
-//!     orcs-runtime (ProjectSandbox impl, DefaultPolicy impl)
+//!     orcs-runtime (ProjectSandbox impl, DefaultGrantStore impl, DefaultPolicy impl)
 //! ```
 //!
 //! # Design Principles
@@ -38,6 +44,7 @@
 
 pub mod capability;
 pub mod error;
+pub mod grant;
 pub mod permission;
 pub mod policy;
 pub mod privilege;
@@ -47,6 +54,7 @@ pub mod session;
 // Re-export core types
 pub use capability::Capability;
 pub use error::AccessDenied;
+pub use grant::{CommandGrant, GrantKind, GrantPolicy};
 pub use permission::CommandPermission;
 pub use policy::PermissionPolicy;
 pub use privilege::PrivilegeLevel;

@@ -580,6 +580,7 @@ impl OrcsEngine {
     /// # Returns
     ///
     /// A handle for injecting Events into the Channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_runner_full_auth(
         &mut self,
         channel_id: ChannelId,
@@ -588,6 +589,7 @@ impl OrcsEngine {
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
         session: Arc<crate::Session>,
         checker: Arc<dyn crate::auth::PermissionChecker>,
+        grants: Arc<dyn orcs_auth::GrantPolicy>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
@@ -602,7 +604,8 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_session_arc(session)
-        .with_checker(checker);
+        .with_checker(checker)
+        .with_grants(grants);
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {

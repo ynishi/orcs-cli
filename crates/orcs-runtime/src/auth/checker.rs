@@ -44,9 +44,8 @@ use super::blocked_patterns::{is_blocked_command, matching_elevation_pattern, re
 use super::command_check::CommandCheckResult;
 use super::Session;
 use crate::components::ApprovalRequest;
-use orcs_auth::PermissionPolicy;
+use orcs_auth::{GrantPolicy, PermissionPolicy};
 use orcs_types::SignalScope;
-use std::sync::Arc;
 
 /// Runtime-level permission checker with HIL integration.
 ///
@@ -102,9 +101,15 @@ pub trait PermissionChecker: PermissionPolicy {
     ///
     /// This is the preferred method for command checking as it supports:
     ///
-    /// - Dynamic grants (previously approved commands)
+    /// - Dynamic grants (previously approved commands via [`GrantPolicy`])
     /// - HIL approval flow (RequiresApproval)
     /// - Detailed denial reasons
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The current session (identity + privilege level)
+    /// * `grants` - Dynamic command grants (previously approved patterns)
+    /// * `cmd` - The command to check
     ///
     /// # Default Implementation
     ///
@@ -113,8 +118,13 @@ pub trait PermissionChecker: PermissionPolicy {
     /// - Returns `Denied` otherwise
     ///
     /// Override this method to implement HIL integration.
-    fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
-        if self.can_execute_command(session, cmd) {
+    fn check_command(
+        &self,
+        session: &Session,
+        grants: &dyn GrantPolicy,
+        cmd: &str,
+    ) -> CommandCheckResult {
+        if self.can_execute_command(session, cmd) || grants.is_granted(cmd) {
             CommandCheckResult::Allowed
         } else {
             CommandCheckResult::Denied("permission denied".to_string())
@@ -208,14 +218,9 @@ impl PermissionPolicy for DefaultPolicy {
             return false;
         }
 
-        // Check if command requires elevation
+        // All commands require elevation in default policy
         let elevation_required = requires_elevation(cmd);
-        let allowed = if elevation_required {
-            session.is_elevated()
-        } else {
-            // Non-dangerous commands still require elevation in default policy
-            session.is_elevated()
-        };
+        let allowed = session.is_elevated();
 
         // Audit logging
         if allowed {
@@ -288,11 +293,16 @@ impl PermissionChecker for DefaultPolicy {
     ///
     /// Flow:
     /// 1. Check blocked patterns -> Denied
-    /// 2. Check dynamic grants -> Allowed (if previously approved)
+    /// 2. Check dynamic grants (via [`GrantPolicy`]) -> Allowed
     /// 3. Check elevated session -> Allowed
     /// 4. Check elevation required -> RequiresApproval
     /// 5. Otherwise -> RequiresApproval (non-elevated session)
-    fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
+    fn check_command(
+        &self,
+        session: &Session,
+        grants: &dyn GrantPolicy,
+        cmd: &str,
+    ) -> CommandCheckResult {
         // Step 1: Always block dangerous patterns
         if is_blocked_command(cmd) {
             tracing::error!(
@@ -306,7 +316,7 @@ impl PermissionChecker for DefaultPolicy {
         }
 
         // Step 2: Check dynamic grants (previously approved via HIL)
-        if session.is_command_granted(cmd) {
+        if grants.is_granted(cmd) {
             tracing::debug!(
                 principal = ?session.principal(),
                 cmd = cmd,
@@ -379,6 +389,8 @@ impl PermissionChecker for DefaultPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::DefaultGrantStore;
+    use orcs_auth::CommandGrant;
     use orcs_types::{ChannelId, Principal, PrincipalId};
     use std::time::Duration;
 
@@ -388,6 +400,10 @@ mod tests {
 
     fn elevated_session() -> Session {
         standard_session().elevate(Duration::from_secs(60))
+    }
+
+    fn empty_grants() -> DefaultGrantStore {
+        DefaultGrantStore::new()
     }
 
     #[test]
@@ -548,9 +564,10 @@ mod tests {
     #[test]
     fn check_command_blocked_returns_denied() {
         let policy = DefaultPolicy;
-        let session = Arc::new(elevated_session());
+        let session = elevated_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "rm -rf /");
+        let result = policy.check_command(&session, &grants, "rm -rf /");
         assert!(result.is_denied());
         assert!(result.denial_reason().is_some());
     }
@@ -558,9 +575,10 @@ mod tests {
     #[test]
     fn check_command_safe_command_requires_approval_when_not_elevated() {
         let policy = DefaultPolicy;
-        let session = Arc::new(standard_session());
+        let session = standard_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "ls -la");
+        let result = policy.check_command(&session, &grants, "ls -la");
         assert!(result.requires_approval());
         assert_eq!(result.grant_pattern(), Some("ls"));
     }
@@ -568,9 +586,10 @@ mod tests {
     #[test]
     fn check_command_elevated_pattern_requires_approval() {
         let policy = DefaultPolicy;
-        let session = Arc::new(standard_session());
+        let session = standard_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "rm -rf ./temp");
+        let result = policy.check_command(&session, &grants, "rm -rf ./temp");
         assert!(result.requires_approval());
         assert!(result.approval_request().is_some());
         assert_eq!(result.grant_pattern(), Some("rm -rf"));
@@ -579,31 +598,34 @@ mod tests {
     #[test]
     fn check_command_elevated_session_allowed() {
         let policy = DefaultPolicy;
-        let session = Arc::new(elevated_session());
+        let session = elevated_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "rm -rf ./temp");
+        let result = policy.check_command(&session, &grants, "rm -rf ./temp");
         assert!(result.is_allowed());
     }
 
     #[test]
     fn check_command_granted_command_allowed() {
         let policy = DefaultPolicy;
-        let session = Arc::new(standard_session());
+        let session = standard_session();
+        let grants = DefaultGrantStore::new();
 
         // Grant the pattern
-        session.grant_command("rm -rf");
+        grants.grant(CommandGrant::persistent("rm -rf"));
 
         // Now should be allowed without elevation
-        let result = policy.check_command(&session, "rm -rf ./temp");
+        let result = policy.check_command(&session, &grants, "rm -rf ./temp");
         assert!(result.is_allowed());
     }
 
     #[test]
     fn check_command_git_reset_requires_approval() {
         let policy = DefaultPolicy;
-        let session = Arc::new(standard_session());
+        let session = standard_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "git reset --hard HEAD~1");
+        let result = policy.check_command(&session, &grants, "git reset --hard HEAD~1");
         assert!(result.requires_approval());
         assert_eq!(result.grant_pattern(), Some("git reset --hard"));
     }
@@ -611,9 +633,10 @@ mod tests {
     #[test]
     fn check_command_git_push_force_requires_approval() {
         let policy = DefaultPolicy;
-        let session = Arc::new(standard_session());
+        let session = standard_session();
+        let grants = empty_grants();
 
-        let result = policy.check_command(&session, "git push --force origin main");
+        let result = policy.check_command(&session, &grants, "git push --force origin main");
         assert!(result.requires_approval());
         assert_eq!(result.grant_pattern(), Some("git push --force"));
     }

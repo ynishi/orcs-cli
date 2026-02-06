@@ -68,7 +68,7 @@ use mlua::Lua;
 use orcs_component::{ChildConfig, Component, RunnableChild, SpawnError};
 use orcs_event::Signal;
 use orcs_lua::{LuaChild, ScriptLoader};
-use orcs_runtime::auth::{DefaultPolicy, PermissionChecker};
+use orcs_runtime::auth::{DefaultGrantStore, DefaultPolicy, GrantPolicy, PermissionChecker};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
@@ -697,6 +697,13 @@ impl OrcsAppBuilder {
         let auth_session: Arc<Session> =
             Arc::new(Session::new(principal.clone()).elevate(std::time::Duration::from_secs(3600)));
         let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
+        // Grant stores: セッション中の HIL grant を保持する。
+        // elevated runners は共有 store、shell は独自 store（non-elevated なので
+        // HIL approval → grant_command() が実際に使われる唯一のコンポーネント）。
+        // TODO: 将来的に Grant は Component レベルで管理すべき
+        // （Grant 自体は Domain だが HIL フローは Component の責務）。
+        let auth_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+        let shell_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
         tracing::info!(
             "Auth context created: principal={:?}, elevated={}",
             auth_session.principal(),
@@ -714,6 +721,7 @@ impl OrcsAppBuilder {
             None, // No child spawner for claude_cli
             Arc::clone(&auth_session),
             Arc::clone(&auth_checker),
+            Arc::clone(&auth_grants),
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={} (auth enabled)",
@@ -732,6 +740,7 @@ impl OrcsAppBuilder {
             None, // No child spawner for subagent
             Arc::clone(&auth_session),
             Arc::clone(&auth_checker),
+            Arc::clone(&auth_grants),
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={} (auth enabled)",
@@ -752,6 +761,7 @@ impl OrcsAppBuilder {
             None,
             shell_session,
             Arc::clone(&auth_checker),
+            shell_grants,
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={} (auth enabled)",
@@ -773,6 +783,7 @@ impl OrcsAppBuilder {
             Some(lua_loader),
             Arc::clone(&auth_session),
             Arc::clone(&auth_checker),
+            Arc::clone(&auth_grants),
         );
         tracing::info!(
             "ChannelRunner spawned: channel={}, component={} (child spawner + auth enabled)",

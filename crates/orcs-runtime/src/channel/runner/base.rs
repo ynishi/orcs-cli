@@ -504,10 +504,12 @@ pub struct ChannelRunnerBuilder {
     lua_loader: Option<Arc<dyn LuaChildLoader>>,
     /// Component loader for spawning components as runners.
     component_loader: Option<Arc<dyn ComponentLoader>>,
-    /// Session for permission checking (Arc for shared grants).
+    /// Session for permission checking (identity + privilege level).
     session: Option<Arc<Session>>,
     /// Permission checker policy.
     checker: Option<Arc<dyn PermissionChecker>>,
+    /// Dynamic command grants.
+    grants: Option<Arc<dyn orcs_auth::GrantPolicy>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -533,6 +535,7 @@ impl ChannelRunnerBuilder {
             component_loader: None,
             session: None,
             checker: None,
+            grants: None,
         }
     }
 
@@ -631,6 +634,17 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the dynamic command grant store.
+    ///
+    /// # Arguments
+    ///
+    /// * `grants` - Grant policy implementation for dynamic command permissions
+    #[must_use]
+    pub fn with_grants(mut self, grants: Arc<dyn orcs_auth::GrantPolicy>) -> Self {
+        self.grants = Some(grants);
+        self
+    }
+
     /// Builds the ChannelRunner and returns it with a ChannelHandle.
     #[must_use]
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
@@ -708,7 +722,7 @@ impl ChannelRunnerBuilder {
                 );
             }
 
-            // Add session and checker for permission checking
+            // Add session, checker, and grants for permission checking
             if let Some(session) = self.session.take() {
                 ctx = ctx.with_session_arc(session);
                 info!("ChannelRunnerBuilder: enabled session for {}", component_id);
@@ -717,6 +731,13 @@ impl ChannelRunnerBuilder {
                 ctx = ctx.with_checker(checker);
                 info!(
                     "ChannelRunnerBuilder: enabled permission checker for {}",
+                    component_id
+                );
+            }
+            if let Some(grants) = self.grants.take() {
+                ctx = ctx.with_grants(grants);
+                info!(
+                    "ChannelRunnerBuilder: enabled grant store for {}",
                     component_id
                 );
             }
@@ -733,7 +754,7 @@ impl ChannelRunnerBuilder {
             self.component.set_child_context(Box::new(ctx));
 
             Some(spawner_arc)
-        } else if self.session.is_some() || self.checker.is_some() {
+        } else if self.session.is_some() || self.checker.is_some() || self.grants.is_some() {
             // No child spawner, but auth context is needed for permission-checked orcs.exec()
             let component_id = self.component.id().fqn();
             let dummy_spawner = ChildSpawner::new(&component_id, event_tx.clone());
@@ -749,6 +770,13 @@ impl ChannelRunnerBuilder {
                 ctx = ctx.with_checker(checker);
                 info!(
                     "ChannelRunnerBuilder: enabled permission checker for {}",
+                    component_id
+                );
+            }
+            if let Some(grants) = self.grants.take() {
+                ctx = ctx.with_grants(grants);
+                info!(
+                    "ChannelRunnerBuilder: enabled grant store for {}",
                     component_id
                 );
             }

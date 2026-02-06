@@ -153,8 +153,12 @@ impl PrivilegeLevel {
 
 /// Serde support for `Instant`.
 ///
-/// Serializes as duration from "now" at serialization time.
-/// This is lossy but sufficient for our use case.
+/// **Lossy**: Serializes as remaining seconds from "now" at serialization time.
+/// Deserializing reconstructs an `Instant` relative to the deserializer's "now",
+/// so the absolute point in time is **not** preserved across serialize/deserialize.
+///
+/// This is acceptable for in-process use (e.g., session cache) but **must not**
+/// be used for cross-process persistence or durable storage.
 mod instant_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::{Duration, Instant};

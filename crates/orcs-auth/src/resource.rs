@@ -79,3 +79,51 @@ pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
     /// existing ancestor and validates that.
     fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outside_boundary_display() {
+        let err = SandboxError::OutsideBoundary {
+            path: "/etc/passwd".to_string(),
+            root: "/home/user/project".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/etc/passwd"), "got: {msg}");
+        assert!(msg.contains("/home/user/project"), "got: {msg}");
+        assert!(msg.contains("access denied"), "got: {msg}");
+    }
+
+    #[test]
+    fn not_found_display() {
+        let err = SandboxError::NotFound {
+            path: "/home/user/project/missing.txt".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("missing.txt"), "got: {msg}");
+        assert!(msg.contains("path not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn not_found_source_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err = SandboxError::NotFound {
+            path: "test.txt".to_string(),
+            source: io_err,
+        };
+        // source() should return the io::Error
+        use std::error::Error;
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn init_display() {
+        let err = SandboxError::Init("permission denied".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("sandbox init failed"), "got: {msg}");
+        assert!(msg.contains("permission denied"), "got: {msg}");
+    }
+}

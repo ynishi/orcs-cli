@@ -191,7 +191,7 @@ impl Capability {
 
     /// Parses a list of capability names into a combined set.
     ///
-    /// Unknown names are silently ignored.
+    /// Unknown names are logged as warnings and skipped.
     ///
     /// # Example
     ///
@@ -205,7 +205,13 @@ impl Capability {
     pub fn parse_list(names: &[&str]) -> Self {
         names
             .iter()
-            .filter_map(|n| Self::parse(n))
+            .filter_map(|n| {
+                let parsed = Self::parse(n);
+                if parsed.is_none() {
+                    tracing::warn!(name = n, "unknown capability name, ignored");
+                }
+                parsed
+            })
             .fold(Self::empty(), |acc, c| acc | c)
     }
 }
