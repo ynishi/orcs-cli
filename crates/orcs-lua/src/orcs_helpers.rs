@@ -45,7 +45,6 @@ use crate::error::LuaError;
 use mlua::{Lua, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
 use std::sync::Arc;
-use tokio::process::Command;
 
 /// Global table name for orcs functions in Lua.
 const ORCS_TABLE_NAME: &str = "orcs";
@@ -91,42 +90,19 @@ pub fn register_base_orcs_functions(
         orcs_table.set("log", log_fn)?;
     }
 
-    // orcs.exec(cmd) -> {ok, stdout, stderr, code}
-    // Commands run with cwd = sandbox root (not process cwd)
+    // orcs.exec(cmd) -> {ok=false, ...}
+    // Deny by default: exec requires ChildContext with permission checking.
+    // Overridden by permission-checked version when ChildContext is set.
     if orcs_table.get::<mlua::Function>("exec").is_err() {
-        let sandbox_root = sandbox.root().to_path_buf();
-        let exec_fn = lua.create_function(move |lua, cmd: String| {
-            tracing::debug!("Lua exec (cwd={}): {}", sandbox_root.display(), cmd);
-
-            let output = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => handle.block_on(async {
-                    Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .current_dir(&sandbox_root)
-                        .output()
-                        .await
-                }),
-                Err(_) => std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .current_dir(&sandbox_root)
-                    .output(),
-            }
-            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
-
+        let exec_fn = lua.create_function(|lua, _cmd: String| {
             let result = lua.create_table()?;
-            result.set("ok", output.status.success())?;
-            result.set(
-                "stdout",
-                String::from_utf8_lossy(&output.stdout).to_string(),
-            )?;
+            result.set("ok", false)?;
+            result.set("stdout", "")?;
             result.set(
                 "stderr",
-                String::from_utf8_lossy(&output.stderr).to_string(),
+                "exec denied: no execution context (ChildContext required)",
             )?;
-            result.set("code", output.status.code().unwrap_or(-1))?;
-
+            result.set("code", -1)?;
             Ok(result)
         })?;
         orcs_table.set("exec", exec_fn)?;
@@ -174,9 +150,7 @@ pub fn register_base_orcs_functions(
     // orcs.tool_descriptions() -> string
     // Returns formatted tool reference for prompt embedding.
     {
-        let tool_desc = lua.create_function(|_, ()| {
-            Ok(TOOL_DESCRIPTIONS)
-        })?;
+        let tool_desc = lua.create_function(|_, ()| Ok(TOOL_DESCRIPTIONS))?;
         orcs_table.set("tool_descriptions", tool_desc)?;
     }
 
@@ -333,17 +307,22 @@ mod tests {
     }
 
     #[test]
-    fn exec_function_works() {
+    fn exec_denied_without_context() {
         let lua = Lua::new();
         register_base_orcs_functions(&lua, test_sandbox()).unwrap();
 
         let result: mlua::Table = lua
             .load(r#"return orcs.exec("echo hello")"#)
             .eval()
-            .expect("exec should work");
+            .expect("exec should return deny table");
 
-        assert!(result.get::<bool>("ok").unwrap());
-        assert!(result.get::<String>("stdout").unwrap().contains("hello"));
+        assert!(!result.get::<bool>("ok").unwrap());
+        let stderr = result.get::<String>("stderr").unwrap();
+        assert!(
+            stderr.contains("exec denied"),
+            "expected 'exec denied', got: {stderr}"
+        );
+        assert_eq!(result.get::<i64>("code").unwrap(), -1);
     }
 
     #[test]

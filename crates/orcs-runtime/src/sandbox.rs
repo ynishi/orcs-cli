@@ -1,17 +1,16 @@
-//! File system sandbox for safe tool execution.
+//! File system sandbox implementation.
+//!
+//! The [`SandboxPolicy`] trait and [`SandboxError`] are defined in `orcs-auth`.
+//! This module provides the concrete filesystem implementation:
+//!
+//! - [`ProjectSandbox`] — default sandbox rooted at the project directory
 //!
 //! # Architecture
 //!
-//! Mirrors the [`ConfigResolver`](crate::config::ConfigResolver) pattern:
-//!
-//! - **Trait** defined here (runtime layer) — [`SandboxPolicy`]
-//! - **Concrete impl** in app/cli layer — [`ProjectSandbox`]
-//! - **Consumers** (orcs-lua tools, shell executor) use `Arc<dyn SandboxPolicy>`
-//!
 //! ```text
-//! SandboxPolicy trait (orcs-runtime)
+//! SandboxPolicy trait (orcs-auth)
 //!          │
-//!          ├── ProjectSandbox (default impl)
+//!          ├── ProjectSandbox (THIS MODULE)
 //!          │     project_root: /home/user/myproject (.git detected)
 //!          │     permissive_root: /home/user/myproject (= project_root)
 //!          │
@@ -24,64 +23,10 @@
 //! All paths are canonicalized to prevent symlink/traversal escapes.
 //! Writes validate the deepest existing ancestor for new-file creation.
 
+// Re-export trait and error from orcs-auth for backward compatibility
+pub use orcs_auth::{SandboxError, SandboxPolicy};
+
 use std::path::{Path, PathBuf};
-use thiserror::Error;
-
-// ─── Error ──────────────────────────────────────────────────────────
-
-/// Errors from sandbox path validation.
-#[derive(Debug, Error)]
-pub enum SandboxError {
-    /// Path resolves outside the sandbox boundary.
-    #[error("access denied: '{path}' is outside sandbox root '{root}'")]
-    OutsideBoundary { path: String, root: String },
-
-    /// Path does not exist (for read operations).
-    #[error("path not found: {path} ({source})")]
-    NotFound {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// Sandbox initialization failed.
-    #[error("sandbox init failed: {0}")]
-    Init(String),
-}
-
-// ─── Trait ───────────────────────────────────────────────────────────
-
-/// File system sandbox policy.
-///
-/// Controls which paths are accessible for file operations.
-/// All file I/O in tools and shell executors goes through this trait.
-///
-/// # Implementors
-///
-/// - [`ProjectSandbox`] — default implementation rooted at project directory
-/// - Custom impls for testing or restricted environments
-pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
-    /// The project root (where `.git`/`.orcs` was detected).
-    fn project_root(&self) -> &Path;
-
-    /// The effective sandbox boundary.
-    ///
-    /// All file operations must resolve to paths under this root.
-    /// May be narrower than `project_root()` for scoped sandboxes.
-    fn root(&self) -> &Path;
-
-    /// Validates an existing path for reading.
-    ///
-    /// Resolves relative paths against `root()`, canonicalizes,
-    /// and verifies the result is under `root()`.
-    fn validate_read(&self, path: &str) -> Result<PathBuf, SandboxError>;
-
-    /// Validates a (potentially new) path for writing.
-    ///
-    /// For paths that don't exist yet, walks up to the deepest
-    /// existing ancestor and validates that.
-    fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError>;
-}
 
 // ─── Concrete Implementation ────────────────────────────────────────
 

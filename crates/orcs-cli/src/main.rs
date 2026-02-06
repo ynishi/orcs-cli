@@ -163,7 +163,11 @@ mod tests {
     use super::*;
 
     /// Helper: creates a CliConfigResolver with a temp dir (no config files).
-    fn resolver_with(debug: bool, verbose: bool, session_path: Option<PathBuf>) -> CliConfigResolver {
+    fn resolver_with(
+        debug: bool,
+        verbose: bool,
+        session_path: Option<PathBuf>,
+    ) -> CliConfigResolver {
         let temp = std::env::temp_dir().join(format!(
             "orcs-cli-test-{}-{}",
             std::process::id(),

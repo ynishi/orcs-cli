@@ -664,9 +664,9 @@ impl OrcsAppBuilder {
             .map_err(|e| AppError::Config(e.to_string()))?;
 
         // Sandbox is required for file operations
-        let sandbox = self
-            .sandbox
-            .ok_or_else(|| AppError::Config("sandbox policy not set (use .with_sandbox())".into()))?;
+        let sandbox = self.sandbox.ok_or_else(|| {
+            AppError::Config("sandbox policy not set (use .with_sandbox())".into())
+        })?;
 
         // Create session store
         let session_path = config.paths.session_dir_or_default();

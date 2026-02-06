@@ -39,6 +39,7 @@
 //! The context provides a safe, controlled interface to runtime services.
 //! Children cannot directly access the EventBus or other internal systems.
 
+use crate::capability::Capability;
 use crate::ChildResult;
 use async_trait::async_trait;
 use orcs_types::ChannelId;
@@ -65,6 +66,10 @@ pub enum SpawnError {
     /// Child with same ID already exists.
     #[error("child already exists: {0}")]
     AlreadyExists(String),
+
+    /// Permission denied.
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
 
     /// Internal error (lock poisoned, channel closed, etc.)
     #[error("internal error: {0}")]
@@ -142,6 +147,14 @@ pub struct ChildConfig {
 
     /// Inline script content (for Lua children).
     pub script_inline: Option<String>,
+
+    /// Requested capabilities for the child.
+    ///
+    /// - `None` — inherit all of the parent's capabilities (default).
+    /// - `Some(caps)` — request specific capabilities. The effective set
+    ///   is `parent_caps & requested_caps` (a child cannot exceed its parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capability>,
 }
 
 impl ChildConfig {
@@ -152,6 +165,7 @@ impl ChildConfig {
             id: id.into(),
             script_path: Some(path.into()),
             script_inline: None,
+            capabilities: None,
         }
     }
 
@@ -162,6 +176,7 @@ impl ChildConfig {
             id: id.into(),
             script_path: None,
             script_inline: Some(script.into()),
+            capabilities: None,
         }
     }
 
@@ -172,7 +187,17 @@ impl ChildConfig {
             id: id.into(),
             script_path: None,
             script_inline: None,
+            capabilities: None,
         }
+    }
+
+    /// Sets the requested capabilities for this child.
+    ///
+    /// The effective capabilities will be `parent_caps & requested_caps`.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: Capability) -> Self {
+        self.capabilities = Some(caps);
+        self
     }
 }
 
@@ -274,60 +299,8 @@ pub trait AsyncChildHandle: Send + Sync + Debug {
     fn is_finished(&self) -> bool;
 }
 
-/// Result of a command permission check (trait-level type).
-///
-/// This is a simplified version suitable for the trait boundary.
-/// Runtime implementations convert from their internal types.
-///
-/// # Variants
-///
-/// - `Allowed`: Command can execute immediately
-/// - `Denied`: Command is permanently blocked (e.g., denylist)
-/// - `RequiresApproval`: Command needs user approval before execution
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandPermission {
-    /// Command is allowed to execute.
-    Allowed,
-    /// Command is denied with a reason.
-    Denied(String),
-    /// Command requires user approval via HIL.
-    RequiresApproval {
-        /// The pattern to grant if approved.
-        grant_pattern: String,
-        /// Human-readable description of why approval is needed.
-        description: String,
-    },
-}
-
-impl CommandPermission {
-    /// Returns `true` if the command is allowed.
-    #[must_use]
-    pub fn is_allowed(&self) -> bool {
-        matches!(self, Self::Allowed)
-    }
-
-    /// Returns `true` if the command is denied.
-    #[must_use]
-    pub fn is_denied(&self) -> bool {
-        matches!(self, Self::Denied(_))
-    }
-
-    /// Returns `true` if the command requires approval.
-    #[must_use]
-    pub fn requires_approval(&self) -> bool {
-        matches!(self, Self::RequiresApproval { .. })
-    }
-
-    /// Returns the status as a string ("allowed", "denied", "requires_approval").
-    #[must_use]
-    pub fn status_str(&self) -> &'static str {
-        match self {
-            Self::Allowed => "allowed",
-            Self::Denied(_) => "denied",
-            Self::RequiresApproval { .. } => "requires_approval",
-        }
-    }
-}
+// Re-export from orcs-auth for backward compatibility
+pub use orcs_auth::CommandPermission;
 
 /// Context provided to Children for runtime interaction.
 ///
@@ -473,6 +446,23 @@ pub trait ChildContext: Send + Sync + Debug {
         Err(SpawnError::Internal(
             "runner spawning not supported by this context".into(),
         ))
+    }
+
+    /// Returns the capabilities granted to this context.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns [`Capability::ALL`] (permissive mode for backward compatibility).
+    /// Override this to restrict the capabilities available to children.
+    fn capabilities(&self) -> Capability {
+        Capability::ALL
+    }
+
+    /// Checks if this context has a specific capability.
+    ///
+    /// Equivalent to `self.capabilities().contains(cap)`.
+    fn has_capability(&self, cap: Capability) -> bool {
+        self.capabilities().contains(cap)
     }
 
     /// Checks if command execution is allowed.

@@ -21,6 +21,7 @@
 //!
 //! ```
 //! use orcs_runtime::{Principal, Session, PermissionChecker, DefaultPolicy};
+//! use orcs_auth::PermissionPolicy;
 //! use orcs_types::{PrincipalId, SignalScope, ChannelId};
 //! use std::time::Duration;
 //!
@@ -43,33 +44,37 @@ use super::blocked_patterns::{is_blocked_command, matching_elevation_pattern, re
 use super::command_check::CommandCheckResult;
 use super::Session;
 use crate::components::ApprovalRequest;
+use orcs_auth::PermissionPolicy;
 use orcs_types::SignalScope;
 use std::sync::Arc;
 
-/// Policy for permission checking.
+/// Runtime-level permission checker with HIL integration.
 ///
-/// Implement this trait to define custom permission policies.
-/// The default implementation is [`DefaultPolicy`].
+/// Extends [`PermissionPolicy`] (from `orcs-auth`) with
+/// [`check_command`](PermissionChecker::check_command) that returns
+/// [`CommandCheckResult`] (including `ApprovalRequest` for HIL flow).
 ///
-/// # Why a Trait?
+/// # Architecture
 ///
-/// Using a trait allows:
-///
-/// - **Testing**: Mock implementations for unit tests
-/// - **Flexibility**: Different policies for different contexts
-/// - **Extension**: Custom policies without modifying core code
+/// ```text
+/// PermissionPolicy (orcs-auth)     <- abstract, no runtime deps
+///        ↑ supertrait
+/// PermissionChecker (THIS TRAIT)   <- adds check_command(CommandCheckResult)
+///        │
+///        └── DefaultPolicy         <- concrete impl
+/// ```
 ///
 /// # Example Implementation
 ///
 /// ```
 /// use orcs_runtime::{PermissionChecker, Session};
+/// use orcs_auth::PermissionPolicy;
 /// use orcs_types::SignalScope;
 ///
 /// struct StrictPolicy;
 ///
-/// impl PermissionChecker for StrictPolicy {
-///     fn can_signal(&self, session: &Session, scope: &SignalScope) -> bool {
-///         // Only elevated sessions can signal anything
+/// impl PermissionPolicy for StrictPolicy {
+///     fn can_signal(&self, session: &Session, _scope: &SignalScope) -> bool {
 ///         session.is_elevated()
 ///     }
 ///
@@ -89,82 +94,10 @@ use std::sync::Arc;
 ///         session.is_elevated()
 ///     }
 /// }
+///
+/// impl PermissionChecker for StrictPolicy {}
 /// ```
-pub trait PermissionChecker: Send + Sync {
-    /// Check if session can send a signal with the given scope.
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session attempting the action
-    /// * `scope` - The scope of the signal
-    ///
-    /// # Returns
-    ///
-    /// `true` if the session is allowed to signal the given scope.
-    fn can_signal(&self, session: &Session, scope: &SignalScope) -> bool;
-
-    /// Check if session can perform a destructive operation.
-    ///
-    /// Destructive operations include:
-    ///
-    /// - `git reset --hard`
-    /// - `git push --force`
-    /// - `rm -rf`
-    /// - File overwrite without backup
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session attempting the action
-    /// * `action` - Description of the action (for logging/audit)
-    ///
-    /// # Returns
-    ///
-    /// `true` if the session is allowed to perform the action.
-    fn can_destructive(&self, session: &Session, action: &str) -> bool;
-
-    /// Check if session can execute a shell command.
-    ///
-    /// Shell commands are potentially dangerous as they can:
-    /// - Read/write arbitrary files
-    /// - Spawn network connections
-    /// - Modify system state
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session attempting the action
-    /// * `cmd` - The shell command to execute
-    ///
-    /// # Returns
-    ///
-    /// `true` if the session is allowed to execute the command.
-    fn can_execute_command(&self, session: &Session, cmd: &str) -> bool;
-
-    /// Check if session can spawn a child entity.
-    ///
-    /// Child spawning allows code execution within the parent's context.
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session attempting the action
-    ///
-    /// # Returns
-    ///
-    /// `true` if the session is allowed to spawn children.
-    fn can_spawn_child(&self, session: &Session) -> bool;
-
-    /// Check if session can spawn a runner (parallel execution).
-    ///
-    /// Runner spawning creates a new ChannelRunner for parallel execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session attempting the action
-    ///
-    /// # Returns
-    ///
-    /// `true` if the session is allowed to spawn runners.
-    fn can_spawn_runner(&self, session: &Session) -> bool;
-
+pub trait PermissionChecker: PermissionPolicy {
     /// Check command with granular result including HIL approval flow.
     ///
     /// This is the preferred method for command checking as it supports:
@@ -175,20 +108,11 @@ pub trait PermissionChecker: Send + Sync {
     ///
     /// # Default Implementation
     ///
-    /// The default implementation wraps `can_execute_command`:
+    /// Wraps `can_execute_command`:
     /// - Returns `Allowed` if `can_execute_command` returns true
     /// - Returns `Denied` otherwise
     ///
     /// Override this method to implement HIL integration.
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The session (Arc for grant_command access)
-    /// * `cmd` - The shell command to check
-    ///
-    /// # Returns
-    ///
-    /// [`CommandCheckResult`] with granular permission information.
     fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
         if self.can_execute_command(session, cmd) {
             CommandCheckResult::Allowed
@@ -225,7 +149,7 @@ pub trait PermissionChecker: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultPolicy;
 
-impl PermissionChecker for DefaultPolicy {
+impl PermissionPolicy for DefaultPolicy {
     fn can_signal(&self, session: &Session, scope: &SignalScope) -> bool {
         let allowed = match scope {
             SignalScope::Global => session.is_elevated(),
@@ -357,15 +281,17 @@ impl PermissionChecker for DefaultPolicy {
 
         allowed
     }
+}
 
+impl PermissionChecker for DefaultPolicy {
     /// Check command with dynamic grants and HIL approval support.
     ///
     /// Flow:
-    /// 1. Check blocked patterns → Denied
-    /// 2. Check dynamic grants → Allowed (if previously approved)
-    /// 3. Check elevated session → Allowed
-    /// 4. Check elevation required → RequiresApproval
-    /// 5. Otherwise → Allowed (safe commands for standard session)
+    /// 1. Check blocked patterns -> Denied
+    /// 2. Check dynamic grants -> Allowed (if previously approved)
+    /// 3. Check elevated session -> Allowed
+    /// 4. Check elevation required -> RequiresApproval
+    /// 5. Otherwise -> RequiresApproval (non-elevated session)
     fn check_command(&self, session: &Arc<Session>, cmd: &str) -> CommandCheckResult {
         // Step 1: Always block dangerous patterns
         if is_blocked_command(cmd) {

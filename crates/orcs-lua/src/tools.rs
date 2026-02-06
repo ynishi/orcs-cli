@@ -210,8 +210,11 @@ fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
 /// Removes a file or directory under the sandbox.
 ///
 /// Uses `remove_file` for files and `remove_dir_all` for directories.
-/// The path is validated via `sandbox.validate_read()` before removal.
+/// Validated via `validate_write()` (destructive) + `validate_read()` (symlink resolution).
 fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+    // Destructive operation: check write boundary
+    sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    // Canonicalize + existence check via validate_read
     let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
 
     if canonical.is_file() {

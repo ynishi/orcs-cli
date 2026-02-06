@@ -199,6 +199,7 @@
 //! - [`orcs_event`] - Event types (Signal, Request)
 //! - `orcs-runtime` - Runtime layer (Session, EventBus)
 
+pub mod capability;
 mod child;
 mod component;
 mod context;
@@ -224,6 +225,9 @@ pub use component::Component;
 
 // Re-export async_trait for convenience
 pub use async_trait::async_trait;
+
+// Re-export capability type
+pub use capability::Capability;
 
 // Re-export child context types
 pub use context::{

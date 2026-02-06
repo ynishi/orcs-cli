@@ -483,6 +483,66 @@ fn register_context_functions(lua: &Lua, ctx: Box<dyn ChildContext>) -> Result<(
         t
     });
 
+    // orcs.exec(cmd) -> {ok, stdout, stderr, code}
+    // Permission-checked override: replaces the deny-by-default from register_base_orcs_functions.
+    let exec_fn = lua.create_function(|lua, cmd: String| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+        let permission = ctx.check_command_permission(&cmd);
+        match &permission {
+            orcs_component::CommandPermission::Allowed => {}
+            orcs_component::CommandPermission::Denied(reason) => {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("stdout", "")?;
+                result.set("stderr", format!("permission denied: {}", reason))?;
+                result.set("code", -1)?;
+                return Ok(result);
+            }
+            orcs_component::CommandPermission::RequiresApproval { .. } => {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("stdout", "")?;
+                result.set(
+                    "stderr",
+                    "permission denied: command requires approval (use orcs.check_command first)",
+                )?;
+                result.set("code", -1)?;
+                return Ok(result);
+            }
+        }
+
+        tracing::debug!("Lua exec (authorized): {}", cmd);
+
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+
+        let result = lua.create_table()?;
+        result.set("ok", output.status.success())?;
+        result.set(
+            "stdout",
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        )?;
+        result.set(
+            "stderr",
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )?;
+        result.set("code", output.status.code().unwrap_or(-1))?;
+
+        Ok(result)
+    })?;
+    orcs_table.set("exec", exec_fn)?;
+
     // orcs.spawn_child(config) -> { ok, id, error }
     // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
     let spawn_child_fn = lua.create_function(|lua, config: Table| {

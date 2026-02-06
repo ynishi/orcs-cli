@@ -112,7 +112,10 @@ pub mod sandbox;
 pub mod session;
 
 // Re-exports for convenience
-pub use auth::{DefaultPolicy, PermissionChecker, PrivilegeLevel, Session};
+pub use auth::{
+    AccessDenied, CommandPermission, DefaultPolicy, PermissionChecker, PermissionPolicy,
+    PrivilegeLevel, Session,
+};
 pub use channel::{
     priority, BaseChannel, Channel, ChannelConfig, ChannelCore, ChannelError, ChannelHandle,
     ChannelMut, ChannelRunner, ChannelState, ChildContextImpl, ChildSpawner, ClientRunner, Event,
@@ -128,11 +131,11 @@ pub use config::{
     ConfigResolver, HilConfig, ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
-pub use sandbox::{ProjectSandbox, SandboxError, SandboxPolicy};
 pub use io::{
     IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext,
     OutputStyle,
 };
+pub use sandbox::{ProjectSandbox, SandboxError, SandboxPolicy};
 pub use session::{
     default_session_path, LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError,
     SyncState, SyncStatus,

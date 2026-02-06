@@ -602,34 +602,18 @@ impl LuaComponent {
     fn register_orcs_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Result<(), LuaError> {
         let orcs_table = lua.create_table()?;
 
-        // orcs.exec(cmd) -> {ok, stdout, stderr, code}
-        // Uses synchronous std::process::Command.
-        // Note: Cannot use tokio async within Lua callbacks called from async context
-        // as block_on() panics when called from within a runtime.
-        let exec_fn = lua.create_function(|lua, cmd: String| {
-            tracing::debug!("Lua exec: {}", cmd);
-
-            // Always use synchronous execution.
-            // Lua callbacks are called from Component.on_request() which runs in async context.
-            // Using block_on() would panic with "Cannot start a runtime from within a runtime".
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
-
+        // orcs.exec(cmd) -> {ok=false, ...}
+        // Deny by default: exec requires ChildContext with permission checking.
+        // Overridden by permission-checked version in register_child_context_functions.
+        let exec_fn = lua.create_function(|lua, _cmd: String| {
             let result = lua.create_table()?;
-            result.set("ok", output.status.success())?;
-            result.set(
-                "stdout",
-                String::from_utf8_lossy(&output.stdout).to_string(),
-            )?;
+            result.set("ok", false)?;
+            result.set("stdout", "")?;
             result.set(
                 "stderr",
-                String::from_utf8_lossy(&output.stderr).to_string(),
+                "exec denied: no execution context (ChildContext required)",
             )?;
-            result.set("code", output.status.code().unwrap_or(-1))?;
-
+            result.set("code", -1)?;
             Ok(result)
         })?;
         orcs_table.set("exec", exec_fn)?;
@@ -970,6 +954,66 @@ mod tests {
 
     mod exec_tests {
         use super::*;
+        use orcs_component::{
+            ChildConfig, ChildHandle, ChildResult, CommandPermission, SpawnError,
+        };
+        /// Minimal permissive ChildContext for testing exec with permission checking.
+        #[derive(Debug)]
+        struct PermissiveContext;
+
+        #[derive(Debug)]
+        struct StubHandle {
+            id: String,
+        }
+
+        impl ChildHandle for StubHandle {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+            fn run_sync(
+                &mut self,
+                _input: serde_json::Value,
+            ) -> Result<ChildResult, orcs_component::RunError> {
+                Ok(ChildResult::Ok(serde_json::Value::Null))
+            }
+            fn abort(&mut self) {}
+            fn is_finished(&self) -> bool {
+                false
+            }
+        }
+
+        impl ChildContext for PermissiveContext {
+            fn parent_id(&self) -> &str {
+                "test-parent"
+            }
+            fn emit_output(&self, _message: &str) {}
+            fn emit_output_with_level(&self, _message: &str, _level: &str) {}
+            fn spawn_child(&self, config: ChildConfig) -> Result<Box<dyn ChildHandle>, SpawnError> {
+                Ok(Box::new(StubHandle { id: config.id }))
+            }
+            fn child_count(&self) -> usize {
+                0
+            }
+            fn max_children(&self) -> usize {
+                10
+            }
+            fn send_to_child(
+                &self,
+                _child_id: &str,
+                _input: serde_json::Value,
+            ) -> Result<ChildResult, orcs_component::RunError> {
+                Ok(ChildResult::Ok(serde_json::Value::Null))
+            }
+            fn check_command_permission(&self, _cmd: &str) -> CommandPermission {
+                CommandPermission::Allowed
+            }
+            fn clone_box(&self) -> Box<dyn ChildContext> {
+                Box::new(PermissiveContext)
+            }
+        }
 
         /// Helper to create a component that uses orcs.exec
         fn create_exec_component(cmd: &str) -> LuaComponent {
@@ -980,7 +1024,6 @@ mod tests {
                     subscriptions = {{"Echo"}},
                     on_request = function(req)
                         local result = orcs.exec("{}")
-                        -- Always return success=true so we can inspect the exec result
                         return {{
                             success = true,
                             data = {{
@@ -998,91 +1041,97 @@ mod tests {
             "#,
                 cmd
             );
-            LuaComponent::from_script(&script, test_sandbox()).expect("load exec script")
+            let mut comp =
+                LuaComponent::from_script(&script, test_sandbox()).expect("load exec script");
+            comp.set_child_context(Box::new(PermissiveContext));
+            comp
         }
 
         #[test]
-        fn exec_echo_command_sync() {
-            // Test orcs.exec in sync context (no tokio runtime)
+        fn exec_denied_without_context() {
+            // Without ChildContext, exec should deny
+            let script = r#"
+                return {
+                    id = "exec-deny",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        local result = orcs.exec("echo hello")
+                        return {
+                            success = true,
+                            data = {
+                                ok = result.ok,
+                                stderr = result.stderr,
+                                code = result.code
+                            }
+                        }
+                    end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+            "#;
+
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req).expect("should succeed");
+
+            assert!(!result["ok"].as_bool().unwrap_or(true));
+            let stderr = result["stderr"].as_str().unwrap();
+            assert!(
+                stderr.contains("exec denied"),
+                "expected 'exec denied', got: {stderr}"
+            );
+        }
+
+        #[test]
+        fn exec_echo_command_with_context() {
             let mut component = create_exec_component("echo 'hello world'");
 
             let req = create_test_request("test", JsonValue::Null);
-            let result = component.on_request(&req);
+            let data = component.on_request(&req).expect("should succeed");
 
-            assert!(result.is_ok());
-            let data = result.unwrap();
             assert!(data["ok"].as_bool().unwrap_or(false));
             assert!(data["stdout"].as_str().unwrap().contains("hello world"));
             assert_eq!(data["code"].as_i64(), Some(0));
         }
 
         #[test]
-        fn exec_failing_command_sync() {
-            // Test orcs.exec with a failing command
+        fn exec_failing_command() {
             let mut component = create_exec_component("exit 42");
 
             let req = create_test_request("test", JsonValue::Null);
-            let result = component.on_request(&req);
+            let data = component.on_request(&req).expect("should succeed");
 
-            assert!(result.is_ok());
-            let data = result.unwrap();
             assert!(!data["ok"].as_bool().unwrap_or(true));
             assert_eq!(data["code"].as_i64(), Some(42));
         }
 
         #[test]
         fn exec_stderr_captured() {
-            // Test that stderr is captured
             let mut component = create_exec_component("echo 'error output' >&2");
 
             let req = create_test_request("test", JsonValue::Null);
-            let result = component.on_request(&req);
+            let data = component.on_request(&req).expect("should succeed");
 
-            assert!(result.is_ok());
-            let data = result.unwrap();
             assert!(data["stderr"].as_str().unwrap().contains("error output"));
         }
 
         #[tokio::test]
         async fn exec_in_async_context() {
-            // Test orcs.exec when called from async context (via spawn_blocking)
             let mut component = create_exec_component("echo 'async test'");
 
             let req = create_test_request("test", JsonValue::Null);
 
-            // Simulate spawn_blocking context like ClientRunner does
             let result = tokio::task::spawn_blocking(move || component.on_request(&req))
                 .await
                 .expect("spawn_blocking should succeed");
 
-            assert!(result.is_ok());
-            let data = result.unwrap();
+            let data = result.expect("should succeed");
             assert!(data["ok"].as_bool().unwrap_or(false));
             assert!(data["stdout"].as_str().unwrap().contains("async test"));
         }
 
-        #[tokio::test]
-        async fn exec_complex_command_in_async() {
-            // Test with a more complex command involving pipes
-            let mut component = create_exec_component("echo 'line1\\nline2' | wc -l");
-
-            let req = create_test_request("test", JsonValue::Null);
-
-            let result = tokio::task::spawn_blocking(move || component.on_request(&req))
-                .await
-                .expect("spawn_blocking should succeed");
-
-            assert!(result.is_ok());
-            let data = result.unwrap();
-            assert!(data["ok"].as_bool().unwrap_or(false));
-            // wc -l should return "2" (with possible whitespace)
-            let stdout = data["stdout"].as_str().unwrap().trim();
-            assert!(stdout.contains('2') || stdout == "1"); // Different systems may count differently
-        }
-
         #[test]
         fn exec_with_special_characters() {
-            // Test command with special characters
             let script = r#"
                 return {
                     id = "exec-special",
@@ -1100,12 +1149,12 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            component.set_child_context(Box::new(PermissiveContext));
             let req = create_test_request("test", JsonValue::Null);
-            let result = component.on_request(&req);
+            let data = component.on_request(&req).expect("should succeed");
 
-            assert!(result.is_ok());
-            let data = result.unwrap();
             assert!(data["stdout"].as_str().unwrap().contains("quotes"));
         }
     }
@@ -1135,7 +1184,8 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
             let req = create_test_request("test", JsonValue::Null);
             let result = component.on_request(&req);
 
@@ -1238,7 +1288,8 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             let emitter = MockEmitter::new();
             let emitter_clone = emitter.clone();
@@ -1270,7 +1321,8 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             let emitter = MockEmitter::new();
             let emitter_clone = emitter.clone();
@@ -1303,7 +1355,8 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             // Note: no emitter set
             let req = create_test_request("test", JsonValue::Null);
