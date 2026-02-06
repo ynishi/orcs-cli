@@ -12,6 +12,9 @@
 //! | `orcs.write(path, content)` | Write file contents (atomic) |
 //! | `orcs.grep(pattern, path)` | Search file contents with regex |
 //! | `orcs.glob(pattern, dir?)` | Find files by glob pattern |
+//! | `orcs.mkdir(path)` | Create directory (with parents) |
+//! | `orcs.remove(path)` | Remove file or directory |
+//! | `orcs.mv(src, dst)` | Move / rename |
 //!
 //! # Security
 //!
@@ -88,10 +91,11 @@ fn tool_grep(
     let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
     let mut matches = Vec::new();
 
+    let sandbox_root = sandbox.root();
     if canonical.is_file() {
         grep_file(&re, &canonical, &mut matches)?;
     } else if canonical.is_dir() {
-        grep_dir(&re, &canonical, &mut matches)?;
+        grep_dir(&re, &canonical, sandbox_root, &mut matches)?;
     } else {
         return Err(format!("not a file or directory: {path}"));
     }
@@ -115,24 +119,35 @@ fn grep_file(re: &regex::Regex, path: &Path, matches: &mut Vec<GrepMatch>) -> Re
     Ok(())
 }
 
-fn grep_dir(re: &regex::Regex, dir: &Path, matches: &mut Vec<GrepMatch>) -> Result<(), String> {
+fn grep_dir(
+    re: &regex::Regex,
+    dir: &Path,
+    sandbox_root: &Path,
+    matches: &mut Vec<GrepMatch>,
+) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read directory: {:?} ({e})", dir))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() {
+
+        // Symlink guard: canonicalize and verify still within sandbox
+        let canonical = match path.canonicalize() {
+            Ok(c) if c.starts_with(sandbox_root) => c,
+            _ => continue, // outside sandbox or broken symlink — skip
+        };
+
+        if canonical.is_file() {
             // Skip binary files (best-effort: check for null bytes in first 512 bytes)
-            if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(bytes) = std::fs::read(&canonical) {
                 let check_len = bytes.len().min(512);
                 if bytes[..check_len].contains(&0) {
                     continue;
                 }
             }
-            // Ignore read errors on individual files in directory mode
-            let _ = grep_file(re, &path, matches);
-        } else if path.is_dir() {
-            let _ = grep_dir(re, &path, matches);
+            let _ = grep_file(re, &canonical, matches);
+        } else if canonical.is_dir() {
+            let _ = grep_dir(re, &canonical, sandbox_root, matches);
         }
     }
 
@@ -161,13 +176,53 @@ fn tool_glob(
     let paths =
         glob::glob(&full_pattern).map_err(|e| format!("invalid glob pattern: {pattern} ({e})"))?;
 
+    let sandbox_root = sandbox.root();
     let mut results = Vec::new();
     for entry in paths.flatten() {
-        results.push(entry.display().to_string());
+        // Symlink guard: canonicalize and verify still within sandbox
+        if let Ok(canonical) = entry.canonicalize() {
+            if canonical.starts_with(sandbox_root) {
+                results.push(canonical.display().to_string());
+            }
+        }
     }
 
     results.sort();
     Ok(results)
+}
+
+/// Creates a directory (and all parents) under the sandbox.
+fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+    let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&target).map_err(|e| format!("mkdir failed: {path} ({e})"))
+}
+
+/// Removes a file or directory under the sandbox.
+fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+
+    if canonical.is_file() {
+        std::fs::remove_file(&canonical).map_err(|e| format!("remove failed: {path} ({e})"))
+    } else if canonical.is_dir() {
+        std::fs::remove_dir_all(&canonical).map_err(|e| format!("remove failed: {path} ({e})"))
+    } else {
+        Err(format!("not found: {path}"))
+    }
+}
+
+/// Moves (renames) a file or directory within the sandbox.
+fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+    let src_canonical = sandbox.validate_read(src).map_err(|e| e.to_string())?;
+    let dst_target = sandbox.validate_write(dst).map_err(|e| e.to_string())?;
+
+    // Ensure destination parent exists
+    if let Some(parent) = dst_target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create parent directory: {e}"))?;
+    }
+
+    std::fs::rename(&src_canonical, &dst_target)
+        .map_err(|e| format!("mv failed: {src} -> {dst} ({e})"))
 }
 
 // ─── Lua Registration ───────────────────────────────────────────────────
@@ -177,7 +232,7 @@ fn tool_glob(
 /// The sandbox controls which paths are accessible. All file operations
 /// validate paths through the sandbox before any I/O.
 ///
-/// Adds: `orcs.read`, `orcs.write`, `orcs.grep`, `orcs.glob`
+/// Adds: `orcs.read`, `orcs.write`, `orcs.grep`, `orcs.glob`, `orcs.mkdir`, `orcs.remove`, `orcs.mv`
 ///
 /// # Errors
 ///
@@ -271,8 +326,53 @@ pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Re
     })?;
     orcs_table.set("glob", glob_fn)?;
 
+    // orcs.mkdir(path) -> { ok, error }
+    let sb = Arc::clone(&sandbox);
+    let mkdir_fn = lua.create_function(move |lua, path: String| {
+        let result = lua.create_table()?;
+        match tool_mkdir(&path, sb.as_ref()) {
+            Ok(()) => result.set("ok", true)?,
+            Err(e) => {
+                result.set("ok", false)?;
+                result.set("error", e)?;
+            }
+        }
+        Ok(result)
+    })?;
+    orcs_table.set("mkdir", mkdir_fn)?;
+
+    // orcs.remove(path) -> { ok, error }
+    let sb = Arc::clone(&sandbox);
+    let remove_fn = lua.create_function(move |lua, path: String| {
+        let result = lua.create_table()?;
+        match tool_remove(&path, sb.as_ref()) {
+            Ok(()) => result.set("ok", true)?,
+            Err(e) => {
+                result.set("ok", false)?;
+                result.set("error", e)?;
+            }
+        }
+        Ok(result)
+    })?;
+    orcs_table.set("remove", remove_fn)?;
+
+    // orcs.mv(src, dst) -> { ok, error }
+    let sb = Arc::clone(&sandbox);
+    let mv_fn = lua.create_function(move |lua, (src, dst): (String, String)| {
+        let result = lua.create_table()?;
+        match tool_mv(&src, &dst, sb.as_ref()) {
+            Ok(()) => result.set("ok", true)?,
+            Err(e) => {
+                result.set("ok", false)?;
+                result.set("error", e)?;
+            }
+        }
+        Ok(result)
+    })?;
+    orcs_table.set("mv", mv_fn)?;
+
     tracing::debug!(
-        "Registered orcs tool functions: read, write, grep, glob (sandbox_root={})",
+        "Registered orcs tool functions: read, write, grep, glob, mkdir, remove, mv (sandbox_root={})",
         sandbox.root().display()
     );
     Ok(())

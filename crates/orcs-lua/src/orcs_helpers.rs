@@ -71,22 +71,26 @@ pub fn register_base_orcs_functions(
     }
 
     // orcs.exec(cmd) -> {ok, stdout, stderr, code}
+    // Commands run with cwd = sandbox root (not process cwd)
     if orcs_table.get::<mlua::Function>("exec").is_err() {
-        let exec_fn = lua.create_function(|lua, cmd: String| {
-            tracing::debug!("Lua exec: {}", cmd);
+        let sandbox_root = sandbox.root().to_path_buf();
+        let exec_fn = lua.create_function(move |lua, cmd: String| {
+            tracing::debug!("Lua exec (cwd={}): {}", sandbox_root.display(), cmd);
 
-            // Try to get current tokio runtime handle for async execution.
             let output = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    handle.block_on(async { Command::new("sh").arg("-c").arg(&cmd).output().await })
-                }
-                Err(_) => {
-                    tracing::warn!("No tokio runtime available, using sync execution");
-                    std::process::Command::new("sh")
+                Ok(handle) => handle.block_on(async {
+                    Command::new("sh")
                         .arg("-c")
                         .arg(&cmd)
+                        .current_dir(&sandbox_root)
                         .output()
-                }
+                        .await
+                }),
+                Err(_) => std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .current_dir(&sandbox_root)
+                    .output(),
             }
             .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
 
