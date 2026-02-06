@@ -12,7 +12,7 @@
 //! use std::path::Path;
 //!
 //! // Create loader with project root
-//! let loader = ScriptLoader::new()
+//! let loader = ScriptLoader::new(test_sandbox())
 //!     .with_project_root("/path/to/project")
 //!     .with_path("/additional/scripts");
 //!
@@ -26,7 +26,9 @@
 use crate::component::LuaComponent;
 use crate::embedded;
 use crate::error::LuaError;
+use orcs_runtime::sandbox::SandboxPolicy;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Script loader with configurable search paths.
 ///
@@ -39,21 +41,18 @@ pub struct ScriptLoader {
     search_paths: Vec<PathBuf>,
     /// Whether to use embedded scripts as fallback.
     use_embedded_fallback: bool,
-}
-
-impl Default for ScriptLoader {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Sandbox policy for file operations in loaded components.
+    sandbox: Arc<dyn SandboxPolicy>,
 }
 
 impl ScriptLoader {
     /// Creates a new loader with embedded fallback enabled.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(sandbox: Arc<dyn SandboxPolicy>) -> Self {
         Self {
             search_paths: Vec::new(),
             use_embedded_fallback: true,
+            sandbox,
         }
     }
 
@@ -120,14 +119,14 @@ impl ScriptLoader {
         for path in &self.search_paths {
             let file_path = path.join(format!("{}.lua", name));
             if file_path.exists() {
-                return LuaComponent::from_file(&file_path);
+                return LuaComponent::from_file(&file_path, Arc::clone(&self.sandbox));
             }
         }
 
         // Fallback to embedded
         if self.use_embedded_fallback {
             if let Some(script) = embedded::get(name) {
-                return LuaComponent::from_script(script);
+                return LuaComponent::from_script(script, Arc::clone(&self.sandbox));
             }
         }
 
@@ -190,11 +189,14 @@ impl ScriptLoader {
     /// # Errors
     ///
     /// Returns error if script name not found in embedded scripts.
-    pub fn load_embedded(name: &str) -> Result<LuaComponent, LuaError> {
+    pub fn load_embedded(
+        name: &str,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<LuaComponent, LuaError> {
         let script = embedded::get(name)
             .ok_or_else(|| LuaError::ScriptNotFound(format!("embedded:{}", name)))?;
 
-        LuaComponent::from_script(script)
+        LuaComponent::from_script(script, sandbox)
     }
 
     /// Loads a script from a specific file path.
@@ -204,8 +206,11 @@ impl ScriptLoader {
     /// # Errors
     ///
     /// Returns error if file not found or invalid.
-    pub fn load_file<P: AsRef<Path>>(path: P) -> Result<LuaComponent, LuaError> {
-        LuaComponent::from_file(path)
+    pub fn load_file<P: AsRef<Path>>(
+        path: P,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<LuaComponent, LuaError> {
+        LuaComponent::from_file(path, sandbox)
     }
 
     /// Returns the crate's built-in scripts directory.
@@ -222,17 +227,24 @@ impl ScriptLoader {
 mod tests {
     use super::*;
     use orcs_component::Component;
+    use orcs_runtime::sandbox::ProjectSandbox;
+
+    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
 
     #[test]
     fn new_loader_has_embedded_fallback() {
-        let loader = ScriptLoader::new();
+        let loader = ScriptLoader::new(test_sandbox());
         assert!(loader.use_embedded_fallback);
         assert!(loader.search_paths.is_empty());
     }
 
     #[test]
     fn with_path_adds_to_search_paths() {
-        let loader = ScriptLoader::new().with_path("/foo").with_path("/bar");
+        let loader = ScriptLoader::new(test_sandbox())
+            .with_path("/foo")
+            .with_path("/bar");
         assert_eq!(loader.search_paths.len(), 2);
         assert_eq!(loader.search_paths[0], PathBuf::from("/foo"));
         assert_eq!(loader.search_paths[1], PathBuf::from("/bar"));
@@ -240,33 +252,33 @@ mod tests {
 
     #[test]
     fn with_project_root_adds_scripts_subdir() {
-        let loader = ScriptLoader::new().with_project_root("/project");
+        let loader = ScriptLoader::new(test_sandbox()).with_project_root("/project");
         assert_eq!(loader.search_paths[0], PathBuf::from("/project/scripts"));
     }
 
     #[test]
     fn without_embedded_fallback_disables_it() {
-        let loader = ScriptLoader::new().without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).without_embedded_fallback();
         assert!(!loader.use_embedded_fallback);
     }
 
     #[test]
     fn load_from_embedded() {
-        let loader = ScriptLoader::new();
+        let loader = ScriptLoader::new(test_sandbox());
         let component = loader.load("echo").expect("echo should load from embedded");
         assert!(component.id().fqn().contains("echo"));
     }
 
     #[test]
     fn load_from_crate_scripts_dir() {
-        let loader = ScriptLoader::new().with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
         let component = loader.load("echo");
         assert!(component.is_ok());
     }
 
     #[test]
     fn load_not_found_shows_searched_paths() {
-        let loader = ScriptLoader::new()
+        let loader = ScriptLoader::new(test_sandbox())
             .with_path("/nonexistent/path")
             .without_embedded_fallback();
         let result = loader.load("missing");
@@ -280,14 +292,14 @@ mod tests {
 
     #[test]
     fn list_available_includes_embedded() {
-        let loader = ScriptLoader::new();
+        let loader = ScriptLoader::new(test_sandbox());
         let names = loader.list_available();
         assert!(names.contains(&"echo".to_string()));
     }
 
     #[test]
     fn list_available_includes_filesystem() {
-        let loader = ScriptLoader::new().with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
         let names = loader.list_available();
         assert!(names.contains(&"echo".to_string()));
     }
@@ -295,13 +307,13 @@ mod tests {
     // Static method tests
     #[test]
     fn static_load_embedded() {
-        let component = ScriptLoader::load_embedded("echo");
+        let component = ScriptLoader::load_embedded("echo", test_sandbox());
         assert!(component.is_ok());
     }
 
     #[test]
     fn static_load_embedded_not_found() {
-        let result = ScriptLoader::load_embedded("nonexistent");
+        let result = ScriptLoader::load_embedded("nonexistent", test_sandbox());
         assert!(result.is_err());
     }
 

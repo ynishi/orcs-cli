@@ -1,16 +1,27 @@
 //! Integration tests for orcs.read, orcs.write, orcs.grep, orcs.glob
 //!
 //! Verifies tools work end-to-end from Lua scripts via LuaTestHarness.
+//!
+//! Note: LuaTestHarness internally calls register_tool_functions which
+//! captures cwd as the sandbox root. All temp files must be under cwd.
 
 use orcs_component::EventCategory;
 use orcs_lua::testing::LuaTestHarness;
+use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+}
+
+/// Creates a temp dir under cwd/target/test-tmp/ so it's within the sandbox root.
 fn tempdir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "orcs-tools-e2e-{}-{}",
+    let cwd = std::env::current_dir().unwrap();
+    let dir = cwd.join(format!(
+        "target/test-tmp/orcs-tools-e2e-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -45,7 +56,7 @@ mod read {
             "#,
             file_path
         );
-        LuaTestHarness::from_script(&script).unwrap()
+        LuaTestHarness::from_script(&script, test_sandbox()).unwrap()
     }
 
     #[test]
@@ -65,10 +76,19 @@ mod read {
 
     #[test]
     fn read_nonexistent_returns_error() {
-        let mut h = read_harness("/nonexistent/path/file.txt");
+        let mut h = read_harness("nonexistent_path_xyz.txt");
         let result = h.request(EventCategory::Echo, "read", json!(null));
 
         // success = false → ComponentError
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_outside_cwd_returns_error() {
+        let mut h = read_harness("/etc/hosts");
+        let result = h.request(EventCategory::Echo, "read", json!(null));
+
+        // success = false (access denied) → ComponentError
         assert!(result.is_err());
     }
 
@@ -110,7 +130,7 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
             .unwrap();
@@ -140,7 +160,7 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
             .unwrap();
@@ -188,7 +208,7 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
         let result = h.request(EventCategory::Echo, "grep", json!(null)).unwrap();
 
         assert_eq!(result["count"], 2);
@@ -218,7 +238,7 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
         let result = h.request(EventCategory::Echo, "grep", json!(null)).unwrap();
         assert_eq!(result["count"], 2);
     }
@@ -252,7 +272,7 @@ mod glob {
             dir_path
         );
 
-        let mut h = LuaTestHarness::from_script(&script).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
         let result = h.request(EventCategory::Echo, "glob", json!(null)).unwrap();
         assert_eq!(result["count"], 2);
     }
@@ -272,7 +292,7 @@ mod glob {
             }
         "#;
 
-        let mut h = LuaTestHarness::from_script(script).unwrap();
+        let mut h = LuaTestHarness::from_script(script, test_sandbox()).unwrap();
         let result = h.request(EventCategory::Echo, "glob", json!(null)).unwrap();
         // Should find at least Cargo.toml in workspace root
         assert!(result["count"].as_i64().unwrap() >= 1);
@@ -303,7 +323,7 @@ fn write_read_roundtrip() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script).unwrap();
+    let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
     let result = h.request(EventCategory::Echo, "test", json!(null)).unwrap();
     assert_eq!(result["content"], "roundtrip data 123");
 }
@@ -332,7 +352,7 @@ fn write_then_grep() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script).unwrap();
+    let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
     let result = h.request(EventCategory::Echo, "test", json!(null)).unwrap();
     assert_eq!(result["count"], 2);
 }

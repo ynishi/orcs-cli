@@ -82,7 +82,9 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// LuaChildLoader implementation for spawning Lua children.
-struct AppLuaChildLoader;
+struct AppLuaChildLoader {
+    sandbox: Arc<dyn orcs_runtime::sandbox::SandboxPolicy>,
+}
 
 impl LuaChildLoader for AppLuaChildLoader {
     fn load(&self, config: &ChildConfig) -> Result<Box<dyn RunnableChild>, SpawnError> {
@@ -97,7 +99,7 @@ impl LuaChildLoader for AppLuaChildLoader {
         let lua_arc = Arc::new(Mutex::new(lua));
 
         // Create LuaChild from script
-        let child = LuaChild::from_script(lua_arc, script)
+        let child = LuaChild::from_script(lua_arc, script, Arc::clone(&self.sandbox))
             .map_err(|e| SpawnError::Internal(format!("failed to load Lua child: {}", e)))?;
 
         Ok(Box::new(child))
@@ -615,6 +617,8 @@ pub struct OrcsAppBuilder {
     resolver: Box<dyn ConfigResolver>,
     /// Session ID to resume from (launch parameter).
     resume_session_id: Option<String>,
+    /// Sandbox policy for file operations.
+    sandbox: Option<Arc<dyn orcs_runtime::sandbox::SandboxPolicy>>,
 }
 
 impl OrcsAppBuilder {
@@ -624,7 +628,17 @@ impl OrcsAppBuilder {
         Self {
             resolver: Box::new(resolver),
             resume_session_id: None,
+            sandbox: None,
         }
+    }
+
+    /// Sets the sandbox policy for file operations.
+    ///
+    /// Required before calling [`build()`](Self::build).
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn orcs_runtime::sandbox::SandboxPolicy>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 
     /// Sets a session ID to resume from.
@@ -648,6 +662,11 @@ impl OrcsAppBuilder {
             .resolver
             .resolve()
             .map_err(|e| AppError::Config(e.to_string()))?;
+
+        // Sandbox is required for file operations
+        let sandbox = self
+            .sandbox
+            .ok_or_else(|| AppError::Config("sandbox policy not set (use .with_sandbox())".into()))?;
 
         // Create session store
         let session_path = config.paths.session_dir_or_default();
@@ -685,7 +704,7 @@ impl OrcsAppBuilder {
         );
 
         // Spawn ChannelRunner for claude_cli with output routed to IO channel
-        let lua_component = ScriptLoader::load_embedded("claude_cli")
+        let lua_component = ScriptLoader::load_embedded("claude_cli", Arc::clone(&sandbox))
             .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {e}")))?;
         let component_id = lua_component.id().clone();
         let _claude_handle = engine.spawn_runner_full_auth(
@@ -703,7 +722,7 @@ impl OrcsAppBuilder {
         );
 
         // Spawn ChannelRunner for subagent with output routed to IO channel
-        let subagent_component = ScriptLoader::load_embedded("subagent")
+        let subagent_component = ScriptLoader::load_embedded("subagent", Arc::clone(&sandbox))
             .map_err(|e| AppError::Config(format!("Failed to load subagent script: {e}")))?;
         let subagent_id = subagent_component.id().clone();
         let _subagent_handle = engine.spawn_runner_full_auth(
@@ -723,7 +742,7 @@ impl OrcsAppBuilder {
         // Spawn ChannelRunner for shell component (auth verification)
         // Shell uses a non-elevated session so dangerous commands require HIL approval
         let shell_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
-        let shell_component = ScriptLoader::load_embedded("shell")
+        let shell_component = ScriptLoader::load_embedded("shell", Arc::clone(&sandbox))
             .map_err(|e| AppError::Config(format!("Failed to load shell script: {e}")))?;
         let shell_id = shell_component.id().clone();
         let _shell_handle = engine.spawn_runner_full_auth(
@@ -741,10 +760,12 @@ impl OrcsAppBuilder {
         );
 
         // Spawn ChannelRunner for agent_mgr with child spawning enabled
-        let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr")
+        let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr", Arc::clone(&sandbox))
             .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
         let agent_mgr_id = agent_mgr_component.id().clone();
-        let lua_loader: Arc<dyn LuaChildLoader> = Arc::new(AppLuaChildLoader);
+        let lua_loader: Arc<dyn LuaChildLoader> = Arc::new(AppLuaChildLoader {
+            sandbox: Arc::clone(&sandbox),
+        });
         let _agent_mgr_handle = engine.spawn_runner_full_auth(
             agent_mgr_channel,
             Box::new(agent_mgr_component),
@@ -811,12 +832,21 @@ impl OrcsAppBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_runtime::sandbox::ProjectSandbox;
     use orcs_runtime::NoOpResolver;
     use std::path::PathBuf;
 
+    fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
+
     #[tokio::test]
     async fn builder_default() {
-        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         assert!(app.pending_approval_id().is_none());
     }
 
@@ -831,19 +861,31 @@ mod tests {
             }
         }
 
-        let app = OrcsApp::builder(VerboseResolver).build().await.unwrap();
+        let app = OrcsApp::builder(VerboseResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         assert!(app.config().ui.verbose);
     }
 
     #[tokio::test]
     async fn app_engine_access() {
-        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         assert!(!app.engine().is_running());
     }
 
     #[tokio::test]
     async fn app_engine_parallel_access() {
-        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         let io = app.engine().io_channel();
         let world = app.engine().world_read();
         let w = world.read().await;
@@ -852,13 +894,21 @@ mod tests {
 
     #[tokio::test]
     async fn app_session_id() {
-        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         assert!(!app.session_id().is_empty());
     }
 
     #[tokio::test]
     async fn app_new_session_not_resumed() {
-        let app = OrcsApp::builder(NoOpResolver).build().await.unwrap();
+        let app = OrcsApp::builder(NoOpResolver)
+            .with_sandbox(test_sandbox())
+            .build()
+            .await
+            .unwrap();
         assert!(!app.is_resumed());
         assert_eq!(app.restored_count(), 0);
     }
@@ -883,6 +933,7 @@ mod tests {
             let mut app = OrcsApp::builder(SessionResolver {
                 session_dir: temp_dir.clone(),
             })
+            .with_sandbox(test_sandbox())
             .build()
             .await
             .unwrap();
@@ -895,6 +946,7 @@ mod tests {
         let app = OrcsApp::builder(SessionResolver {
             session_dir: temp_dir.clone(),
         })
+        .with_sandbox(test_sandbox())
         .resume(&session_id)
         .build()
         .await
@@ -925,6 +977,7 @@ mod tests {
         let result = OrcsApp::builder(SessionResolver {
             session_dir: temp_dir.clone(),
         })
+        .with_sandbox(test_sandbox())
         .resume("nonexistent-session-id")
         .build()
         .await;
@@ -953,6 +1006,7 @@ mod tests {
         let mut app = OrcsApp::builder(ToggleResolver {
             debug: Arc::clone(&flag),
         })
+        .with_sandbox(test_sandbox())
         .build()
         .await
         .unwrap();

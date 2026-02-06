@@ -11,6 +11,11 @@ use orcs_component::{
 };
 use orcs_event::{EventCategory, SignalResponse};
 use orcs_lua::{LuaChild, LuaComponent};
+use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+
+fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+}
 
 /// Create a Lua runtime for testing.
 ///
@@ -243,7 +248,7 @@ mod worker_child {
     #[test]
     fn load_worker_child() {
         let lua = create_lua();
-        let child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT);
+        let child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox());
 
         assert!(child.is_ok(), "Failed to load: {:?}", child.err());
         let child = child.unwrap();
@@ -254,7 +259,8 @@ mod worker_child {
     #[test]
     fn worker_run_basic_task() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT).unwrap();
+        let mut child =
+            LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox()).unwrap();
 
         // Set mock context
         let ctx = MockChildContext::new("parent");
@@ -280,7 +286,8 @@ mod worker_child {
     #[test]
     fn worker_emits_output() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT).unwrap();
+        let mut child =
+            LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let ctx_emit_history = Arc::clone(&ctx.emit_history);
@@ -308,7 +315,8 @@ mod worker_child {
     #[test]
     fn worker_responds_to_veto() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT).unwrap();
+        let mut child =
+            LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox()).unwrap();
 
         // Worker's on_signal uses orcs.emit_output, so we need context
         let ctx = MockChildContext::new("parent");
@@ -342,7 +350,7 @@ mod spawner_child {
     #[test]
     fn load_spawner_child() {
         let lua = create_lua();
-        let child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT);
+        let child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox());
 
         assert!(child.is_ok(), "Failed to load: {:?}", child.err());
         let child = child.unwrap();
@@ -353,7 +361,8 @@ mod spawner_child {
     #[test]
     fn spawner_spawns_workers() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT).unwrap();
+        let mut child =
+            LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let spawn_history = Arc::clone(&ctx.spawn_history);
@@ -389,7 +398,8 @@ mod spawner_child {
     #[test]
     fn spawner_respects_max_children() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT).unwrap();
+        let mut child =
+            LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         // max_children is 10
@@ -441,7 +451,7 @@ mod manager_component {
 
     #[test]
     fn load_manager_component() {
-        let component = LuaComponent::from_script(MANAGER_SCRIPT);
+        let component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox());
 
         assert!(component.is_ok(), "Failed to load: {:?}", component.err());
         let component = component.unwrap();
@@ -450,7 +460,7 @@ mod manager_component {
 
     #[test]
     fn manager_dispatch_task() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT).unwrap();
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox()).unwrap();
 
         let req = create_request("dispatch", json!({"task": "process-item"}));
         let result = component.on_request(&req);
@@ -463,7 +473,7 @@ mod manager_component {
 
     #[test]
     fn manager_status() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT).unwrap();
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox()).unwrap();
 
         let req = create_request("status", json!({}));
         let result = component.on_request(&req);
@@ -475,7 +485,7 @@ mod manager_component {
 
     #[test]
     fn manager_veto_aborts() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT).unwrap();
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox()).unwrap();
 
         let signal = orcs_event::Signal::veto(orcs_types::Principal::System);
         let response = component.on_signal(&signal);
@@ -486,7 +496,7 @@ mod manager_component {
 
     #[test]
     fn manager_init_and_shutdown() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT).unwrap();
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox()).unwrap();
 
         // Init
         let init_result = component.init();
@@ -550,7 +560,7 @@ mod integration {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         // 3. Set up context
         let ctx = MockChildContext::new("root");
@@ -599,7 +609,7 @@ mod integration {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
         // Note: NOT setting context
 
         let result = child.run(json!({}));
@@ -692,7 +702,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_has_child_context() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER).unwrap();
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox()).unwrap();
 
         // Initially no child context
         assert!(!component.has_child_context());
@@ -706,7 +716,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_spawn_child_via_request() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER).unwrap();
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox()).unwrap();
 
         // Set child context
         let ctx = MockChildContext::new("manager");
@@ -730,7 +740,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_get_counts_without_spawning() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER).unwrap();
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox()).unwrap();
 
         // Set child context
         let ctx = MockChildContext::new("manager");
@@ -748,7 +758,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_without_context_spawn_fails_gracefully() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER).unwrap();
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox()).unwrap();
 
         // Note: NOT setting child context
 
@@ -794,7 +804,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let emit_history = Arc::clone(&ctx.emit_history);
@@ -829,7 +839,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let emit_history = Arc::clone(&ctx.emit_history);
@@ -869,7 +879,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let spawn_history = Arc::clone(&ctx.spawn_history);
@@ -901,7 +911,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         let spawn_history = Arc::clone(&ctx.spawn_history);
@@ -942,7 +952,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         // Limit to 3 children
         let ctx = MockChildContext::new("parent").with_max_children(3);
@@ -974,7 +984,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         // Fail any spawn with "bad" in the id
         let ctx = MockChildContext::new("parent").with_fail_spawn_on("bad");
@@ -1012,7 +1022,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).unwrap();
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).unwrap();
 
         let ctx = MockChildContext::new("parent");
         // Clone Arc references before moving ctx

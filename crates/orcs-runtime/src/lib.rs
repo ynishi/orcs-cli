@@ -108,6 +108,7 @@ pub mod components;
 pub mod config;
 pub mod engine;
 pub mod io;
+pub mod sandbox;
 pub mod session;
 
 // Re-exports for convenience
@@ -127,6 +128,7 @@ pub use config::{
     ConfigResolver, HilConfig, ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
+pub use sandbox::{ProjectSandbox, SandboxError, SandboxPolicy};
 pub use io::{
     IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext,
     OutputStyle,

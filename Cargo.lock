@@ -739,6 +739,7 @@ dependencies = [
  "mlua",
  "orcs-component",
  "orcs-event",
+ "orcs-runtime",
  "orcs-types",
  "regex",
  "serde",

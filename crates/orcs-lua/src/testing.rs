@@ -15,7 +15,9 @@
 //! use orcs_lua::testing::LuaTestHarness;
 //! use orcs_component::EventCategory;
 //! use orcs_event::SignalResponse;
+//! use orcs_runtime::sandbox::ProjectSandbox;
 //! use serde_json::json;
+//! use std::sync::Arc;
 //!
 //! let script = r#"
 //!     return {
@@ -31,7 +33,8 @@
 //!     }
 //! "#;
 //!
-//! let mut harness = LuaTestHarness::from_script(script).unwrap();
+//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
+//! let mut harness = LuaTestHarness::from_script(script, sandbox).unwrap();
 //!
 //! // Test request
 //! let result = harness.request(EventCategory::Echo, "echo", json!({"msg": "hello"}));
@@ -46,9 +49,11 @@ use crate::{LuaComponent, LuaError};
 use orcs_component::testing::{ComponentTestHarness, RequestRecord, SignalRecord};
 use orcs_component::{Component, ComponentError, EventCategory, Status};
 use orcs_event::SignalResponse;
+use orcs_runtime::sandbox::SandboxPolicy;
 use orcs_types::ComponentId;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Test harness for Lua-based components.
 ///
@@ -78,6 +83,8 @@ impl LuaTestHarness {
     ///
     /// ```
     /// use orcs_lua::testing::LuaTestHarness;
+    /// use orcs_runtime::sandbox::ProjectSandbox;
+    /// use std::sync::Arc;
     ///
     /// let script = r#"
     ///     return {
@@ -88,11 +95,12 @@ impl LuaTestHarness {
     ///     }
     /// "#;
     ///
-    /// let harness = LuaTestHarness::from_script(script).unwrap();
+    /// let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
+    /// let harness = LuaTestHarness::from_script(script, sandbox).unwrap();
     /// assert_eq!(harness.id().name, "test");
     /// ```
-    pub fn from_script(script: &str) -> Result<Self, LuaError> {
-        let component = LuaComponent::from_script(script)?;
+    pub fn from_script(script: &str, sandbox: Arc<dyn SandboxPolicy>) -> Result<Self, LuaError> {
+        let component = LuaComponent::from_script(script, sandbox)?;
         Ok(Self {
             inner: ComponentTestHarness::new(component),
             script_source: Some(script.to_string()),
@@ -108,10 +116,13 @@ impl LuaTestHarness {
     /// # Errors
     ///
     /// Returns [`LuaError`] if the file cannot be read or parsed.
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, LuaError> {
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         let script = std::fs::read_to_string(path.as_ref())
             .map_err(|_| LuaError::ScriptNotFound(path.as_ref().display().to_string()))?;
-        let component = LuaComponent::from_file(path)?;
+        let component = LuaComponent::from_file(path, sandbox)?;
         Ok(Self {
             inner: ComponentTestHarness::new(component),
             script_source: Some(script),
@@ -250,6 +261,11 @@ impl LuaTestHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_runtime::sandbox::ProjectSandbox;
+
+    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
 
     const ECHO_SCRIPT: &str = r#"
         return {
@@ -306,14 +322,14 @@ mod tests {
 
     #[test]
     fn harness_from_script() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
         assert_eq!(harness.id().name, "echo-test");
         assert!(harness.script_source().is_some());
     }
 
     #[test]
     fn harness_request_success() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let result = harness.request(
             EventCategory::Echo,
@@ -328,7 +344,7 @@ mod tests {
 
     #[test]
     fn harness_request_error() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let result = harness.request(EventCategory::Echo, "unknown", Value::Null);
 
@@ -338,7 +354,7 @@ mod tests {
 
     #[test]
     fn harness_veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.veto();
 
@@ -349,7 +365,7 @@ mod tests {
 
     #[test]
     fn harness_cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.cancel();
 
@@ -359,7 +375,7 @@ mod tests {
 
     #[test]
     fn harness_lifecycle() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
 
         // Init
         assert!(harness.init().is_ok());
@@ -377,13 +393,13 @@ mod tests {
 
     #[test]
     fn harness_subscriptions() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]
     fn harness_clear_logs() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         harness
             .request(EventCategory::Echo, "echo", Value::Null)
@@ -401,7 +417,7 @@ mod tests {
 
     #[test]
     fn invalid_script_error() {
-        let result = LuaTestHarness::from_script("invalid lua {{{{");
+        let result = LuaTestHarness::from_script("invalid lua {{{{", test_sandbox());
         assert!(result.is_err());
     }
 
@@ -415,7 +431,7 @@ mod tests {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script);
+        let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 }

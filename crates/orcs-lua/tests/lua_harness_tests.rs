@@ -5,7 +5,13 @@
 use orcs_component::{EventCategory, Status};
 use orcs_event::SignalResponse;
 use orcs_lua::testing::LuaTestHarness;
+use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
+use std::sync::Arc;
+
+fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+}
 
 // =============================================================================
 // Basic Lua Component Tests
@@ -38,7 +44,7 @@ mod basic {
 
     #[test]
     fn echo_request() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let result = harness.request(EventCategory::Echo, "echo", json!({"msg": "hello"}));
 
@@ -48,7 +54,7 @@ mod basic {
 
     #[test]
     fn uppercase_request() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let result = harness.request(
             EventCategory::Echo,
@@ -62,7 +68,7 @@ mod basic {
 
     #[test]
     fn unknown_operation_error() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let result = harness.request(EventCategory::Echo, "unknown", json!({}));
 
@@ -71,7 +77,7 @@ mod basic {
 
     #[test]
     fn veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.veto();
 
@@ -81,7 +87,7 @@ mod basic {
 
     #[test]
     fn cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.cancel();
 
@@ -91,14 +97,14 @@ mod basic {
 
     #[test]
     fn subscriptions() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]
     fn component_id() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
 
         assert_eq!(harness.id().name, "echo");
         assert_eq!(harness.id().namespace, "lua");
@@ -141,7 +147,7 @@ mod stateful {
 
     #[test]
     fn increment_counter() {
-        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox()).unwrap();
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
@@ -161,7 +167,7 @@ mod stateful {
 
     #[test]
     fn reset_counter() {
-        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox()).unwrap();
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
@@ -230,7 +236,7 @@ mod lifecycle {
 
     #[test]
     fn init_called() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
 
         assert!(harness.init().is_ok());
 
@@ -242,7 +248,7 @@ mod lifecycle {
 
     #[test]
     fn shutdown_called() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
 
         harness.init().ok();
         harness.shutdown();
@@ -254,7 +260,7 @@ mod lifecycle {
 
     #[test]
     fn request_count_tracked() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
 
         harness
             .request(EventCategory::Lifecycle, "any", json!({}))
@@ -304,7 +310,7 @@ mod signals {
 
     #[test]
     fn veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.veto();
 
@@ -314,7 +320,7 @@ mod signals {
 
     #[test]
     fn cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.cancel();
 
@@ -323,7 +329,7 @@ mod signals {
 
     #[test]
     fn approve_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.approve("test-approval");
 
@@ -332,7 +338,7 @@ mod signals {
 
     #[test]
     fn reject_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
 
         let response = harness.reject("test-approval", Some("reason".to_string()));
 
@@ -349,7 +355,7 @@ mod errors {
 
     #[test]
     fn invalid_script_syntax() {
-        let result = LuaTestHarness::from_script("invalid lua syntax {{{");
+        let result = LuaTestHarness::from_script("invalid lua syntax {{{", test_sandbox());
         assert!(result.is_err());
     }
 
@@ -363,7 +369,7 @@ mod errors {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script);
+        let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 
@@ -377,7 +383,7 @@ mod errors {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script);
+        let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 
@@ -391,7 +397,7 @@ mod errors {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script);
+        let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 
@@ -405,7 +411,7 @@ mod errors {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script);
+        let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 }
@@ -433,7 +439,7 @@ mod logging {
 
     #[test]
     fn request_log_captured() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
 
         harness.request(EventCategory::Echo, "op1", json!(1)).ok();
         harness.request(EventCategory::Echo, "op2", json!(2)).ok();
@@ -447,7 +453,7 @@ mod logging {
 
     #[test]
     fn signal_log_captured() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
 
         harness.cancel();
         harness.approve("test");
@@ -458,7 +464,7 @@ mod logging {
 
     #[test]
     fn clear_logs() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
 
         harness.request(EventCategory::Echo, "op", json!({})).ok();
         harness.cancel();
@@ -474,7 +480,7 @@ mod logging {
 
     #[test]
     fn script_source_accessible() {
-        let harness = LuaTestHarness::from_script(SIMPLE_SCRIPT).unwrap();
+        let harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
 
         assert!(harness.script_source().is_some());
         assert!(harness.script_source().unwrap().contains("logging-test"));

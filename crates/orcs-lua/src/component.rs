@@ -13,6 +13,7 @@ use orcs_component::{
     SpawnError, Status,
 };
 use orcs_event::{Request, Signal, SignalResponse};
+use orcs_runtime::sandbox::SandboxPolicy;
 use orcs_types::ComponentId;
 use serde_json::Value as JsonValue;
 use std::path::Path;
@@ -75,6 +76,11 @@ pub struct LuaComponent {
     /// When set, allows Lua scripts to spawn children via `orcs.spawn_child()`.
     /// This enables the Manager-Worker pattern where Components manage Children.
     child_context: Option<Arc<Mutex<Box<dyn ChildContext>>>>,
+    /// Sandbox policy for file operations.
+    ///
+    /// Injected at construction time. Used by `orcs.read/write/grep/glob` in Lua.
+    /// Stored for use during `reload()`.
+    sandbox: Arc<dyn SandboxPolicy>,
 }
 
 // SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
@@ -107,12 +113,15 @@ impl LuaComponent {
     /// - Script file not found
     /// - Script syntax error
     /// - Missing required fields/callbacks
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, LuaError> {
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         let path = path.as_ref();
         let script = std::fs::read_to_string(path)
             .map_err(|_| LuaError::ScriptNotFound(path.display().to_string()))?;
 
-        let mut component = Self::from_script(&script)?;
+        let mut component = Self::from_script(&script, sandbox)?;
         component.script_path = Some(path.display().to_string());
         Ok(component)
     }
@@ -126,11 +135,11 @@ impl LuaComponent {
     /// # Errors
     ///
     /// Returns error if script is invalid.
-    pub fn from_script(script: &str) -> Result<Self, LuaError> {
+    pub fn from_script(script: &str, sandbox: Arc<dyn SandboxPolicy>) -> Result<Self, LuaError> {
         let lua = Lua::new();
 
         // Register orcs helper functions
-        Self::register_orcs_functions(&lua)?;
+        Self::register_orcs_functions(&lua, Arc::clone(&sandbox))?;
 
         // Execute script and get the returned table
         let component_table: Table = lua
@@ -198,6 +207,7 @@ impl LuaComponent {
             script_path: None,
             emitter: None,
             child_context: None,
+            sandbox,
         })
     }
 
@@ -217,7 +227,7 @@ impl LuaComponent {
             return Err(LuaError::InvalidScript("no script path".into()));
         };
 
-        let new_component = Self::from_file(path)?;
+        let new_component = Self::from_file(path, Arc::clone(&self.sandbox))?;
 
         // Swap internals (preserve emitter)
         self.lua = new_component.lua;
@@ -587,7 +597,7 @@ impl LuaComponent {
     /// - `orcs.log(level, msg)` - Log a message at specified level
     ///
     /// Note: `orcs.output(msg)` is registered separately via `set_emitter()`.
-    fn register_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
+    fn register_orcs_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Result<(), LuaError> {
         let orcs_table = lua.create_table()?;
 
         // orcs.exec(cmd) -> {ok, stdout, stderr, code}
@@ -656,7 +666,7 @@ impl LuaComponent {
         lua.globals().set("orcs", orcs_table)?;
 
         // Register native Rust tools (read, write, grep, glob)
-        crate::tools::register_tool_functions(lua)?;
+        crate::tools::register_tool_functions(lua, sandbox)?;
 
         Ok(())
     }
@@ -845,7 +855,12 @@ impl Component for LuaComponent {
 mod tests {
     use super::*;
     use orcs_event::Request;
+    use orcs_runtime::sandbox::ProjectSandbox;
     use orcs_types::{ChannelId, ComponentId, Principal};
+
+    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
 
     fn create_test_request(operation: &str, payload: JsonValue) -> Request {
         Request::new(
@@ -876,7 +891,7 @@ mod tests {
             }
         "#;
 
-        let component = LuaComponent::from_script(script).expect("load script");
+        let component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
         assert!(component.id().fqn().contains("test-component"));
         assert_eq!(component.subscriptions(), &[EventCategory::Echo]);
     }
@@ -899,7 +914,7 @@ mod tests {
             }
         "#;
 
-        let mut component = LuaComponent::from_script(script).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
         let req = create_test_request("echo", JsonValue::String("hello".into()));
         let result = component.on_request(&req);
@@ -926,7 +941,7 @@ mod tests {
             }
         "#;
 
-        let mut component = LuaComponent::from_script(script).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
         let signal = Signal::veto(test_principal());
         let response = component.on_signal(&signal);
@@ -945,7 +960,7 @@ mod tests {
             }
         "#;
 
-        let result = LuaComponent::from_script(script);
+        let result = LuaComponent::from_script(script, test_sandbox());
         assert!(result.is_err());
     }
 
@@ -981,7 +996,7 @@ mod tests {
             "#,
                 cmd
             );
-            LuaComponent::from_script(&script).expect("load exec script")
+            LuaComponent::from_script(&script, test_sandbox()).expect("load exec script")
         }
 
         #[test]
@@ -1083,7 +1098,7 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script).expect("load script");
+            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
             let req = create_test_request("test", JsonValue::Null);
             let result = component.on_request(&req);
 
@@ -1118,7 +1133,7 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script).expect("load script");
+            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
             let req = create_test_request("test", JsonValue::Null);
             let result = component.on_request(&req);
 
@@ -1177,6 +1192,7 @@ mod tests {
                     on_signal = function(sig) return "Ignored" end,
                 }
                 "#,
+                test_sandbox(),
             )
             .expect("load script");
 
@@ -1194,6 +1210,7 @@ mod tests {
                     on_signal = function(sig) return "Ignored" end,
                 }
                 "#,
+                test_sandbox(),
             )
             .expect("load script");
 
@@ -1219,7 +1236,7 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script).expect("load script");
+            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             let emitter = MockEmitter::new();
             let emitter_clone = emitter.clone();
@@ -1251,7 +1268,7 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script).expect("load script");
+            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             let emitter = MockEmitter::new();
             let emitter_clone = emitter.clone();
@@ -1284,7 +1301,7 @@ mod tests {
                 }
             "#;
 
-            let mut component = LuaComponent::from_script(script).expect("load script");
+            let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
 
             // Note: no emitter set
             let req = create_test_request("test", JsonValue::Null);
@@ -1300,14 +1317,16 @@ mod tests {
 ///
 /// Allows creating LuaComponent instances from inline script content
 /// for use with ChildContext::spawn_runner_from_script().
-#[derive(Clone, Default)]
-pub struct LuaComponentLoader;
+#[derive(Clone)]
+pub struct LuaComponentLoader {
+    sandbox: Arc<dyn SandboxPolicy>,
+}
 
 impl LuaComponentLoader {
-    /// Creates a new LuaComponentLoader.
+    /// Creates a new LuaComponentLoader with the given sandbox policy.
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(sandbox: Arc<dyn SandboxPolicy>) -> Self {
+        Self { sandbox }
     }
 }
 
@@ -1318,7 +1337,7 @@ impl ComponentLoader for LuaComponentLoader {
         _id: Option<&str>,
     ) -> Result<Box<dyn Component>, SpawnError> {
         // Note: id parameter is ignored; LuaComponent extracts ID from script
-        LuaComponent::from_script(script)
+        LuaComponent::from_script(script, Arc::clone(&self.sandbox))
             .map(|c| Box::new(c) as Box<dyn Component>)
             .map_err(|e| SpawnError::InvalidScript(e.to_string()))
     }

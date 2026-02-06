@@ -33,6 +33,7 @@ use orcs_component::{
     SignalReceiver, Status, Statusable,
 };
 use orcs_event::{Signal, SignalResponse};
+use orcs_runtime::sandbox::SandboxPolicy;
 use std::sync::{Arc, Mutex};
 
 /// A child entity implemented in Lua.
@@ -114,15 +115,19 @@ impl LuaChild {
     /// # Errors
     ///
     /// Returns error if table is missing required fields.
-    pub fn from_table(lua: Arc<Mutex<Lua>>, table: Table) -> Result<Self, LuaError> {
+    pub fn from_table(
+        lua: Arc<Mutex<Lua>>,
+        table: Table,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         let lua_guard = lua.lock().map_err(|e| {
             LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
                 e.to_string(),
             ))))
         })?;
 
-        // Register base orcs functions (log, exec) if not already registered
-        register_base_orcs_functions(&lua_guard)?;
+        // Register base orcs functions (log, exec, read, write, grep, glob)
+        register_base_orcs_functions(&lua_guard, sandbox)?;
 
         // Extract id
         let id: String = table
@@ -193,12 +198,16 @@ impl LuaChild {
     /// # Errors
     ///
     /// Returns error if table is missing required fields including `run`.
-    pub fn from_table_runnable(lua: Arc<Mutex<Lua>>, table: Table) -> Result<Self, LuaError> {
+    pub fn from_table_runnable(
+        lua: Arc<Mutex<Lua>>,
+        table: Table,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         // Check if run exists before full parsing
         if table.get::<Function>("run").is_err() {
             return Err(LuaError::MissingCallback("run".to_string()));
         }
-        Self::from_table(lua, table)
+        Self::from_table(lua, table, sandbox)
     }
 
     /// Returns `true` if this child has a run callback (is runnable).
@@ -210,7 +219,11 @@ impl LuaChild {
     /// Creates a simple LuaChild with just an ID.
     ///
     /// The on_signal callback will return Ignored for all signals.
-    pub fn simple(lua: Arc<Mutex<Lua>>, id: impl Into<String>) -> Result<Self, LuaError> {
+    pub fn simple(
+        lua: Arc<Mutex<Lua>>,
+        id: impl Into<String>,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         let id = id.into();
         let lua_guard = lua.lock().map_err(|e| {
             LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
@@ -218,8 +231,8 @@ impl LuaChild {
             ))))
         })?;
 
-        // Register base orcs functions (log, exec) if not already registered
-        register_base_orcs_functions(&lua_guard)?;
+        // Register base orcs functions (log, exec, read, write, grep, glob)
+        register_base_orcs_functions(&lua_guard, sandbox)?;
 
         // Create a simple on_signal function that returns "Ignored"
         let on_signal_fn = lua_guard.create_function(|_, _: mlua::Value| Ok("Ignored"))?;
@@ -251,7 +264,11 @@ impl LuaChild {
     /// # Errors
     ///
     /// Returns error if script is invalid or missing required fields.
-    pub fn from_script(lua: Arc<Mutex<Lua>>, script: &str) -> Result<Self, LuaError> {
+    pub fn from_script(
+        lua: Arc<Mutex<Lua>>,
+        script: &str,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
         let lua_guard = lua.lock().map_err(|e| {
             LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
                 e.to_string(),
@@ -265,7 +282,7 @@ impl LuaChild {
 
         drop(lua_guard);
 
-        Self::from_table(lua, table)
+        Self::from_table(lua, table, sandbox)
     }
 }
 
@@ -588,11 +605,16 @@ fn serde_json_to_lua(value: &serde_json::Value, lua: &Lua) -> Result<Value, mlua
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_runtime::sandbox::ProjectSandbox;
+
+    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
 
     #[test]
     fn child_identifiable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1").expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
         assert_eq!(child.id(), "child-1");
     }
@@ -600,7 +622,7 @@ mod tests {
     #[test]
     fn child_statusable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1").expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
         assert_eq!(child.status(), Status::Idle);
     }
@@ -608,7 +630,7 @@ mod tests {
     #[test]
     fn child_abort_changes_status() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let mut child = LuaChild::simple(lua, "child-1").expect("create child");
+        let mut child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
         child.abort();
         assert_eq!(child.status(), Status::Aborted);
@@ -617,7 +639,7 @@ mod tests {
     #[test]
     fn child_is_object_safe() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1").expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
         // Should compile - proves Child is object-safe
         let _boxed: Box<dyn Child> = Box::new(child);
@@ -628,7 +650,7 @@ mod tests {
     #[test]
     fn simple_child_is_not_runnable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1").expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
         assert!(!child.is_runnable());
     }
@@ -648,7 +670,7 @@ mod tests {
             }
         "#;
 
-        let child = LuaChild::from_script(lua, script).expect("create child");
+        let child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
         assert!(child.is_runnable());
         assert_eq!(child.id(), "worker");
     }
@@ -668,7 +690,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
         let input = serde_json::json!({"value": 5});
         let result = child.run(input);
 
@@ -694,7 +716,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
         let result = child.run(serde_json::json!({}));
 
         assert!(result.is_err());
@@ -708,7 +730,8 @@ mod tests {
     #[test]
     fn non_runnable_child_run_returns_error() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let mut child = LuaChild::simple(lua, "simple-child").expect("create child");
+        let mut child =
+            LuaChild::simple(lua, "simple-child", test_sandbox()).expect("create child");
 
         let result = child.run(serde_json::json!({}));
         assert!(result.is_err());
@@ -733,7 +756,7 @@ mod tests {
 
         drop(lua_guard);
 
-        let result = LuaChild::from_table_runnable(lua, table);
+        let result = LuaChild::from_table_runnable(lua, table, test_sandbox());
         assert!(result.is_err());
     }
 
@@ -748,7 +771,7 @@ mod tests {
             }
         "#;
 
-        let child = LuaChild::from_script(lua, script).expect("create child");
+        let child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
 
         // Should compile - proves RunnableChild is object-safe
         let _boxed: Box<dyn RunnableChild> = Box::new(child);
@@ -778,7 +801,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
         let input = serde_json::json!({
             "name": "test",
             "numbers": [1, 2, 3, 4, 5]
@@ -896,7 +919,7 @@ mod tests {
         #[test]
         fn set_context() {
             let lua = Arc::new(Mutex::new(Lua::new()));
-            let mut child = LuaChild::simple(lua, "child-1").expect("create child");
+            let mut child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
 
             assert!(!child.has_context());
 
@@ -921,7 +944,8 @@ mod tests {
                 }
             "#;
 
-            let mut child = LuaChild::from_script(lua, script).expect("create child");
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
 
             let ctx = MockContext::new("parent");
             let emit_count = Arc::clone(&ctx.emit_count);
@@ -947,7 +971,8 @@ mod tests {
                 }
             "#;
 
-            let mut child = LuaChild::from_script(lua, script).expect("create child");
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -978,7 +1003,8 @@ mod tests {
                 }
             "#;
 
-            let mut child = LuaChild::from_script(lua, script).expect("create child");
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
 
             let ctx = MockContext::new("parent");
             let spawn_count = Arc::clone(&ctx.spawn_count);
@@ -1010,7 +1036,8 @@ mod tests {
                 }
             "#;
 
-            let mut child = LuaChild::from_script(lua, script).expect("create child");
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1036,7 +1063,8 @@ mod tests {
                 }
             "#;
 
-            let mut child = LuaChild::from_script(lua, script).expect("create child");
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
             // Note: NOT setting context
 
             let result = child.run(serde_json::json!({}));

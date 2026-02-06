@@ -87,3 +87,6 @@ pub use orcs_runtime::{
     ConfigError, ConfigLoader, ConfigResolver, HilConfig, ModelConfig, NoOpResolver, OrcsConfig,
     PathsConfig, UiConfig,
 };
+
+// Re-export sandbox types
+pub use orcs_runtime::{ProjectSandbox, SandboxError, SandboxPolicy};

@@ -28,6 +28,8 @@
 
 use crate::error::LuaError;
 use mlua::{Lua, Table};
+use orcs_runtime::sandbox::SandboxPolicy;
+use std::sync::Arc;
 use tokio::process::Command;
 
 /// Global table name for orcs functions in Lua.
@@ -46,7 +48,10 @@ const ORCS_TABLE_NAME: &str = "orcs";
 /// # Errors
 ///
 /// Returns error if function registration fails.
-pub fn register_base_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
+pub fn register_base_orcs_functions(
+    lua: &Lua,
+    sandbox: Arc<dyn SandboxPolicy>,
+) -> Result<(), LuaError> {
     // Get or create orcs table
     let orcs_table = ensure_orcs_table(lua)?;
 
@@ -103,7 +108,7 @@ pub fn register_base_orcs_functions(lua: &Lua) -> Result<(), LuaError> {
     }
 
     // Register native Rust tools (read, write, grep, glob)
-    crate::tools::register_tool_functions(lua)?;
+    crate::tools::register_tool_functions(lua, sandbox)?;
 
     Ok(())
 }
@@ -138,11 +143,16 @@ pub fn ensure_orcs_table(lua: &Lua) -> Result<Table, LuaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orcs_runtime::sandbox::ProjectSandbox;
+
+    fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
+        Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
 
     #[test]
     fn register_base_functions() {
         let lua = Lua::new();
-        let result = register_base_orcs_functions(&lua);
+        let result = register_base_orcs_functions(&lua, test_sandbox());
         assert!(result.is_ok());
 
         // Verify orcs table exists
@@ -156,10 +166,11 @@ mod tests {
     #[test]
     fn register_is_idempotent() {
         let lua = Lua::new();
+        let sb = test_sandbox();
 
         // Register twice
-        register_base_orcs_functions(&lua).unwrap();
-        register_base_orcs_functions(&lua).unwrap();
+        register_base_orcs_functions(&lua, Arc::clone(&sb)).unwrap();
+        register_base_orcs_functions(&lua, sb).unwrap();
 
         // Should still work
         let orcs: Table = lua.globals().get(ORCS_TABLE_NAME).expect("orcs table");
@@ -169,7 +180,7 @@ mod tests {
     #[test]
     fn log_function_works() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
 
         // Should not panic
         lua.load(r#"orcs.log("info", "test message")"#)
@@ -180,7 +191,7 @@ mod tests {
     #[test]
     fn exec_function_works() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
 
         let result: mlua::Table = lua
             .load(r#"return orcs.exec("echo hello")"#)

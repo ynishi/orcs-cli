@@ -20,8 +20,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use orcs_app::{ConfigError, ConfigLoader, ConfigResolver, OrcsApp, OrcsConfig};
+use orcs_app::{ConfigError, ConfigLoader, ConfigResolver, OrcsApp, OrcsConfig, ProjectSandbox};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -126,7 +127,13 @@ async fn main() -> Result<()> {
         "Project root"
     );
 
-    let mut builder = OrcsApp::builder(resolver);
+    // Create sandbox from project root
+    let sandbox = Arc::new(
+        ProjectSandbox::new(&resolver.project_root)
+            .map_err(|e| anyhow::anyhow!("Failed to create sandbox: {e}"))?,
+    );
+
+    let mut builder = OrcsApp::builder(resolver).with_sandbox(sandbox);
     if let Some(session_id) = args.resume {
         builder = builder.resume(session_id);
     }
