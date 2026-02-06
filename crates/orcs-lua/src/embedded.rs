@@ -33,6 +33,12 @@ pub const AGENT_MGR: &str = include_str!("../scripts/agent_mgr.lua");
 /// Displays OK/NG results to verify auth works end-to-end.
 pub const SHELL: &str = include_str!("../scripts/shell.lua");
 
+/// POC coding agent using orcs.llm() + orcs tools.
+///
+/// Multi-turn agent that calls Claude headless SDK, parses tool calls,
+/// executes them, and feeds results back.
+pub const CODE_AGENT: &str = include_str!("../scripts/code_agent.lua");
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
@@ -43,6 +49,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("subagent", SUBAGENT);
     scripts.insert("agent_mgr", AGENT_MGR);
     scripts.insert("shell", SHELL);
+    scripts.insert("code_agent", CODE_AGENT);
     scripts
 }
 
@@ -56,6 +63,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "subagent" => Some(SUBAGENT),
         "agent_mgr" => Some(AGENT_MGR),
         "shell" => Some(SHELL),
+        "code_agent" => Some(CODE_AGENT),
         _ => None,
     }
 }
@@ -70,6 +78,7 @@ pub fn list() -> Vec<&'static str> {
         "subagent",
         "agent_mgr",
         "shell",
+        "code_agent",
     ]
 }
 
@@ -143,13 +152,14 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 6);
+        assert_eq!(scripts.len(), 7);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
         assert!(scripts.contains_key("subagent"));
         assert!(scripts.contains_key("agent_mgr"));
         assert!(scripts.contains_key("shell"));
+        assert!(scripts.contains_key("code_agent"));
     }
 
     #[test]

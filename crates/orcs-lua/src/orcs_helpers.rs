@@ -135,7 +135,52 @@ pub fn register_base_orcs_functions(
     // orcs.pwd - sandbox root as string (always available)
     orcs_table.set("pwd", sandbox.root().display().to_string())?;
 
-    // Register native Rust tools (read, write, grep, glob)
+    // orcs.llm(prompt) -> {ok, content, error}
+    // Calls `claude -p` (headless SDK mode) with sandbox root as cwd.
+    {
+        let sandbox_root = sandbox.root().to_path_buf();
+        let llm_fn = lua.create_function(move |lua, prompt: String| {
+            let result = lua.create_table()?;
+
+            let output = std::process::Command::new("claude")
+                .arg("-p")
+                .arg(&prompt)
+                .current_dir(&sandbox_root)
+                .output();
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    let content = String::from_utf8_lossy(&out.stdout).to_string();
+                    result.set("ok", true)?;
+                    result.set("content", content)?;
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    result.set("ok", false)?;
+                    result.set("error", if stderr.is_empty() { stdout } else { stderr })?;
+                }
+                Err(e) => {
+                    result.set("ok", false)?;
+                    result.set("error", format!("failed to spawn claude: {e}"))?;
+                }
+            }
+
+            Ok(result)
+        })?;
+        orcs_table.set("llm", llm_fn)?;
+    }
+
+    // orcs.tool_descriptions() -> string
+    // Returns formatted tool reference for prompt embedding.
+    {
+        let tool_desc = lua.create_function(|_, ()| {
+            Ok(TOOL_DESCRIPTIONS)
+        })?;
+        orcs_table.set("tool_descriptions", tool_desc)?;
+    }
+
+    // Register native Rust tools (read, write, grep, glob, mkdir, remove, mv)
     crate::tools::register_tool_functions(lua, sandbox)?;
 
     // Disable dangerous Lua stdlib functions
@@ -143,6 +188,40 @@ pub fn register_base_orcs_functions(
 
     Ok(())
 }
+
+/// Tool descriptions for prompt embedding.
+///
+/// Kept in sync with the actual registered tools in [`register_tool_functions`](crate::tools::register_tool_functions).
+const TOOL_DESCRIPTIONS: &str = r#"Available tools (call via orcs.*):
+
+orcs.read(path) -> {ok, content, size, error}
+  Read file contents. path is relative to project root.
+
+orcs.write(path, content) -> {ok, bytes_written, error}
+  Write file contents (atomic). Creates parent dirs.
+
+orcs.grep(pattern, path) -> {ok, matches[], count, error}
+  Search with regex. matches[i] = {line_number, line}.
+  path can be file or directory (recursive).
+
+orcs.glob(pattern, dir?) -> {ok, files[], count, error}
+  Find files by glob pattern. dir defaults to project root.
+
+orcs.mkdir(path) -> {ok, error}
+  Create directory (with parents).
+
+orcs.remove(path) -> {ok, error}
+  Remove file or directory.
+
+orcs.mv(src, dst) -> {ok, error}
+  Move / rename file or directory.
+
+orcs.exec(cmd) -> {ok, stdout, stderr, code}
+  Execute shell command. cwd = project root.
+
+orcs.pwd
+  Project root path (string).
+"#;
 
 /// Disables dangerous Lua standard library functions.
 ///
