@@ -30,6 +30,70 @@ use orcs_runtime::sandbox::SandboxPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Result of batch loading operation.
+///
+/// Contains both successfully loaded components and warnings for failures.
+/// This allows the application to continue even when some scripts fail to load.
+#[derive(Default)]
+pub struct LoadResult {
+    /// Successfully loaded components with their names.
+    pub loaded: Vec<(String, LuaComponent)>,
+    /// Warnings for scripts that failed to load.
+    pub warnings: Vec<LoadWarning>,
+}
+
+impl std::fmt::Debug for LoadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadResult")
+            .field("loaded_count", &self.loaded.len())
+            .field("warnings", &self.warnings)
+            .finish()
+    }
+}
+
+impl LoadResult {
+    /// Returns true if any scripts were loaded.
+    #[must_use]
+    pub fn has_loaded(&self) -> bool {
+        !self.loaded.is_empty()
+    }
+
+    /// Returns true if any warnings occurred.
+    #[must_use]
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// Returns the count of loaded scripts.
+    #[must_use]
+    pub fn loaded_count(&self) -> usize {
+        self.loaded.len()
+    }
+
+    /// Returns the count of warnings.
+    #[must_use]
+    pub fn warning_count(&self) -> usize {
+        self.warnings.len()
+    }
+}
+
+/// Warning for a failed script load.
+///
+/// Contains the path that was attempted and the error that occurred.
+#[derive(Debug)]
+pub struct LoadWarning {
+    /// Path to the script that failed to load.
+    pub path: PathBuf,
+    /// Error that occurred during loading.
+    pub error: LuaError,
+}
+
+impl std::fmt::Display for LoadWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.error)
+    }
+}
+
 /// Script loader with configurable search paths.
 ///
 /// Search order:
@@ -184,6 +248,102 @@ impl ScriptLoader {
         result
     }
 
+    // === Batch loading methods ===
+
+    /// Loads all scripts from configured search paths.
+    ///
+    /// Scans each search path for `.lua` files and attempts to load them.
+    /// Errors are collected as warnings, not propagated—allowing partial success.
+    ///
+    /// **Note**: Embedded scripts are NOT included. Use [`load_embedded`] separately.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let loader = ScriptLoader::new()
+    ///     .with_path("~/.orcs/scripts")
+    ///     .with_path(".orcs/scripts");
+    ///
+    /// let result = loader.load_all();
+    ///
+    /// // Log warnings but continue
+    /// for warn in &result.warnings {
+    ///     eprintln!("Warning: {}", warn);
+    /// }
+    ///
+    /// // Use loaded components
+    /// for (name, component) in result.loaded {
+    ///     println!("Loaded: {}", name);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn load_all(&self) -> LoadResult {
+        let mut result = LoadResult::default();
+
+        for dir in &self.search_paths {
+            if !dir.exists() {
+                continue;
+            }
+
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    result.warnings.push(LoadWarning {
+                        path: dir.clone(),
+                        error: LuaError::ScriptNotFound(format!("failed to read directory: {}", e)),
+                    });
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip non-.lua files
+                if path.extension().is_none_or(|ext| ext != "lua") {
+                    continue;
+                }
+
+                // Skip directories
+                if path.is_dir() {
+                    continue;
+                }
+
+                match LuaComponent::from_file(&path, Arc::clone(&self.sandbox)) {
+                    Ok(component) => {
+                        let name = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        result.loaded.push((name, component));
+                    }
+                    Err(e) => {
+                        result.warnings.push(LoadWarning { path, error: e });
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Loads all scripts from a single directory.
+    ///
+    /// Convenience method equivalent to:
+    /// ```ignore
+    /// ScriptLoader::new()
+    ///     .with_path(path)
+    ///     .without_embedded_fallback()
+    ///     .load_all()
+    /// ```
+    #[must_use]
+    pub fn load_dir(path: &Path, sandbox: Arc<dyn SandboxPolicy>) -> LoadResult {
+        Self::new(sandbox)
+            .with_path(path)
+            .without_embedded_fallback()
+            .load_all()
+    }
+
     // === Static methods (backward compatibility) ===
 
     /// Loads an embedded script by name.
@@ -323,5 +483,59 @@ mod tests {
     fn crate_scripts_dir_exists() {
         let dir = ScriptLoader::crate_scripts_dir();
         assert!(dir.exists(), "scripts dir should exist: {:?}", dir);
+    }
+
+    // === Batch loading tests ===
+
+    #[test]
+    fn load_all_from_crate_scripts_dir() {
+        let loader = ScriptLoader::new(test_sandbox())
+            .with_path(ScriptLoader::crate_scripts_dir())
+            .without_embedded_fallback();
+        let result = loader.load_all();
+
+        // Should load at least echo.lua
+        assert!(result.has_loaded());
+        assert!(result.loaded_count() >= 1);
+
+        // Verify echo is loaded
+        let names: Vec<&str> = result.loaded.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"echo"));
+    }
+
+    #[test]
+    fn load_all_empty_for_nonexistent_dir() {
+        let loader = ScriptLoader::new(test_sandbox())
+            .with_path("/nonexistent/path")
+            .without_embedded_fallback();
+        let result = loader.load_all();
+
+        // Nonexistent dirs are skipped, not errors
+        assert!(!result.has_loaded());
+        assert!(!result.has_warnings());
+    }
+
+    #[test]
+    fn load_dir_convenience() {
+        let result = ScriptLoader::load_dir(&ScriptLoader::crate_scripts_dir(), test_sandbox());
+        assert!(result.has_loaded());
+    }
+
+    #[test]
+    fn load_result_debug() {
+        let result = LoadResult::default();
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("LoadResult"));
+        assert!(debug_str.contains("loaded_count"));
+    }
+
+    #[test]
+    fn load_warning_display() {
+        let warn = LoadWarning {
+            path: PathBuf::from("/test/script.lua"),
+            error: LuaError::ScriptNotFound("test".into()),
+        };
+        let display_str = format!("{}", warn);
+        assert!(display_str.contains("/test/script.lua"));
     }
 }

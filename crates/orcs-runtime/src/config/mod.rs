@@ -68,6 +68,7 @@
 //! | `ORCS_MODEL` | `model.default` | String |
 //! | `ORCS_AUTO_APPROVE` | `hil.auto_approve` | bool |
 //! | `ORCS_SESSION_PATH` | `paths.session_dir` | PathBuf |
+//! | `ORCS_SCRIPTS_AUTO_LOAD` | `scripts.auto_load` | bool |
 //!
 //! # Example Configuration
 //!
@@ -91,6 +92,10 @@
 //! [ui]
 //! verbose = false
 //! color = true
+//!
+//! [scripts]
+//! dirs = ["~/.orcs/scripts", ".orcs/scripts"]
+//! auto_load = true
 //! ```
 
 mod error;
@@ -101,7 +106,7 @@ mod types;
 pub use error::ConfigError;
 pub use loader::{save_global_config, ConfigLoader};
 pub use resolver::{ConfigResolver, NoOpResolver};
-pub use types::{HilConfig, ModelConfig, OrcsConfig, PathsConfig, UiConfig};
+pub use types::{HilConfig, ModelConfig, OrcsConfig, PathsConfig, ScriptsConfig, UiConfig};
 
 /// Default global config directory.
 pub fn default_config_dir() -> std::path::PathBuf {

@@ -49,6 +49,90 @@ use tracing::{debug, info, warn};
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
 
+// --- Response handling ---
+
+/// JSON field names for component responses.
+#[allow(dead_code)]
+mod response_fields {
+    pub const STATUS: &str = "status";
+    pub const PENDING_APPROVAL: &str = "pending_approval";
+    pub const APPROVAL_ID: &str = "approval_id";
+    pub const MESSAGE: &str = "message";
+    pub const RESPONSE: &str = "response";
+    pub const DATA: &str = "data";
+}
+
+/// Categorized component response for display routing.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentResponse<'a> {
+    /// Awaiting human approval with ID and description.
+    PendingApproval {
+        approval_id: &'a str,
+        description: &'a str,
+    },
+    /// Direct text response to display.
+    TextResponse(&'a str),
+    /// Error response from component.
+    ///
+    /// Triggered when response contains `{ "success": false, "error": "..." }`.
+    ErrorResponse(&'a str),
+    /// No displayable content.
+    Empty,
+}
+
+#[allow(dead_code)]
+impl<'a> ComponentResponse<'a> {
+    /// Parses a JSON response into a categorized response.
+    ///
+    /// Supports multiple formats:
+    /// - `{ "status": "pending_approval", "approval_id": "...", "message": "..." }`
+    /// - `{ "success": false, "error": "..." }` → ErrorResponse
+    /// - `{ "response": "..." }`
+    /// - `{ "data": { "response": "..." } }`
+    #[must_use]
+    pub fn from_json(value: &'a serde_json::Value) -> Self {
+        use response_fields::*;
+
+        // Check for pending_approval status
+        if value.get(STATUS).and_then(|v| v.as_str()) == Some(PENDING_APPROVAL) {
+            if let Some(approval_id) = value.get(APPROVAL_ID).and_then(|v| v.as_str()) {
+                let description = value
+                    .get(MESSAGE)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Awaiting approval");
+                return Self::PendingApproval {
+                    approval_id,
+                    description,
+                };
+            }
+        }
+
+        // Check for error response: { "success": false, "error": "..." }
+        if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            if let Some(error_msg) = value.get("error").and_then(|v| v.as_str()) {
+                return Self::ErrorResponse(error_msg);
+            }
+            return Self::ErrorResponse("Unknown error");
+        }
+
+        // Check for direct response field
+        if let Some(text) = value.get(RESPONSE).and_then(|v| v.as_str()) {
+            return Self::TextResponse(text);
+        }
+
+        // Check for nested data.response
+        if let Some(text) = value
+            .get(DATA)
+            .and_then(|d| d.get(RESPONSE))
+            .and_then(|v| v.as_str())
+        {
+            return Self::TextResponse(text);
+        }
+
+        Self::Empty
+    }
+}
 /// Configuration for creating a ClientRunner.
 ///
 /// Groups World and Signal channel parameters to reduce argument count.
@@ -618,4 +702,197 @@ mod tests {
     // UserInput is broadcast to all channels, and Output events are received
     // from other channels for display. Component-specific tests have been
     // moved to ChannelRunner tests.
+
+    // --- ComponentResponse tests ---
+
+    mod component_response_tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn from_json_pending_approval() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-123",
+                "message": "Confirm action?"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-123",
+                    description: "Confirm action?"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_pending_approval_default_message() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-456"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-456",
+                    description: "Awaiting approval"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_pending_approval_missing_id_returns_empty() {
+            let json = json!({
+                "status": "pending_approval"
+                // Missing approval_id
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_direct_response() {
+            let json = json!({
+                "response": "Hello, world!"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Hello, world!"));
+        }
+
+        #[test]
+        fn from_json_nested_data_response() {
+            let json = json!({
+                "data": {
+                    "response": "Nested response",
+                    "source": "test"
+                }
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Nested response"));
+        }
+
+        #[test]
+        fn from_json_empty_object() {
+            let json = json!({});
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_unrelated_fields() {
+            let json = json!({
+                "status": "completed",
+                "result": 42
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::Empty);
+        }
+
+        #[test]
+        fn from_json_priority_pending_over_response() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-789",
+                "response": "This should be ignored"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-789",
+                    description: "Awaiting approval"
+                }
+            );
+        }
+
+        #[test]
+        fn from_json_response_priority_over_nested() {
+            let json = json!({
+                "response": "Direct",
+                "data": {
+                    "response": "Nested"
+                }
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::TextResponse("Direct"));
+        }
+
+        #[test]
+        fn from_json_error_response() {
+            let json = json!({
+                "success": false,
+                "error": "Command failed"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::ErrorResponse("Command failed"));
+        }
+
+        #[test]
+        fn from_json_error_response_no_message() {
+            let json = json!({
+                "success": false
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(response, ComponentResponse::ErrorResponse("Unknown error"));
+        }
+
+        #[test]
+        fn from_json_success_true_not_error() {
+            let json = json!({
+                "success": true,
+                "response": "Operation succeeded"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::TextResponse("Operation succeeded")
+            );
+        }
+
+        #[test]
+        fn from_json_pending_priority_over_error() {
+            let json = json!({
+                "status": "pending_approval",
+                "approval_id": "req-999",
+                "success": false,
+                "error": "This should be ignored"
+            });
+
+            let response = ComponentResponse::from_json(&json);
+
+            assert_eq!(
+                response,
+                ComponentResponse::PendingApproval {
+                    approval_id: "req-999",
+                    description: "Awaiting approval"
+                }
+            );
+        }
+    }
 }
