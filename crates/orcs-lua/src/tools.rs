@@ -60,8 +60,13 @@ fn tool_write(path: &str, content: &str, sandbox: &dyn SandboxPolicy) -> Result<
 
     let bytes = content.len();
 
-    // Atomic write: write to temp file, then rename
-    let temp_path = target.with_extension("tmp.orcs");
+    // Atomic write: write to temp file with unique name, then rename
+    let temp_name = format!(
+        ".orcs-tmp-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    let temp_path = target.with_file_name(temp_name);
     std::fs::write(&temp_path, content).map_err(|e| format!("write failed: {path} ({e})"))?;
 
     std::fs::rename(&temp_path, &target).map_err(|e| {
@@ -147,10 +152,14 @@ fn grep_dir(
 
         if canonical.is_file() {
             // Skip binary files (best-effort: check for null bytes in first 512 bytes)
-            if let Ok(bytes) = std::fs::read(&canonical) {
-                let check_len = bytes.len().min(512);
-                if bytes[..check_len].contains(&0) {
-                    continue;
+            {
+                use std::io::Read;
+                if let Ok(mut file) = std::fs::File::open(&canonical) {
+                    let mut buf = [0u8; 512];
+                    let n = file.read(&mut buf).unwrap_or(0);
+                    if buf[..n].contains(&0) {
+                        continue;
+                    }
                 }
             }
             let _ = grep_file(re, &canonical, matches);

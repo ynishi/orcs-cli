@@ -37,10 +37,8 @@ impl IntoLua for LuaRequest {
         table.set("id", self.id)?;
         table.set("operation", self.operation)?;
         table.set("category", self.category)?;
-        // Convert payload to Lua value
-        let payload: Value = lua
-            .load(format!("return {}", json_to_lua(&self.payload)))
-            .eval()?;
+        // Convert payload to Lua value safely (no eval)
+        let payload = serde_json_to_lua(&self.payload, lua)?;
         table.set("payload", payload)?;
         Ok(Value::Table(table))
     }
@@ -208,6 +206,7 @@ pub fn parse_status(s: &str) -> Status {
 ///
 /// Handles all control characters and special sequences to prevent
 /// Lua code injection attacks.
+#[cfg(test)]
 fn escape_lua_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 2);
     result.push('"');
@@ -236,6 +235,7 @@ fn escape_lua_string(s: &str) -> String {
 }
 
 /// Escape a key for use in Lua table.
+#[cfg(test)]
 fn escape_lua_key(key: &str) -> String {
     // Check if key is a valid Lua identifier
     let is_valid_identifier = !key.is_empty()
@@ -257,6 +257,7 @@ fn escape_lua_key(key: &str) -> String {
 /// # Security
 ///
 /// All string values are properly escaped to prevent Lua code injection.
+#[cfg(test)]
 pub fn json_to_lua(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "nil".to_string(),
@@ -273,6 +274,38 @@ pub fn json_to_lua(value: &serde_json::Value) -> String {
                 .map(|(k, v)| format!("{} = {}", escape_lua_key(k), json_to_lua(v)))
                 .collect();
             format!("{{{}}}", items.join(", "))
+        }
+    }
+}
+
+/// Convert serde_json::Value to Lua Value safely (no eval).
+pub fn serde_json_to_lua(value: &serde_json::Value, lua: &Lua) -> Result<Value, mlua::Error> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Nil),
+        serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Number(f))
+            } else {
+                Err(mlua::Error::SerializeError("invalid number".into()))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Value::String(lua.create_string(s)?)),
+        serde_json::Value::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                table.raw_set(i + 1, serde_json_to_lua(v, lua)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+        serde_json::Value::Object(obj) => {
+            let table = lua.create_table()?;
+            for (k, v) in obj {
+                table.set(k.as_str(), serde_json_to_lua(v, lua)?)?;
+            }
+            Ok(Value::Table(table))
         }
     }
 }

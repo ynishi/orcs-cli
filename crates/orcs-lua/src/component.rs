@@ -4,8 +4,8 @@
 
 use crate::error::LuaError;
 use crate::types::{
-    json_to_lua, lua_to_json, parse_event_category, parse_signal_response, LuaRequest, LuaResponse,
-    LuaSignal,
+    lua_to_json, parse_event_category, parse_signal_response, serde_json_to_lua, LuaRequest,
+    LuaResponse, LuaSignal,
 };
 use mlua::{Function, Lua, RegistryKey, Table};
 use orcs_component::{
@@ -369,7 +369,13 @@ impl LuaComponent {
                 "stderr",
                 String::from_utf8_lossy(&output.stderr).to_string(),
             )?;
-            result.set("code", output.status.code().unwrap_or(-1))?;
+            match output.status.code() {
+                Some(code) => result.set("code", code)?,
+                None => {
+                    result.set("code", mlua::Value::Nil)?;
+                    result.set("signal_terminated", true)?;
+                }
+            }
 
             Ok(result)
         })?;
@@ -517,9 +523,8 @@ impl LuaComponent {
                         // Convert ChildResult to Lua
                         match child_result {
                             orcs_component::ChildResult::Ok(data) => {
-                                // Convert JSON to Lua value via string eval
-                                let lua_code = format!("return {}", json_to_lua(&data));
-                                let lua_data: mlua::Value = lua.load(&lua_code).eval()?;
+                                // Convert JSON to Lua value safely (no eval)
+                                let lua_data = serde_json_to_lua(&data, lua)?;
                                 result_table.set("result", lua_data)?;
                             }
                             orcs_component::ChildResult::Err(e) => {
@@ -653,6 +658,9 @@ impl LuaComponent {
 
         // Register native Rust tools (read, write, grep, glob)
         crate::tools::register_tool_functions(lua, sandbox)?;
+
+        // Disable dangerous Lua stdlib functions (io.*, os.execute, loadfile, dofile)
+        crate::orcs_helpers::sandbox_lua_globals(lua)?;
 
         Ok(())
     }

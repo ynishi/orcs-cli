@@ -205,7 +205,7 @@ orcs.pwd
 /// - `loadfile`, `dofile` — arbitrary file loading
 ///
 /// Preserves safe `os` functions: `os.time`, `os.clock`, `os.date`, `os.difftime`.
-fn sandbox_lua_globals(lua: &Lua) -> Result<(), LuaError> {
+pub(crate) fn sandbox_lua_globals(lua: &Lua) -> Result<(), LuaError> {
     lua.load(
         r#"
         -- Remove entire io module (orcs.read/write replaces it)

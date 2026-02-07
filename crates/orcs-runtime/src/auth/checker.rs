@@ -303,6 +303,12 @@ impl PermissionChecker for DefaultPolicy {
         grants: &dyn GrantPolicy,
         cmd: &str,
     ) -> CommandCheckResult {
+        // Step 0: Reject empty commands
+        let cmd_trimmed = cmd.trim();
+        if cmd_trimmed.is_empty() {
+            return CommandCheckResult::Denied("empty command".to_string());
+        }
+
         // Step 1: Always block dangerous patterns
         if is_blocked_command(cmd) {
             tracing::error!(

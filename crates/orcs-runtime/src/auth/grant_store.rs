@@ -74,45 +74,69 @@ impl DefaultGrantStore {
 impl GrantPolicy for DefaultGrantStore {
     fn grant(&self, grant: CommandGrant) {
         match grant.kind {
-            GrantKind::Persistent => {
-                if let Ok(mut set) = self.persistent.write() {
+            GrantKind::Persistent => match self.persistent.write() {
+                Ok(mut set) => {
                     set.insert(grant.pattern);
                 }
-            }
-            GrantKind::OneTime => {
-                if let Ok(mut set) = self.one_time.write() {
+                Err(e) => {
+                    tracing::error!("grant_store: persistent lock poisoned on grant: {e}");
+                }
+            },
+            GrantKind::OneTime => match self.one_time.write() {
+                Ok(mut set) => {
                     set.insert(grant.pattern);
                 }
-            }
+                Err(e) => {
+                    tracing::error!("grant_store: one_time lock poisoned on grant: {e}");
+                }
+            },
         }
     }
 
     fn revoke(&self, pattern: &str) {
-        if let Ok(mut set) = self.persistent.write() {
-            set.remove(pattern);
+        if let Err(e) = self.persistent.write().map(|mut s| {
+            s.remove(pattern);
+        }) {
+            tracing::error!("grant_store: persistent lock poisoned on revoke: {e}");
         }
-        if let Ok(mut set) = self.one_time.write() {
-            set.remove(pattern);
+        if let Err(e) = self.one_time.write().map(|mut s| {
+            s.remove(pattern);
+        }) {
+            tracing::error!("grant_store: one_time lock poisoned on revoke: {e}");
         }
     }
 
     fn is_granted(&self, command: &str) -> bool {
         // Check persistent grants first (read lock — concurrent)
-        if let Ok(set) = self.persistent.read() {
-            if set.iter().any(|p| command.starts_with(p.as_str())) {
-                return true;
+        match self.persistent.read() {
+            Ok(set) => {
+                if set
+                    .iter()
+                    .any(|p| command == p.as_str() || command.starts_with(&format!("{} ", p)))
+                {
+                    return true;
+                }
+            }
+            Err(e) => {
+                tracing::error!("grant_store: persistent lock poisoned on is_granted: {e}");
+                return false;
             }
         }
 
         // Check one-time grants (write lock — consume on match)
-        if let Ok(mut set) = self.one_time.write() {
-            if let Some(pattern) = set
-                .iter()
-                .find(|p| command.starts_with(p.as_str()))
-                .cloned()
-            {
-                set.remove(&pattern);
-                return true;
+        match self.one_time.write() {
+            Ok(mut set) => {
+                if let Some(pattern) = set
+                    .iter()
+                    .find(|p| command == p.as_str() || command.starts_with(&format!("{} ", p)))
+                    .cloned()
+                {
+                    set.remove(&pattern);
+                    return true;
+                }
+            }
+            Err(e) => {
+                tracing::error!("grant_store: one_time lock poisoned on is_granted: {e}");
             }
         }
 
@@ -120,18 +144,18 @@ impl GrantPolicy for DefaultGrantStore {
     }
 
     fn clear(&self) {
-        if let Ok(mut set) = self.persistent.write() {
-            set.clear();
+        if let Err(e) = self.persistent.write().map(|mut s| s.clear()) {
+            tracing::error!("grant_store: persistent lock poisoned on clear: {e}");
         }
-        if let Ok(mut set) = self.one_time.write() {
-            set.clear();
+        if let Err(e) = self.one_time.write().map(|mut s| s.clear()) {
+            tracing::error!("grant_store: one_time lock poisoned on clear: {e}");
         }
     }
 
     fn grant_count(&self) -> usize {
         let persistent = self.persistent.read().map(|s| s.len()).unwrap_or(0);
         let one_time = self.one_time.read().map(|s| s.len()).unwrap_or(0);
-        persistent + one_time
+        persistent.saturating_add(one_time)
     }
 }
 
@@ -231,14 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_pattern_match() {
+    fn word_boundary_pattern_match() {
         let store = DefaultGrantStore::new();
         store.grant(CommandGrant::persistent("ls"));
 
-        // "ls" is a prefix of "ls -la" but not of "lsblk"
+        // "ls" matches exact and "ls <args>" but NOT "lsblk"
         assert!(store.is_granted("ls"));
         assert!(store.is_granted("ls -la"));
-        assert!(store.is_granted("lsblk")); // Note: "ls" is prefix of "lsblk"
+        assert!(!store.is_granted("lsblk")); // Word boundary: "ls" != "lsblk"
     }
 
     #[test]

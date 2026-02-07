@@ -26,8 +26,9 @@
 
 use crate::error::LuaError;
 use crate::orcs_helpers::register_base_orcs_functions;
+use crate::types::serde_json_to_lua;
 use crate::types::{parse_signal_response, parse_status, LuaResponse, LuaSignal};
-use mlua::{Function, Lua, RegistryKey, Table, Value};
+use mlua::{Function, Lua, RegistryKey, Table};
 use orcs_component::{
     Child, ChildConfig, ChildContext, ChildError, ChildResult, Identifiable, RunnableChild,
     SignalReceiver, Status, Statusable,
@@ -477,11 +478,14 @@ fn register_context_functions(lua: &Lua, ctx: Box<dyn ChildContext>) -> Result<(
     lua.set_app_data(ContextWrapper(Mutex::new(ctx)));
 
     // Get or create orcs table
-    let orcs_table: Table = lua.globals().get("orcs").unwrap_or_else(|_| {
-        let t = lua.create_table().expect("create table");
-        lua.globals().set("orcs", t.clone()).expect("set orcs");
-        t
-    });
+    let orcs_table: Table = match lua.globals().get("orcs") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            lua.globals().set("orcs", t.clone())?;
+            t
+        }
+    };
 
     // orcs.exec(cmd) -> {ok, stdout, stderr, code}
     // Permission-checked override: replaces the deny-by-default from register_base_orcs_functions.
@@ -537,7 +541,13 @@ fn register_context_functions(lua: &Lua, ctx: Box<dyn ChildContext>) -> Result<(
             "stderr",
             String::from_utf8_lossy(&output.stderr).to_string(),
         )?;
-        result.set("code", output.status.code().unwrap_or(-1))?;
+        match output.status.code() {
+            Some(code) => result.set("code", code)?,
+            None => {
+                result.set("code", mlua::Value::Nil)?;
+                result.set("signal_terminated", true)?;
+            }
+        }
 
         Ok(result)
     })?;
@@ -637,38 +647,6 @@ fn register_context_functions(lua: &Lua, ctx: Box<dyn ChildContext>) -> Result<(
     orcs_table.set("max_children", max_children_fn)?;
 
     Ok(())
-}
-
-/// Convert serde_json::Value to Lua Value.
-fn serde_json_to_lua(value: &serde_json::Value, lua: &Lua) -> Result<Value, mlua::Error> {
-    match value {
-        serde_json::Value::Null => Ok(Value::Nil),
-        serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(Value::Number(f))
-            } else {
-                Err(mlua::Error::SerializeError("invalid number".into()))
-            }
-        }
-        serde_json::Value::String(s) => Ok(Value::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let table = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                table.raw_set(i + 1, serde_json_to_lua(v, lua)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-        serde_json::Value::Object(obj) => {
-            let table = lua.create_table()?;
-            for (k, v) in obj {
-                table.set(k.as_str(), serde_json_to_lua(v, lua)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-    }
 }
 
 #[cfg(test)]
