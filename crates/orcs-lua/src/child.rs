@@ -883,6 +883,116 @@ fn register_context_functions(
     })?;
     orcs_table.set("max_children", max_children_fn)?;
 
+    // orcs.check_command(cmd) -> { status, reason?, grant_pattern?, description? }
+    let check_command_fn = lua.create_function(|lua, cmd: String| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+        let permission = ctx.check_command_permission(&cmd);
+        let result = lua.create_table()?;
+        result.set("status", permission.status_str())?;
+
+        match &permission {
+            orcs_component::CommandPermission::Denied(reason) => {
+                result.set("reason", reason.as_str())?;
+            }
+            orcs_component::CommandPermission::RequiresApproval {
+                grant_pattern,
+                description,
+            } => {
+                result.set("grant_pattern", grant_pattern.as_str())?;
+                result.set("description", description.as_str())?;
+            }
+            orcs_component::CommandPermission::Allowed => {}
+        }
+
+        Ok(result)
+    })?;
+    orcs_table.set("check_command", check_command_fn)?;
+
+    // orcs.grant_command(pattern) -> nil
+    let grant_command_fn = lua.create_function(|lua, pattern: String| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+        ctx.grant_command(&pattern);
+        tracing::info!("Lua grant_command: {}", pattern);
+        Ok(())
+    })?;
+    orcs_table.set("grant_command", grant_command_fn)?;
+
+    // orcs.request_approval(operation, description) -> approval_id
+    let request_approval_fn =
+        lua.create_function(|lua, (operation, description): (String, String)| {
+            let wrapper = lua
+                .app_data_ref::<ContextWrapper>()
+                .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+            let ctx = wrapper
+                .0
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+            let approval_id = ctx.emit_approval_request(&operation, &description);
+            Ok(approval_id)
+        })?;
+    orcs_table.set("request_approval", request_approval_fn)?;
+
+    // orcs.send_to_child(child_id, message) -> { ok, result?, error? }
+    let send_to_child_fn =
+        lua.create_function(|lua, (child_id, message): (String, mlua::Value)| {
+            let wrapper = lua
+                .app_data_ref::<ContextWrapper>()
+                .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+            let ctx = wrapper
+                .0
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+            let input = crate::types::lua_to_json(message, lua)?;
+
+            let result_table = lua.create_table()?;
+            match ctx.send_to_child(&child_id, input) {
+                Ok(child_result) => {
+                    result_table.set("ok", true)?;
+                    match child_result {
+                        orcs_component::ChildResult::Ok(data) => {
+                            let lua_data = crate::types::serde_json_to_lua(&data, lua)?;
+                            result_table.set("result", lua_data)?;
+                        }
+                        orcs_component::ChildResult::Err(e) => {
+                            result_table.set("ok", false)?;
+                            result_table.set("error", e.to_string())?;
+                        }
+                        orcs_component::ChildResult::Aborted => {
+                            result_table.set("ok", false)?;
+                            result_table.set("error", "child aborted")?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    result_table.set("ok", false)?;
+                    result_table.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result_table)
+        })?;
+    orcs_table.set("send_to_child", send_to_child_fn)?;
+
     Ok(())
 }
 
@@ -1328,6 +1438,115 @@ mod tests {
 
             let result = child.run(serde_json::json!({}));
             assert!(result.is_ok());
+        }
+
+        #[test]
+        fn check_command_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "checker",
+                    run = function(input)
+                        local check = orcs.check_command("ls -la")
+                        return { success = true, data = { status = check.status } }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok());
+            if let ChildResult::Ok(data) = result {
+                // MockContext uses default impl → Allowed
+                assert_eq!(data["status"], "allowed");
+            }
+        }
+
+        #[test]
+        fn grant_command_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "granter",
+                    run = function(input)
+                        -- Should not error (default impl is no-op)
+                        orcs.grant_command("ls")
+                        return { success = true }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn request_approval_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "approver",
+                    run = function(input)
+                        local id = orcs.request_approval("exec", "Run dangerous command")
+                        return { success = true, data = { approval_id = id } }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok());
+            if let ChildResult::Ok(data) = result {
+                // Default impl returns empty string
+                assert_eq!(data["approval_id"], "");
+            }
+        }
+
+        #[test]
+        fn send_to_child_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "sender",
+                    run = function(input)
+                        local result = orcs.send_to_child("worker-1", { message = "hello" })
+                        return { success = result.ok, data = { result = result.result } }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok());
+            if let ChildResult::Ok(data) = result {
+                // MockContext returns {"mock": true}
+                assert_eq!(data["result"]["mock"], true);
+            }
         }
 
         #[test]
