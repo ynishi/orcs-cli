@@ -191,28 +191,33 @@ impl Capability {
 
     /// Parses a list of capability names into a combined set.
     ///
-    /// Unknown names are logged as warnings and skipped.
+    /// Returns the combined capabilities and a list of unknown names.
+    /// Callers should decide how to handle unknown names (error, warn, etc.)
     ///
     /// # Example
     ///
     /// ```
     /// use orcs_auth::Capability;
     ///
-    /// let caps = Capability::parse_list(&["READ", "WRITE"]);
+    /// let (caps, unknown) = Capability::parse_list(&["READ", "WRITE"]);
     /// assert_eq!(caps, Capability::READ | Capability::WRITE);
+    /// assert!(unknown.is_empty());
+    ///
+    /// let (caps, unknown) = Capability::parse_list(&["READ", "bad"]);
+    /// assert_eq!(caps, Capability::READ);
+    /// assert_eq!(unknown, vec!["bad"]);
     /// ```
     #[must_use]
-    pub fn parse_list(names: &[&str]) -> Self {
-        names
-            .iter()
-            .filter_map(|n| {
-                let parsed = Self::parse(n);
-                if parsed.is_none() {
-                    tracing::warn!(name = n, "unknown capability name, ignored");
-                }
-                parsed
-            })
-            .fold(Self::empty(), |acc, c| acc | c)
+    pub fn parse_list<'a>(names: &[&'a str]) -> (Self, Vec<&'a str>) {
+        let mut caps = Self::empty();
+        let mut unknown = Vec::new();
+        for name in names {
+            match Self::parse(name) {
+                Some(c) => caps |= c,
+                None => unknown.push(*name),
+            }
+        }
+        (caps, unknown)
     }
 }
 
@@ -307,8 +312,16 @@ mod tests {
 
     #[test]
     fn parse_list_combines() {
-        let caps = Capability::parse_list(&["READ", "WRITE", "unknown"]);
+        let (caps, unknown) = Capability::parse_list(&["READ", "WRITE"]);
         assert_eq!(caps, Capability::READ | Capability::WRITE);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn parse_list_reports_unknown() {
+        let (caps, unknown) = Capability::parse_list(&["READ", "bad", "WRITE", "nope"]);
+        assert_eq!(caps, Capability::READ | Capability::WRITE);
+        assert_eq!(unknown, vec!["bad", "nope"]);
     }
 
     #[test]
