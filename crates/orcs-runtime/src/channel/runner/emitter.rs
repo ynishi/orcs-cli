@@ -20,6 +20,7 @@
 
 use super::base::OutputSender;
 use super::Event;
+use crate::engine::SharedChannelHandles;
 use orcs_component::Emitter;
 use orcs_event::{EventCategory, Signal};
 use orcs_types::ComponentId;
@@ -45,6 +46,8 @@ pub struct EventEmitter {
     signal_tx: broadcast::Sender<Signal>,
     /// Component ID for event source.
     source_id: ComponentId,
+    /// Shared channel handles for broadcasting events to all channels.
+    shared_handles: Option<SharedChannelHandles>,
 }
 
 impl EventEmitter {
@@ -66,6 +69,7 @@ impl EventEmitter {
             output_tx: None,
             signal_tx,
             source_id,
+            shared_handles: None,
         }
     }
 
@@ -81,6 +85,16 @@ impl EventEmitter {
     #[must_use]
     pub(crate) fn with_output_channel(mut self, output_tx: OutputSender) -> Self {
         self.output_tx = Some(output_tx);
+        self
+    }
+
+    /// Sets the shared channel handles for event broadcasting.
+    ///
+    /// When set, `emit_event()` will broadcast Extension events to all
+    /// registered channels via these handles.
+    #[must_use]
+    pub(crate) fn with_shared_handles(mut self, handles: SharedChannelHandles) -> Self {
+        self.shared_handles = Some(handles);
         self
     }
 
@@ -170,6 +184,54 @@ impl EventEmitter {
         self.signal_tx.send(signal).is_ok()
     }
 
+    /// Broadcasts a custom Extension event to all registered channels.
+    ///
+    /// Creates an `Extension { namespace: "lua", kind: category }` event
+    /// and broadcasts it to all channels via shared handles. Channels
+    /// subscribed to the matching Extension category will process it.
+    ///
+    /// Falls back to emitting to own channel if shared handles are not set.
+    ///
+    /// # Arguments
+    ///
+    /// * `category` - Extension kind string (e.g., "tool:result")
+    /// * `operation` - Operation name (e.g., "complete")
+    /// * `payload` - Event payload data
+    ///
+    /// # Returns
+    ///
+    /// `true` if at least one channel received the event.
+    pub fn emit_event(
+        &self,
+        category: &str,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> bool {
+        let event = Event {
+            category: EventCategory::Extension {
+                namespace: "lua".to_string(),
+                kind: category.to_string(),
+            },
+            operation: operation.to_string(),
+            source: self.source_id.clone(),
+            payload,
+        };
+
+        if let Some(handles) = &self.shared_handles {
+            let handles = handles.read().expect("lock poisoned");
+            let mut delivered = 0usize;
+            for handle in handles.values() {
+                if handle.try_inject(event.clone()).is_ok() {
+                    delivered += 1;
+                }
+            }
+            delivered > 0
+        } else {
+            // Fallback: emit to own channel only
+            self.emit(event)
+        }
+    }
+
     /// Returns the source Component ID.
     #[must_use]
     pub fn source_id(&self) -> &ComponentId {
@@ -193,6 +255,15 @@ impl Emitter for EventEmitter {
 
     fn emit_output_with_level(&self, message: &str, level: &str) {
         EventEmitter::emit_output_with_level(self, message, level);
+    }
+
+    fn emit_event(
+        &self,
+        category: &str,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> bool {
+        EventEmitter::emit_event(self, category, operation, payload)
     }
 
     fn clone_box(&self) -> Box<dyn Emitter> {
@@ -289,5 +360,104 @@ mod tests {
 
         let received = channel_rx.try_recv().unwrap();
         assert_eq!(received.payload["message"], "From clone");
+    }
+
+    #[test]
+    fn emit_event_without_shared_handles_falls_back_to_own_channel() {
+        let (emitter, mut channel_rx, _signal_rx) = setup();
+
+        let result = emitter.emit_event(
+            "tool:result",
+            "complete",
+            serde_json::json!({"tool": "read", "success": true}),
+        );
+        assert!(result);
+
+        let received = channel_rx.try_recv().unwrap();
+        assert_eq!(
+            received.category,
+            EventCategory::Extension {
+                namespace: "lua".to_string(),
+                kind: "tool:result".to_string(),
+            }
+        );
+        assert_eq!(received.operation, "complete");
+        assert_eq!(received.payload["tool"], "read");
+        assert_eq!(received.payload["success"], true);
+    }
+
+    #[test]
+    fn emit_event_with_shared_handles_broadcasts() {
+        use crate::channel::runner::base::ChannelHandle;
+        use orcs_types::ChannelId;
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+
+        let (channel_tx, _channel_rx) = OutputSender::channel(64);
+        let (signal_tx, _signal_rx) = broadcast::channel(64);
+        let source_id = ComponentId::builtin("test");
+
+        // Create two target channels
+        let ch1 = ChannelId::new();
+        let ch2 = ChannelId::new();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(32);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(32);
+
+        let mut handles = HashMap::new();
+        handles.insert(ch1, ChannelHandle::new(ch1, tx1));
+        handles.insert(ch2, ChannelHandle::new(ch2, tx2));
+        let shared = Arc::new(RwLock::new(handles));
+
+        let emitter = EventEmitter::new(channel_tx, signal_tx, source_id)
+            .with_shared_handles(shared);
+
+        let result = emitter.emit_event(
+            "tool:result",
+            "complete",
+            serde_json::json!({"data": "test"}),
+        );
+        assert!(result);
+
+        // Both channels should receive the event as Broadcast
+        let evt1 = rx1.try_recv().unwrap();
+        let evt2 = rx2.try_recv().unwrap();
+
+        assert!(!evt1.is_direct()); // Should be Broadcast
+        assert!(!evt2.is_direct());
+
+        let e1 = evt1.into_event();
+        let e2 = evt2.into_event();
+
+        assert_eq!(
+            e1.category,
+            EventCategory::Extension {
+                namespace: "lua".to_string(),
+                kind: "tool:result".to_string(),
+            }
+        );
+        assert_eq!(e1.operation, "complete");
+        assert_eq!(e2.payload["data"], "test");
+    }
+
+    #[test]
+    fn emit_event_via_trait() {
+        let (emitter, mut channel_rx, _signal_rx) = setup();
+
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+        let result = boxed.emit_event(
+            "custom:event",
+            "notify",
+            serde_json::json!({"key": "value"}),
+        );
+        assert!(result);
+
+        let received = channel_rx.try_recv().unwrap();
+        assert_eq!(
+            received.category,
+            EventCategory::Extension {
+                namespace: "lua".to_string(),
+                kind: "custom:event".to_string(),
+            }
+        );
     }
 }

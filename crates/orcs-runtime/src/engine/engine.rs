@@ -258,7 +258,8 @@ impl OrcsEngine {
             signal_rx,
             component,
         )
-        .with_emitter(self.signal_tx.clone());
+        .with_emitter(self.signal_tx.clone())
+        .with_shared_handles(self.eventbus.shared_handles());
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -324,7 +325,8 @@ impl OrcsEngine {
             signal_rx,
             component,
         )
-        .with_emitter(self.signal_tx.clone());
+        .with_emitter(self.signal_tx.clone())
+        .with_shared_handles(self.eventbus.shared_handles());
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -534,6 +536,7 @@ impl OrcsEngine {
             component,
         )
         .with_emitter(self.signal_tx.clone())
+        .with_shared_handles(self.eventbus.shared_handles())
         .with_session_arc(session)
         .with_checker(checker)
         .build();
@@ -603,6 +606,7 @@ impl OrcsEngine {
             component,
         )
         .with_emitter(self.signal_tx.clone())
+        .with_shared_handles(self.eventbus.shared_handles())
         .with_session_arc(session)
         .with_checker(checker)
         .with_grants(grants);

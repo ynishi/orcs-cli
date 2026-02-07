@@ -7,7 +7,7 @@ use crate::types::{
     lua_to_json, parse_event_category, parse_signal_response, serde_json_to_lua, LuaRequest,
     LuaResponse, LuaSignal,
 };
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
     ChildConfig, ChildContext, Component, ComponentError, ComponentLoader, Emitter, EventCategory,
     SpawnError, Status,
@@ -246,7 +246,7 @@ impl LuaComponent {
                 .lua
                 .lock()
                 .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
-            Self::register_output_function(&lua, Arc::clone(emitter))?;
+            Self::register_emitter_functions(&lua, Arc::clone(emitter))?;
         }
 
         // Re-register child context functions if child_context is set
@@ -966,10 +966,10 @@ impl LuaComponent {
         Ok(())
     }
 
-    /// Registers the orcs.output function with a real emitter.
+    /// Registers emitter-backed Lua functions (orcs.output, orcs.emit_event).
     ///
     /// Called when `set_emitter()` is invoked to enable event emission.
-    fn register_output_function(
+    fn register_emitter_functions(
         lua: &Lua,
         emitter: Arc<Mutex<Box<dyn Emitter>>>,
     ) -> Result<(), LuaError> {
@@ -995,7 +995,19 @@ impl LuaComponent {
         })?;
         orcs_table.set("output_with_level", output_level_fn)?;
 
-        tracing::debug!("Registered orcs.output functions with emitter");
+        // orcs.emit_event(category, operation, payload) - broadcast Extension event
+        let emitter_clone3 = Arc::clone(&emitter);
+        let emit_event_fn =
+            lua.create_function(move |lua, (category, operation, payload): (String, String, LuaValue)| {
+                let json_payload: serde_json::Value = lua.from_value(payload)?;
+                if let Ok(em) = emitter_clone3.lock() {
+                    em.emit_event(&category, &operation, json_payload);
+                }
+                Ok(())
+            })?;
+        orcs_table.set("emit_event", emit_event_fn)?;
+
+        tracing::debug!("Registered orcs.output and orcs.emit_event functions with emitter");
         Ok(())
     }
 }
@@ -1125,10 +1137,10 @@ impl Component for LuaComponent {
         let emitter_arc = Arc::new(Mutex::new(emitter));
         self.emitter = Some(Arc::clone(&emitter_arc));
 
-        // Register orcs.output function with the emitter
+        // Register emitter-backed Lua functions (orcs.output, orcs.emit_event)
         if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = Self::register_output_function(&lua, emitter_arc) {
-                tracing::warn!("Failed to register orcs.output: {}", e);
+            if let Err(e) = Self::register_emitter_functions(&lua, emitter_arc) {
+                tracing::warn!("Failed to register emitter functions: {}", e);
             }
         }
     }

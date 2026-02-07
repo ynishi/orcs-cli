@@ -40,6 +40,7 @@ use super::common::{
 use super::paused_queue::PausedEventQueue;
 use super::EventEmitter;
 use crate::auth::{PermissionChecker, Session};
+use crate::engine::SharedChannelHandles;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
@@ -700,6 +701,8 @@ pub struct ChannelRunnerBuilder {
     checker: Option<Arc<dyn PermissionChecker>>,
     /// Dynamic command grants.
     grants: Option<Arc<dyn orcs_auth::GrantPolicy>>,
+    /// Shared channel handles for event broadcasting via Emitter.
+    shared_handles: Option<SharedChannelHandles>,
 }
 
 impl ChannelRunnerBuilder {
@@ -726,6 +729,7 @@ impl ChannelRunnerBuilder {
             session: None,
             checker: None,
             grants: None,
+            shared_handles: None,
         }
     }
 
@@ -835,6 +839,16 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the shared channel handles for event broadcasting.
+    ///
+    /// When set, the EventEmitter's `emit_event()` will broadcast
+    /// Extension events to all registered channels.
+    #[must_use]
+    pub fn with_shared_handles(mut self, handles: SharedChannelHandles) -> Self {
+        self.shared_handles = Some(handles);
+        self
+    }
+
     /// Builds the ChannelRunner and returns it with a ChannelHandle.
     #[must_use]
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
@@ -857,6 +871,15 @@ impl ChannelRunnerBuilder {
                 emitter = emitter.with_output_channel(output_tx);
                 info!(
                     "ChannelRunnerBuilder: routing output to IO channel for {}",
+                    component_id.fqn()
+                );
+            }
+
+            // Enable event broadcasting if shared handles are provided
+            if let Some(handles) = self.shared_handles.take() {
+                emitter = emitter.with_shared_handles(handles);
+                info!(
+                    "ChannelRunnerBuilder: enabled event broadcast for {}",
                     component_id.fqn()
                 );
             }

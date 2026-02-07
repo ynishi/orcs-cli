@@ -42,6 +42,25 @@ pub trait Emitter: Send + Sync + Debug {
     /// * `level` - Log level ("info", "warn", "error")
     fn emit_output_with_level(&self, message: &str, level: &str);
 
+    /// Emits a custom event (broadcast to all channels).
+    ///
+    /// Creates an Extension event with the given category and broadcasts
+    /// it to all registered channels. Channels subscribed to the matching
+    /// Extension category will process it.
+    ///
+    /// # Arguments
+    ///
+    /// * `category` - Extension kind string (e.g., "tool:result")
+    /// * `operation` - Operation name (e.g., "complete")
+    /// * `payload` - Event payload data
+    ///
+    /// # Returns
+    ///
+    /// `true` if the event was broadcast successfully.
+    fn emit_event(&self, _category: &str, _operation: &str, _payload: serde_json::Value) -> bool {
+        false
+    }
+
     /// Clones the emitter into a boxed trait object.
     ///
     /// This allows storing the emitter in the Component.
