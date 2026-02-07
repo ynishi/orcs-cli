@@ -35,7 +35,7 @@ end
 return {
     id = "tool",
     namespace = "builtin",
-    subscriptions = {"UserInput"},
+    subscriptions = {"Echo"},
 
     on_request = function(request)
         local msg = request.payload
