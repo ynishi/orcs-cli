@@ -3,6 +3,7 @@
 //! Provides the runtime context that is injected into Children
 //! to enable them to interact with the system safely.
 
+use super::base::OutputSender;
 use super::child_spawner::ChildSpawner;
 use super::{ChannelRunner, Event};
 use crate::auth::{CommandCheckResult, PermissionChecker, Session};
@@ -30,10 +31,10 @@ pub struct ChildContextImpl {
     /// Parent ID (Component or Child).
     parent_id: String,
     /// Output sender for events (to owning ChannelRunner).
-    output_tx: mpsc::Sender<Event>,
+    output_tx: OutputSender,
     /// IO output sender for Output events (to ClientRunner).
     /// When set, Output events are routed here instead of output_tx.
-    io_output_tx: Option<mpsc::Sender<Event>>,
+    io_output_tx: Option<OutputSender>,
     /// Child spawner (shared, locked).
     spawner: Arc<Mutex<ChildSpawner>>,
     /// Lua loader for creating children from scripts.
@@ -81,7 +82,7 @@ impl ChildContextImpl {
     #[must_use]
     pub fn new(
         parent_id: impl Into<String>,
-        output_tx: mpsc::Sender<Event>,
+        output_tx: OutputSender,
         spawner: Arc<Mutex<ChildSpawner>>,
     ) -> Self {
         Self {
@@ -105,7 +106,7 @@ impl ChildContextImpl {
     /// When set, Output events (display, approval_request) are sent to
     /// the IO channel instead of the owning ChannelRunner.
     #[must_use]
-    pub fn with_io_output_channel(mut self, tx: mpsc::Sender<Event>) -> Self {
+    pub fn with_io_output_channel(mut self, tx: OutputSender) -> Self {
         self.io_output_tx = Some(tx);
         self
     }
@@ -113,9 +114,9 @@ impl ChildContextImpl {
     /// Sends an Output event to the IO channel if available, otherwise to the owning channel.
     fn send_to_output(&self, event: Event) {
         if let Some(io_tx) = &self.io_output_tx {
-            let _ = io_tx.try_send(event);
+            let _ = io_tx.try_send_direct(event);
         } else {
-            let _ = self.output_tx.try_send(event);
+            let _ = self.output_tx.try_send_direct(event);
         }
     }
 
@@ -579,16 +580,12 @@ impl AsyncChildContext for ChildContextImpl {
 
     fn emit_output(&self, message: &str) {
         let event = self.create_output_event(message, "info");
-        if let Err(e) = self.output_tx.try_send(event) {
-            tracing::warn!("Failed to emit output: {}", e);
-        }
+        self.send_to_output(event);
     }
 
     fn emit_output_with_level(&self, message: &str, level: &str) {
         let event = self.create_output_event(message, level);
-        if let Err(e) = self.output_tx.try_send(event) {
-            tracing::warn!("Failed to emit output: {}", e);
-        }
+        self.send_to_output(event);
     }
 
     async fn spawn_child(
@@ -706,8 +703,8 @@ mod tests {
         }
     }
 
-    fn setup() -> (ChildContextImpl, mpsc::Receiver<Event>) {
-        let (output_tx, output_rx) = mpsc::channel(64);
+    fn setup() -> (ChildContextImpl, super::super::base::OutputReceiver) {
+        let (output_tx, output_rx) = OutputSender::channel(64);
 
         let spawner = ChildSpawner::new("test-parent", output_tx.clone());
         let spawner_arc = Arc::new(Mutex::new(spawner));
@@ -826,8 +823,10 @@ mod tests {
         use orcs_types::{Principal, PrincipalId};
         use std::time::Duration;
 
-        fn setup_with_auth(elevated: bool) -> (ChildContextImpl, mpsc::Receiver<Event>) {
-            let (output_tx, output_rx) = mpsc::channel(64);
+        fn setup_with_auth(
+            elevated: bool,
+        ) -> (ChildContextImpl, super::super::super::base::OutputReceiver) {
+            let (output_tx, output_rx) = OutputSender::channel(64);
 
             let spawner = ChildSpawner::new("test-parent", output_tx.clone());
             let spawner_arc = Arc::new(Mutex::new(spawner));
@@ -904,7 +903,7 @@ mod tests {
 
         #[test]
         fn shared_grants_across_contexts() {
-            let (output_tx, _) = mpsc::channel(64);
+            let (output_tx, _) = OutputSender::channel(64);
             let spawner = ChildSpawner::new("test", output_tx.clone());
             let spawner_arc = Arc::new(Mutex::new(spawner));
 

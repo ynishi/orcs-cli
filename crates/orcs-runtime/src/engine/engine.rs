@@ -35,8 +35,8 @@
 
 use super::eventbus::EventBus;
 use crate::channel::{
-    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, Event,
-    LuaChildLoader, World, WorldCommand, WorldCommandSender, WorldManager,
+    ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, LuaChildLoader,
+    OutputSender, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
@@ -46,7 +46,7 @@ use orcs_event::Signal;
 use orcs_types::ChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
@@ -245,7 +245,7 @@ impl OrcsEngine {
         &mut self,
         channel_id: ChannelId,
         component: Box<dyn Component>,
-        output_tx: Option<mpsc::Sender<Event>>,
+        output_tx: Option<OutputSender>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
@@ -310,7 +310,7 @@ impl OrcsEngine {
         &mut self,
         channel_id: ChannelId,
         component: Box<dyn Component>,
-        output_tx: Option<mpsc::Sender<Event>>,
+        output_tx: Option<OutputSender>,
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
@@ -382,7 +382,7 @@ impl OrcsEngine {
         channel_id: ChannelId,
         io_port: IOPort,
         principal: orcs_types::Principal,
-    ) -> (ChannelHandle, mpsc::Sender<Event>) {
+    ) -> (ChannelHandle, OutputSender) {
         let config = ClientRunnerConfig {
             world_tx: self.world_tx.clone(),
             world: Arc::clone(&self.world_read),
@@ -391,8 +391,8 @@ impl OrcsEngine {
         };
         let (runner, handle) = ClientRunner::new(channel_id, config, io_port, principal);
 
-        // Get event_tx for other runners to send Output events
-        let event_tx = runner.event_tx().clone();
+        // Get event_tx for other runners to send Output events (wrapped as OutputSender)
+        let output_sender = OutputSender::new(runner.event_tx().clone());
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -405,7 +405,7 @@ impl OrcsEngine {
         self.runner_tasks.insert(channel_id, runner_task);
 
         info!("Spawned ClientRunner for channel {}", channel_id);
-        (handle, event_tx)
+        (handle, output_sender)
     }
 
     /// Spawn a child channel with configuration and bound Component.
@@ -585,7 +585,7 @@ impl OrcsEngine {
         &mut self,
         channel_id: ChannelId,
         component: Box<dyn Component>,
-        output_tx: Option<mpsc::Sender<Event>>,
+        output_tx: Option<OutputSender>,
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
         session: Arc<crate::Session>,
         checker: Arc<dyn crate::auth::PermissionChecker>,

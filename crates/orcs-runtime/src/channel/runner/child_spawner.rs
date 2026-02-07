@@ -24,6 +24,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use super::base::OutputSender;
 use orcs_component::{
     async_trait, AsyncChildHandle, ChildConfig, ChildHandle, ChildResult, RunError, RunnableChild,
     SpawnError, Status,
@@ -32,7 +33,6 @@ use orcs_event::Signal;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 /// Default maximum number of children per spawner.
 const DEFAULT_MAX_CHILDREN: usize = 64;
@@ -160,7 +160,7 @@ pub struct ChildSpawner {
     /// Parent ID (Component or Child that owns this spawner).
     parent_id: String,
     /// Output sender (for child output to parent).
-    output_tx: mpsc::Sender<super::Event>,
+    output_tx: OutputSender,
 }
 
 impl ChildSpawner {
@@ -171,7 +171,7 @@ impl ChildSpawner {
     /// * `parent_id` - ID of the parent Component/Child
     /// * `output_tx` - Sender for output events
     #[must_use]
-    pub fn new(parent_id: impl Into<String>, output_tx: mpsc::Sender<super::Event>) -> Self {
+    pub fn new(parent_id: impl Into<String>, output_tx: OutputSender) -> Self {
         Self {
             children: HashMap::new(),
             max_children: DEFAULT_MAX_CHILDREN,
@@ -335,7 +335,7 @@ impl ChildSpawner {
 
     /// Returns the output sender.
     #[must_use]
-    pub fn output_tx(&self) -> &mpsc::Sender<super::Event> {
+    pub fn output_tx(&self) -> &OutputSender {
         &self.output_tx
     }
 
@@ -439,7 +439,7 @@ mod tests {
     }
 
     fn setup() -> ChildSpawner {
-        let (output_tx, _) = mpsc::channel(64);
+        let (output_tx, _) = OutputSender::channel(64);
         ChildSpawner::new("test-parent", output_tx)
     }
 

@@ -304,10 +304,11 @@ impl EventBus {
         handles.remove(id);
     }
 
-    /// Injects an event into a specific channel.
+    /// Injects a direct event into a specific channel (subscription filter bypassed).
     ///
-    /// This enables external event injection (e.g., from Human input)
-    /// at any time.
+    /// This enables targeted event injection (e.g., `@component` routing)
+    /// at any time. The receiving ChannelRunner will process the event
+    /// regardless of its subscription list.
     ///
     /// # Arguments
     ///
@@ -318,19 +319,6 @@ impl EventBus {
     ///
     /// Returns [`EngineError::ChannelNotFound`] if the channel is not registered.
     /// Returns [`EngineError::SendFailed`] if the channel's buffer is full or closed.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use orcs_event::{Event, EventCategory};
-    ///
-    /// let event = Event {
-    ///     category: EventCategory::Echo,
-    ///     payload: serde_json::json!({"message": "hello"}),
-    /// };
-    ///
-    /// eventbus.inject(channel_id, event).await?;
-    /// ```
     pub async fn inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
         let handle = {
             let handles = self.channel_handles.read().expect("lock poisoned");
@@ -341,12 +329,12 @@ impl EventBus {
         };
 
         handle
-            .inject(event)
+            .inject_direct(event)
             .await
             .map_err(|_| EngineError::SendFailed("channel closed".into()))
     }
 
-    /// Try to inject an event without blocking.
+    /// Try to inject a direct event without blocking (subscription filter bypassed).
     ///
     /// Returns immediately if the buffer is full.
     ///
@@ -360,15 +348,18 @@ impl EventBus {
             .ok_or(EngineError::ChannelNotFound(channel_id))?;
 
         handle
-            .try_inject(event)
+            .try_inject_direct(event)
             .map_err(|e| EngineError::SendFailed(e.to_string()))
     }
 
-    /// Broadcasts an event to all registered channels.
+    /// Broadcasts an event to all registered channels (subscription filter applies).
     ///
     /// This is used for data-plane events (e.g., UserInput) that need to reach
     /// all channels. Unlike Signal broadcast (control-plane, high priority),
     /// this operates on the data-plane via channel event queues.
+    ///
+    /// Each receiving ChannelRunner will apply its subscription filter —
+    /// only channels subscribed to the event's category will process it.
     ///
     /// # Arguments
     ///
@@ -378,21 +369,6 @@ impl EventBus {
     ///
     /// Number of channels that successfully received the event.
     /// Channels with full buffers or closed handles are skipped.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use orcs_event::EventCategory;
-    ///
-    /// let event = Event {
-    ///     category: EventCategory::UserInput,
-    ///     operation: "input".to_string(),
-    ///     source: component_id,
-    ///     payload: serde_json::json!({"message": "hello"}),
-    /// };
-    ///
-    /// let delivered = eventbus.broadcast(event);
-    /// ```
     pub fn broadcast(&self, event: Event) -> usize {
         let handles = self.channel_handles.read().expect("lock poisoned");
         let mut delivered = 0;
@@ -407,7 +383,7 @@ impl EventBus {
     /// Broadcasts an event to all registered channels (async version).
     ///
     /// Waits for each channel to accept the event. Use this when delivery
-    /// guarantee is more important than latency.
+    /// guarantee is more important than latency. Subscription filter applies.
     ///
     /// # Arguments
     ///
@@ -855,13 +831,13 @@ mod tests {
         let delivered = bus.broadcast(event);
         assert_eq!(delivered, 2);
 
-        // Both channels should receive the event
+        // Both channels should receive the event (as Broadcast InboundEvent)
         let evt1 = rx1.try_recv();
         let evt2 = rx2.try_recv();
         assert!(evt1.is_ok());
         assert!(evt2.is_ok());
-        assert_eq!(evt1.unwrap().operation, "input");
-        assert_eq!(evt2.unwrap().operation, "input");
+        assert_eq!(evt1.unwrap().into_event().operation, "input");
+        assert_eq!(evt2.unwrap().into_event().operation, "input");
     }
 
     #[tokio::test]
@@ -886,6 +862,6 @@ mod tests {
 
         let evt = rx1.try_recv();
         assert!(evt.is_ok());
-        assert_eq!(evt.unwrap().operation, "async_input");
+        assert_eq!(evt.unwrap().into_event().operation, "async_input");
     }
 }

@@ -29,7 +29,7 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 
-use super::base::{ChannelHandle, Event};
+use super::base::{ChannelHandle, Event, InboundEvent};
 use super::common::{
     determine_channel_action, is_channel_active, is_channel_paused, send_abort, send_transition,
     SignalAction,
@@ -169,10 +169,10 @@ pub struct ClientRunnerConfig {
 pub struct ClientRunner {
     /// This channel's ID.
     id: ChannelId,
-    /// Sender for events (used for creating handle).
-    event_tx: mpsc::Sender<Event>,
+    /// Sender for events (used for creating handle and output routing).
+    event_tx: mpsc::Sender<InboundEvent>,
     /// Receiver for incoming events (Output from other channels).
-    event_rx: mpsc::Receiver<Event>,
+    event_rx: mpsc::Receiver<InboundEvent>,
     /// Receiver for signals (broadcast).
     signal_rx: broadcast::Receiver<Signal>,
     /// Sender for World commands.
@@ -242,7 +242,7 @@ impl ClientRunner {
     ///
     /// This can be used to inject Output events into this runner for display.
     #[must_use]
-    pub fn event_tx(&self) -> &mpsc::Sender<Event> {
+    pub(crate) fn event_tx(&self) -> &mpsc::Sender<InboundEvent> {
         &self.event_tx
     }
 
@@ -457,7 +457,12 @@ impl ClientRunner {
     }
 
     /// Handles an incoming event.
-    async fn handle_event(&mut self, event: Event) -> bool {
+    ///
+    /// ClientRunner has no subscription filter — it processes all events
+    /// regardless of the Broadcast/Direct distinction.
+    async fn handle_event(&mut self, inbound: InboundEvent) -> bool {
+        let event = inbound.into_event();
+
         debug!(
             "ClientRunner {}: received event {:?} op={}",
             self.id, event.category, event.operation

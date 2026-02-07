@@ -18,11 +18,12 @@
 //! }
 //! ```
 
+use super::base::OutputSender;
 use super::Event;
 use orcs_component::Emitter;
 use orcs_event::{EventCategory, Signal};
 use orcs_types::ComponentId;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 /// Event emitter for Components.
 ///
@@ -34,11 +35,12 @@ use tokio::sync::{broadcast, mpsc};
 #[derive(Clone)]
 pub struct EventEmitter {
     /// Sender to emit events to the owning Channel.
-    /// ClientRunner receives these via event_rx.
-    channel_tx: mpsc::Sender<Event>,
+    /// All events are sent as [`InboundEvent::Direct`] since these are
+    /// internal emissions, not broadcasts.
+    channel_tx: OutputSender,
     /// Sender for Output events to IO channel.
     /// If set, emit_output sends here instead of channel_tx.
-    output_tx: Option<mpsc::Sender<Event>>,
+    output_tx: Option<OutputSender>,
     /// Sender to broadcast signals to all Components.
     signal_tx: broadcast::Sender<Signal>,
     /// Component ID for event source.
@@ -54,8 +56,8 @@ impl EventEmitter {
     /// * `signal_tx` - Broadcast sender for signals
     /// * `source_id` - Component ID to use as event source
     #[must_use]
-    pub fn new(
-        channel_tx: mpsc::Sender<Event>,
+    pub(crate) fn new(
+        channel_tx: OutputSender,
         signal_tx: broadcast::Sender<Signal>,
         source_id: ComponentId,
     ) -> Self {
@@ -77,7 +79,7 @@ impl EventEmitter {
     ///
     /// * `output_tx` - Sender for the IO channel's event_rx
     #[must_use]
-    pub fn with_output_channel(mut self, output_tx: mpsc::Sender<Event>) -> Self {
+    pub(crate) fn with_output_channel(mut self, output_tx: OutputSender) -> Self {
         self.output_tx = Some(output_tx);
         self
     }
@@ -95,7 +97,7 @@ impl EventEmitter {
     ///
     /// `true` if the event was sent successfully, `false` if the channel is full or closed.
     pub fn emit(&self, event: Event) -> bool {
-        self.channel_tx.try_send(event).is_ok()
+        self.channel_tx.try_send_direct(event).is_ok()
     }
 
     /// Emits an Output event with a message.
@@ -146,7 +148,7 @@ impl EventEmitter {
     /// This is the internal method used by emit_output variants.
     fn emit_to_output(&self, event: Event) -> bool {
         if let Some(output_tx) = &self.output_tx {
-            output_tx.try_send(event).is_ok()
+            output_tx.try_send_direct(event).is_ok()
         } else {
             self.emit(event)
         }
@@ -201,14 +203,11 @@ impl Emitter for EventEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::runner::base::OutputReceiver;
     use orcs_types::{Principal, SignalScope};
 
-    fn setup() -> (
-        EventEmitter,
-        mpsc::Receiver<Event>,
-        broadcast::Receiver<Signal>,
-    ) {
-        let (channel_tx, channel_rx) = mpsc::channel(64);
+    fn setup() -> (EventEmitter, OutputReceiver, broadcast::Receiver<Signal>) {
+        let (channel_tx, channel_rx) = OutputSender::channel(64);
         let (signal_tx, signal_rx) = broadcast::channel(64);
         let source_id = ComponentId::builtin("test");
 

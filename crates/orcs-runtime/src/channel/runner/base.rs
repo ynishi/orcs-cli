@@ -68,6 +68,116 @@ pub struct Event {
     pub payload: serde_json::Value,
 }
 
+/// Internal routing wrapper that distinguishes broadcast from direct event injection.
+///
+/// - [`Broadcast`](InboundEvent::Broadcast): Events sent to all channels
+///   (e.g., UserInput from ClientRunner). The subscription filter is applied —
+///   only channels subscribed to the event's category will process it.
+/// - [`Direct`](InboundEvent::Direct): Events targeted at a specific channel
+///   (e.g., `@component` routing via Engine). The subscription filter is
+///   bypassed — the channel always processes the event.
+///
+/// This enum is internal to the runner system and does not affect the
+/// [`Event`] struct itself.
+#[derive(Debug, Clone)]
+pub(crate) enum InboundEvent {
+    /// Broadcast event — subscription filter applies.
+    Broadcast(Event),
+    /// Direct event — subscription filter bypassed.
+    Direct(Event),
+}
+
+impl InboundEvent {
+    /// Extracts the inner [`Event`], consuming the wrapper.
+    pub(crate) fn into_event(self) -> Event {
+        match self {
+            Self::Broadcast(e) | Self::Direct(e) => e,
+        }
+    }
+
+    /// Returns `true` if this is a direct (filter-bypassing) event.
+    pub(crate) fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct(_))
+    }
+}
+
+/// Opaque handle for sending events into a channel as [`InboundEvent::Direct`].
+///
+/// All events sent through `OutputSender` bypass the subscription filter
+/// on the receiving [`ChannelRunner`]. Use [`OutputSender::channel()`] to
+/// create a matched sender/receiver pair for testing or external use.
+///
+/// Internally wraps `mpsc::Sender<InboundEvent>` without exposing
+/// the `InboundEvent` type to external crates.
+#[derive(Clone, Debug)]
+pub struct OutputSender {
+    inner: mpsc::Sender<InboundEvent>,
+}
+
+impl OutputSender {
+    /// Creates a matched (`OutputSender`, [`OutputReceiver`]) pair.
+    ///
+    /// This is the public way to create a channel for use with
+    /// [`ChildSpawner`] and [`ChildContextImpl`] in integration tests
+    /// or external code.
+    #[must_use]
+    pub fn channel(buffer: usize) -> (Self, OutputReceiver) {
+        let (tx, rx) = mpsc::channel(buffer);
+        (Self { inner: tx }, OutputReceiver { inner: rx })
+    }
+
+    /// Creates a new OutputSender from an InboundEvent sender (crate-internal).
+    pub(crate) fn new(tx: mpsc::Sender<InboundEvent>) -> Self {
+        Self { inner: tx }
+    }
+
+    /// Returns the inner sender (crate-internal).
+    #[allow(dead_code)]
+    pub(crate) fn into_inner(self) -> mpsc::Sender<InboundEvent> {
+        self.inner
+    }
+
+    /// Sends an event as [`InboundEvent::Direct`] (non-blocking).
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_send_direct(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::TrySendError<InboundEvent>> {
+        self.inner.try_send(InboundEvent::Direct(event))
+    }
+
+    /// Sends an event as [`InboundEvent::Direct`] (async, waits for capacity).
+    #[allow(dead_code)]
+    pub(crate) async fn send_direct(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::SendError<InboundEvent>> {
+        self.inner.send(InboundEvent::Direct(event)).await
+    }
+}
+
+/// Receiver end of an [`OutputSender`] channel.
+///
+/// Unwraps [`InboundEvent`] internally, returning plain [`Event`] values.
+/// Created via [`OutputSender::channel()`].
+pub struct OutputReceiver {
+    inner: mpsc::Receiver<InboundEvent>,
+}
+
+impl OutputReceiver {
+    /// Receives the next event, waiting until one is available.
+    ///
+    /// Returns `None` when all senders have been dropped.
+    pub async fn recv(&mut self) -> Option<Event> {
+        self.inner.recv().await.map(InboundEvent::into_event)
+    }
+
+    /// Attempts to receive an event without blocking.
+    pub fn try_recv(&mut self) -> Result<Event, mpsc::error::TryRecvError> {
+        self.inner.try_recv().map(InboundEvent::into_event)
+    }
+}
+
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
 
@@ -76,30 +186,57 @@ const EVENT_BUFFER_SIZE: usize = 64;
 pub struct ChannelHandle {
     /// Channel ID.
     pub id: ChannelId,
-    /// Event sender.
-    event_tx: mpsc::Sender<Event>,
+    /// Event sender (carries [`InboundEvent`] internally).
+    event_tx: mpsc::Sender<InboundEvent>,
 }
 
 impl ChannelHandle {
     /// Creates a new handle with the given sender.
     #[must_use]
-    pub fn new(id: ChannelId, event_tx: mpsc::Sender<Event>) -> Self {
+    pub(crate) fn new(id: ChannelId, event_tx: mpsc::Sender<InboundEvent>) -> Self {
         Self { id, event_tx }
     }
 
-    /// Injects an event into the channel.
+    /// Injects a broadcast event into the channel (subscription filter applies).
     ///
     /// Returns an error if the channel has been dropped.
-    pub async fn inject(&self, event: Event) -> Result<(), mpsc::error::SendError<Event>> {
-        self.event_tx.send(event).await
+    pub(crate) async fn inject(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::SendError<InboundEvent>> {
+        self.event_tx.send(InboundEvent::Broadcast(event)).await
     }
 
-    /// Try to inject an event without blocking.
+    /// Try to inject a broadcast event without blocking.
     ///
     /// Returns an error if the buffer is full or channel is dropped.
-    #[allow(clippy::result_large_err)] // Event included in error for retry
-    pub fn try_inject(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
-        self.event_tx.try_send(event)
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_inject(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::TrySendError<InboundEvent>> {
+        self.event_tx.try_send(InboundEvent::Broadcast(event))
+    }
+
+    /// Injects a direct event into the channel (subscription filter bypassed).
+    ///
+    /// Use this for targeted delivery (e.g., `@component` routing).
+    pub(crate) async fn inject_direct(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::SendError<InboundEvent>> {
+        self.event_tx.send(InboundEvent::Direct(event)).await
+    }
+
+    /// Try to inject a direct event without blocking.
+    ///
+    /// Bypasses the subscription filter on the receiving ChannelRunner.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_inject_direct(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::TrySendError<InboundEvent>> {
+        self.event_tx.try_send(InboundEvent::Direct(event))
     }
 }
 
@@ -117,8 +254,8 @@ impl ChannelHandle {
 pub struct ChannelRunner {
     /// This channel's ID.
     id: ChannelId,
-    /// Receiver for incoming events.
-    event_rx: mpsc::Receiver<Event>,
+    /// Receiver for incoming events (wrapped as [`InboundEvent`]).
+    event_rx: mpsc::Receiver<InboundEvent>,
     /// Receiver for signals (broadcast).
     signal_rx: broadcast::Receiver<Signal>,
     /// Sender for World commands.
@@ -130,14 +267,15 @@ pub struct ChannelRunner {
     /// Cached event subscriptions from Component.
     ///
     /// Populated at build time to avoid locking Component on every event.
-    /// Events whose category is not in this list are silently skipped.
+    /// Broadcast events whose category is not in this list are silently skipped.
+    /// Direct events bypass this filter entirely.
     subscriptions: Vec<EventCategory>,
     /// Queue for events received while paused.
     paused_queue: PausedEventQueue,
     /// Child spawner for managing spawned children (optional).
     child_spawner: Option<Arc<StdMutex<ChildSpawner>>>,
     /// Event sender for child context (kept for context creation).
-    event_tx: Option<mpsc::Sender<Event>>,
+    event_tx: Option<mpsc::Sender<InboundEvent>>,
 }
 
 impl ChannelRunner {
@@ -152,7 +290,11 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner));
+        let ctx = ChildContextImpl::new(
+            child_id,
+            OutputSender::new(event_tx.clone()),
+            Arc::clone(spawner),
+        );
 
         Some(Box::new(ctx))
     }
@@ -172,8 +314,12 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner))
-            .with_lua_loader(loader);
+        let ctx = ChildContextImpl::new(
+            child_id,
+            OutputSender::new(event_tx.clone()),
+            Arc::clone(spawner),
+        )
+        .with_lua_loader(loader);
 
         Some(Box::new(ctx))
     }
@@ -188,7 +334,11 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner));
+        let ctx = ChildContextImpl::new(
+            child_id,
+            OutputSender::new(event_tx.clone()),
+            Arc::clone(spawner),
+        );
 
         Some(Box::new(ctx))
     }
@@ -208,8 +358,12 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(child_id, event_tx.clone(), Arc::clone(spawner))
-            .with_lua_loader(loader);
+        let ctx = ChildContextImpl::new(
+            child_id,
+            OutputSender::new(event_tx.clone()),
+            Arc::clone(spawner),
+        )
+        .with_lua_loader(loader);
 
         Some(Box::new(ctx))
     }
@@ -378,12 +532,27 @@ impl ChannelRunner {
 
     /// Handles an incoming event.
     ///
-    /// If paused, queues the event for later processing.
-    async fn handle_event(&mut self, event: Event) -> bool {
+    /// Subscription filter is applied first (for broadcast events),
+    /// then paused events are queued for later processing.
+    /// Direct events bypass the subscription filter entirely.
+    async fn handle_event(&mut self, inbound: InboundEvent) -> bool {
+        let is_direct = inbound.is_direct();
+        let event = inbound.into_event();
+
         debug!(
-            "ChannelRunner {}: received event {:?} op={}",
-            self.id, event.category, event.operation
+            "ChannelRunner {}: received event {:?} op={} (direct={})",
+            self.id, event.category, event.operation, is_direct
         );
+
+        // Subscription filter first: drop broadcast events we don't subscribe to.
+        // This runs BEFORE the pause check so unsubscribed events never enter the queue.
+        if !is_direct && !self.subscriptions.contains(&event.category) {
+            debug!(
+                "ChannelRunner {}: skipping {:?} (not subscribed)",
+                self.id, event.category
+            );
+            return true;
+        }
 
         // Queue events while paused
         if is_channel_paused(&self.world, self.id).await {
@@ -392,17 +561,18 @@ impl ChannelRunner {
             return true;
         }
 
-        self.process_event(event).await;
+        self.process_event(event, is_direct).await;
         true
     }
 
     /// Processes a single event by delivering it to the Component.
     ///
-    /// Events whose category does not match any of this runner's
-    /// subscriptions are silently skipped.
-    async fn process_event(&self, event: Event) {
-        // Subscription filter: skip events for categories we don't subscribe to
-        if !self.subscriptions.contains(&event.category) {
+    /// For broadcast events (`is_direct == false`), the subscription filter
+    /// is applied — events whose category is not subscribed are skipped.
+    /// For direct events (`is_direct == true`), the filter is bypassed.
+    async fn process_event(&self, event: Event, is_direct: bool) {
+        // Subscription filter: skip broadcast events for categories we don't subscribe to
+        if !is_direct && !self.subscriptions.contains(&event.category) {
             debug!(
                 "ChannelRunner {}: skipping {:?} (not subscribed)",
                 self.id, event.category
@@ -437,12 +607,15 @@ impl ChannelRunner {
     }
 
     /// Drains the paused queue and processes all queued events.
+    ///
+    /// Queued events have already passed the subscription filter in
+    /// `handle_event()`, so they are processed without re-filtering.
     async fn drain_paused_queue(&mut self) {
         // Collect events first to avoid borrow issues with async process_event
         let events: Vec<_> = self.paused_queue.drain("ChannelRunner", self.id).collect();
 
         for event in events {
-            self.process_event(event).await;
+            self.process_event(event, true).await;
         }
     }
 
@@ -514,7 +687,7 @@ pub struct ChannelRunnerBuilder {
     /// Signal sender for emitter (if enabled).
     emitter_signal_tx: Option<broadcast::Sender<Signal>>,
     /// Output channel for routing Output events to IO channel.
-    output_tx: Option<mpsc::Sender<Event>>,
+    output_tx: Option<OutputSender>,
     /// Enable child spawner.
     enable_child_spawner: bool,
     /// Lua child loader for spawning Lua children.
@@ -576,7 +749,7 @@ impl ChannelRunnerBuilder {
     ///
     /// * `output_tx` - Sender for the IO channel's event_rx
     #[must_use]
-    pub fn with_output_channel(mut self, output_tx: mpsc::Sender<Event>) -> Self {
+    pub fn with_output_channel(mut self, output_tx: OutputSender) -> Self {
         self.output_tx = Some(output_tx);
         self
     }
@@ -673,8 +846,11 @@ impl ChannelRunnerBuilder {
         // Set up emitter if enabled
         if let Some(signal_tx) = &self.emitter_signal_tx {
             let component_id = self.component.id().clone();
-            let mut emitter =
-                EventEmitter::new(event_tx.clone(), signal_tx.clone(), component_id.clone());
+            let mut emitter = EventEmitter::new(
+                OutputSender::new(event_tx.clone()),
+                signal_tx.clone(),
+                component_id.clone(),
+            );
 
             // Route Output events to IO channel if configured
             if let Some(output_tx) = self.output_tx.take() {
@@ -696,12 +872,13 @@ impl ChannelRunnerBuilder {
         // Set up child spawner if enabled
         let child_spawner = if self.enable_child_spawner {
             let component_id = self.component.id().fqn();
-            let spawner = ChildSpawner::new(&component_id, event_tx.clone());
+            let output_sender = OutputSender::new(event_tx.clone());
+            let spawner = ChildSpawner::new(&component_id, output_sender.clone());
             let spawner_arc = Arc::new(StdMutex::new(spawner));
 
             // Create ChildContext and inject into Component
             let mut ctx =
-                ChildContextImpl::new(&component_id, event_tx.clone(), Arc::clone(&spawner_arc));
+                ChildContextImpl::new(&component_id, output_sender, Arc::clone(&spawner_arc));
 
             // Add Lua loader if provided
             if let Some(loader) = self.lua_loader.take() {
@@ -774,10 +951,11 @@ impl ChannelRunnerBuilder {
         } else if self.session.is_some() || self.checker.is_some() || self.grants.is_some() {
             // No child spawner, but auth context is needed for permission-checked orcs.exec()
             let component_id = self.component.id().fqn();
-            let dummy_spawner = ChildSpawner::new(&component_id, event_tx.clone());
+            let dummy_output = OutputSender::new(event_tx.clone());
+            let dummy_spawner = ChildSpawner::new(&component_id, dummy_output.clone());
             let dummy_arc = Arc::new(StdMutex::new(dummy_spawner));
             let mut ctx =
-                ChildContextImpl::new(&component_id, event_tx.clone(), Arc::clone(&dummy_arc));
+                ChildContextImpl::new(&component_id, dummy_output, Arc::clone(&dummy_arc));
 
             if let Some(session) = self.session.take() {
                 ctx = ctx.with_session_arc(session);

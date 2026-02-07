@@ -78,8 +78,9 @@ pub use orcs_types::{
 pub use orcs_runtime::{
     priority, Channel, ChannelConfig, ChannelError, ChannelHandle, ChannelRunner, ChannelState,
     ClientRunner, ComponentHandle, DecoratorConfig, DefaultPolicy, EchoWithHilComponent,
-    EngineError, Event, EventBus, OrcsEngine, PermissionChecker, PrivilegeLevel, Session,
-    StateTransition, World, WorldCommand, WorldCommandSender, WorldManager,
+    EngineError, Event, EventBus, OrcsEngine, OutputReceiver, OutputSender, PermissionChecker,
+    PrivilegeLevel, Session, StateTransition, World, WorldCommand, WorldCommandSender,
+    WorldManager,
 };
 
 // Re-export configuration types

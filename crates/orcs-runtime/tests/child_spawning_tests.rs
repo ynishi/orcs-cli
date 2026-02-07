@@ -12,8 +12,8 @@ use orcs_component::{
 };
 use orcs_event::{EventCategory, Signal, SignalResponse};
 use orcs_runtime::{
-    ChannelConfig, ChannelRunner, ChildContextImpl, ChildSpawner, Event, LuaChildLoader, World,
-    WorldCommand, WorldManager,
+    ChannelConfig, ChannelRunner, ChildContextImpl, ChildSpawner, LuaChildLoader, OutputReceiver,
+    OutputSender, World, WorldCommand, WorldManager,
 };
 use orcs_types::{ComponentId, Principal};
 use serde_json::{json, Value};
@@ -163,8 +163,8 @@ impl LuaChildLoader for TestLoader {
 mod child_spawner_integration {
     use super::*;
 
-    fn setup_spawner() -> (ChildSpawner, mpsc::Receiver<Event>) {
-        let (output_tx, output_rx) = mpsc::channel(64);
+    fn setup_spawner() -> (ChildSpawner, OutputReceiver) {
+        let (output_tx, output_rx) = OutputSender::channel(64);
         let spawner = ChildSpawner::new("test-parent", output_tx);
         (spawner, output_rx)
     }
@@ -266,8 +266,8 @@ mod child_spawner_integration {
 mod child_context_integration {
     use super::*;
 
-    fn setup_context() -> (ChildContextImpl, mpsc::Receiver<Event>) {
-        let (output_tx, output_rx) = mpsc::channel(64);
+    fn setup_context() -> (ChildContextImpl, OutputReceiver) {
+        let (output_tx, output_rx) = OutputSender::channel(64);
 
         let spawner = ChildSpawner::new("parent", output_tx.clone());
         let spawner_arc = Arc::new(Mutex::new(spawner));
@@ -539,7 +539,7 @@ mod e2e_workflow {
     #[test]
     fn complete_child_spawning_workflow() {
         // 1. Create ChildSpawner
-        let (output_tx, mut output_rx) = mpsc::channel(64);
+        let (output_tx, mut output_rx) = OutputSender::channel(64);
         let spawner = ChildSpawner::new("parent-component", output_tx.clone());
         let spawner_arc = Arc::new(Mutex::new(spawner));
 
@@ -581,7 +581,7 @@ mod e2e_workflow {
 
     #[test]
     fn nested_child_spawning() {
-        let (output_tx, _) = mpsc::channel(64);
+        let (output_tx, _) = OutputSender::channel(64);
 
         // Parent spawner
         let parent_spawner = ChildSpawner::new("root", output_tx.clone());
