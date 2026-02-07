@@ -83,6 +83,117 @@ pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    // ─── Mock SandboxPolicy ─────────────────────────────────────────
+
+    /// In-memory mock for contract testing.
+    #[derive(Debug)]
+    struct MockSandbox {
+        root: PathBuf,
+        allowed: Vec<String>,
+    }
+
+    impl MockSandbox {
+        fn new(root: &str, allowed: &[&str]) -> Self {
+            Self {
+                root: PathBuf::from(root),
+                allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+    }
+
+    impl SandboxPolicy for MockSandbox {
+        fn project_root(&self) -> &Path {
+            &self.root
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn validate_read(&self, path: &str) -> Result<PathBuf, SandboxError> {
+            if self.allowed.iter().any(|a| path.starts_with(a.as_str())) {
+                Ok(self.root.join(path))
+            } else {
+                Err(SandboxError::OutsideBoundary {
+                    path: path.to_string(),
+                    root: self.root.display().to_string(),
+                })
+            }
+        }
+
+        fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError> {
+            if self.allowed.iter().any(|a| path.starts_with(a.as_str())) {
+                Ok(self.root.join(path))
+            } else {
+                Err(SandboxError::OutsideBoundary {
+                    path: path.to_string(),
+                    root: self.root.display().to_string(),
+                })
+            }
+        }
+    }
+
+    // ─── Contract Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn mock_impl_satisfies_trait() {
+        let sandbox = MockSandbox::new("/project", &["src/", "tests/"]);
+        assert_eq!(sandbox.root(), Path::new("/project"));
+        assert_eq!(sandbox.project_root(), Path::new("/project"));
+    }
+
+    #[test]
+    fn validate_read_allowed_returns_ok() {
+        let sandbox = MockSandbox::new("/project", &["src/"]);
+        assert!(sandbox.validate_read("src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn validate_read_denied_returns_outside_boundary() {
+        let sandbox = MockSandbox::new("/project", &["src/"]);
+        let err = sandbox.validate_read("/etc/passwd").unwrap_err();
+        assert!(matches!(err, SandboxError::OutsideBoundary { .. }));
+    }
+
+    #[test]
+    fn validate_write_allowed_returns_ok() {
+        let sandbox = MockSandbox::new("/project", &["src/"]);
+        assert!(sandbox.validate_write("src/new.rs").is_ok());
+    }
+
+    #[test]
+    fn validate_write_denied_returns_outside_boundary() {
+        let sandbox = MockSandbox::new("/project", &["src/"]);
+        let err = sandbox.validate_write("/tmp/evil.txt").unwrap_err();
+        assert!(matches!(err, SandboxError::OutsideBoundary { .. }));
+    }
+
+    #[test]
+    fn trait_object_box_dyn() {
+        let sandbox: Box<dyn SandboxPolicy> = Box::new(MockSandbox::new("/project", &["src/"]));
+        assert_eq!(sandbox.root(), Path::new("/project"));
+        assert!(sandbox.validate_read("src/main.rs").is_ok());
+        assert!(sandbox.validate_read("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn trait_object_arc_dyn() {
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(MockSandbox::new("/project", &["src/"]));
+        let clone = Arc::clone(&sandbox);
+        assert!(sandbox.validate_read("src/lib.rs").is_ok());
+        assert!(clone.validate_write("src/new.rs").is_ok());
+    }
+
+    #[test]
+    fn debug_impl_required() {
+        let sandbox = MockSandbox::new("/project", &[]);
+        let debug = format!("{:?}", sandbox);
+        assert!(debug.contains("MockSandbox"), "got: {debug}");
+    }
+
+    // ─── SandboxError Display Tests ─────────────────────────────────
 
     #[test]
     fn outside_boundary_display() {

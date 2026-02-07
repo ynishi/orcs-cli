@@ -296,13 +296,8 @@ impl PermissionChecker for DefaultPolicy {
             return CommandCheckResult::Allowed;
         }
 
-        // Step 2: Elevated sessions can execute anything
-        if session.is_elevated() {
-            tracing::debug!(
-                principal = ?session.principal(),
-                cmd = cmd,
-                "command allowed: elevated session"
-            );
+        // Step 2: Delegate to can_execute_command (elevation check + audit logging)
+        if self.can_execute_command(session, cmd) {
             return CommandCheckResult::Allowed;
         }
 
