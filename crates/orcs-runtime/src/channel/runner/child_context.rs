@@ -859,7 +859,7 @@ mod tests {
         #[test]
         fn check_command_elevated_allows_any() {
             let (ctx, _) = setup_with_auth(true); // Elevated
-            // Safety is enforced by OS sandbox, not command blocking
+                                                  // Safety is enforced by OS sandbox, not command blocking
             let result = ctx.check_command("rm -rf /");
             assert!(result.is_allowed());
         }

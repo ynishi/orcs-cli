@@ -258,7 +258,7 @@ impl LuaComponent {
             Self::register_child_context_functions(
                 &lua,
                 Arc::clone(ctx),
-                self.sandbox.root().to_path_buf(),
+                Arc::clone(&self.sandbox),
             )?;
         }
 
@@ -298,11 +298,9 @@ impl LuaComponent {
 
         // Register child context functions in Lua
         if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = Self::register_child_context_functions(
-                &lua,
-                ctx_arc,
-                self.sandbox.root().to_path_buf(),
-            ) {
+            if let Err(e) =
+                Self::register_child_context_functions(&lua, ctx_arc, Arc::clone(&self.sandbox))
+            {
                 tracing::warn!("Failed to register child context functions: {}", e);
             }
         }
@@ -310,7 +308,8 @@ impl LuaComponent {
 
     /// Registers child context functions in Lua's orcs table.
     ///
-    /// Adds:
+    /// Overrides file tools with capability-checked versions and adds:
+    /// - `orcs.read/write/grep/glob/mkdir/remove/mv` - Capability-gated file tools
     /// - `orcs.exec(cmd)` - Execute shell command (permission-checked, cwd = sandbox root)
     /// - `orcs.llm(prompt)` - Call LLM (capability-checked, cwd = sandbox root)
     /// - `orcs.check_command(cmd)` - Check command permission without executing
@@ -321,9 +320,13 @@ impl LuaComponent {
     fn register_child_context_functions(
         lua: &Lua,
         ctx: Arc<Mutex<Box<dyn ChildContext>>>,
-        sandbox_root: std::path::PathBuf,
+        sandbox: Arc<dyn SandboxPolicy>,
     ) -> Result<(), LuaError> {
         let orcs_table: Table = lua.globals().get("orcs")?;
+        let sandbox_root = sandbox.root().to_path_buf();
+
+        // ── Override file tools with capability-gated versions ──────────
+        Self::register_capability_gated_tools(lua, &orcs_table, &ctx, &sandbox)?;
 
         // Override orcs.exec with permission-checked version
         // This replaces the basic exec from register_orcs_functions
@@ -429,10 +432,7 @@ impl LuaComponent {
                         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                         result.set("ok", false)?;
-                        result.set(
-                            "error",
-                            if stderr.is_empty() { stdout } else { stderr },
-                        )?;
+                        result.set("error", if stderr.is_empty() { stdout } else { stderr })?;
                     }
                     Err(e) => {
                         result.set("ok", false)?;
@@ -658,6 +658,240 @@ impl LuaComponent {
         tracing::debug!(
             "Registered orcs.spawn_child, child_count, max_children, send_to_child, spawn_runner functions"
         );
+        Ok(())
+    }
+
+    /// Overrides file tools with capability-gated versions.
+    ///
+    /// Capability mapping:
+    /// - `READ`   → `orcs.read`, `orcs.grep`, `orcs.glob`
+    /// - `WRITE`  → `orcs.write`, `orcs.mkdir`
+    /// - `DELETE` → `orcs.remove`, `orcs.mv`
+    fn register_capability_gated_tools(
+        lua: &Lua,
+        orcs_table: &Table,
+        ctx: &Arc<Mutex<Box<dyn ChildContext>>>,
+        sandbox: &Arc<dyn SandboxPolicy>,
+    ) -> Result<(), LuaError> {
+        use crate::tools::{
+            tool_glob, tool_grep, tool_mkdir, tool_mv, tool_read, tool_remove, tool_write,
+        };
+        use orcs_component::Capability;
+
+        // Helper: deny result for missing capability
+        fn cap_denied(lua: &Lua, cap_name: &str) -> mlua::Result<Table> {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set(
+                "error",
+                format!("permission denied: Capability::{cap_name} not granted"),
+            )?;
+            Ok(result)
+        }
+
+        // orcs.read — requires READ
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, path: String| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::READ) {
+                    return cap_denied(lua, "READ");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_read(&path, sb.as_ref()) {
+                    Ok((content, size)) => {
+                        result.set("ok", true)?;
+                        result.set("content", content)?;
+                        result.set("size", size)?;
+                    }
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("read", f)?;
+        }
+
+        // orcs.write — requires WRITE
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, (path, content): (String, String)| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::WRITE) {
+                    return cap_denied(lua, "WRITE");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_write(&path, &content, sb.as_ref()) {
+                    Ok(bytes) => {
+                        result.set("ok", true)?;
+                        result.set("bytes_written", bytes)?;
+                    }
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("write", f)?;
+        }
+
+        // orcs.grep — requires READ
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, (pattern, path): (String, String)| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::READ) {
+                    return cap_denied(lua, "READ");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_grep(&pattern, &path, sb.as_ref()) {
+                    Ok(grep_matches) => {
+                        let matches_table = lua.create_table()?;
+                        for (i, m) in grep_matches.iter().enumerate() {
+                            let entry = lua.create_table()?;
+                            entry.set("line_number", m.line_number)?;
+                            entry.set("line", m.line.as_str())?;
+                            matches_table.set(i + 1, entry)?;
+                        }
+                        result.set("ok", true)?;
+                        result.set("matches", matches_table)?;
+                        result.set("count", grep_matches.len())?;
+                    }
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("grep", f)?;
+        }
+
+        // orcs.glob — requires READ
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, (pattern, dir): (String, Option<String>)| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::READ) {
+                    return cap_denied(lua, "READ");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_glob(&pattern, dir.as_deref(), sb.as_ref()) {
+                    Ok(files) => {
+                        let files_table = lua.create_table()?;
+                        for (i, f) in files.iter().enumerate() {
+                            files_table.set(i + 1, f.as_str())?;
+                        }
+                        result.set("ok", true)?;
+                        result.set("files", files_table)?;
+                        result.set("count", files.len())?;
+                    }
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("glob", f)?;
+        }
+
+        // orcs.mkdir — requires WRITE
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, path: String| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::WRITE) {
+                    return cap_denied(lua, "WRITE");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_mkdir(&path, sb.as_ref()) {
+                    Ok(()) => result.set("ok", true)?,
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("mkdir", f)?;
+        }
+
+        // orcs.remove — requires DELETE
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, path: String| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                if !g.has_capability(Capability::DELETE) {
+                    return cap_denied(lua, "DELETE");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_remove(&path, sb.as_ref()) {
+                    Ok(()) => result.set("ok", true)?,
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("remove", f)?;
+        }
+
+        // orcs.mv — requires DELETE (source removed) + WRITE (dest created)
+        {
+            let ctx_c = Arc::clone(ctx);
+            let sb = Arc::clone(sandbox);
+            let f = lua.create_function(move |lua, (src, dst): (String, String)| {
+                let g = ctx_c
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                let needs = Capability::DELETE | Capability::WRITE;
+                if !g.capabilities().contains(needs) {
+                    return cap_denied(lua, "DELETE | WRITE");
+                }
+                drop(g);
+                let result = lua.create_table()?;
+                match tool_mv(&src, &dst, sb.as_ref()) {
+                    Ok(()) => result.set("ok", true)?,
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", e)?;
+                    }
+                }
+                Ok(result)
+            })?;
+            orcs_table.set("mv", f)?;
+        }
+
+        tracing::debug!("Overrode file tools with capability-gated versions");
         Ok(())
     }
 
@@ -902,11 +1136,9 @@ impl Component for LuaComponent {
 
         // Register child context functions in Lua
         if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = Self::register_child_context_functions(
-                &lua,
-                ctx_arc,
-                self.sandbox.root().to_path_buf(),
-            ) {
+            if let Err(e) =
+                Self::register_child_context_functions(&lua, ctx_arc, Arc::clone(&self.sandbox))
+            {
                 tracing::warn!("Failed to register child context functions: {}", e);
             }
         }

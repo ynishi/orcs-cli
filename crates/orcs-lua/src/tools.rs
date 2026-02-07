@@ -31,7 +31,7 @@ use std::sync::Arc;
 // ─── Rust Tool Implementations ──────────────────────────────────────────
 
 /// Reads a file and returns its contents.
-fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), String> {
+pub(crate) fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), String> {
     let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
 
     let metadata =
@@ -53,7 +53,11 @@ fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), S
 /// Uses [`tempfile::NamedTempFile`] to create a temp file with an
 /// unpredictable name in the same directory as the target. This prevents
 /// symlink attacks on predictable temp file paths.
-fn tool_write(path: &str, content: &str, sandbox: &dyn SandboxPolicy) -> Result<usize, String> {
+pub(crate) fn tool_write(
+    path: &str,
+    content: &str,
+    sandbox: &dyn SandboxPolicy,
+) -> Result<usize, String> {
     let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
 
     // Ensure parent directory exists
@@ -81,9 +85,9 @@ fn tool_write(path: &str, content: &str, sandbox: &dyn SandboxPolicy) -> Result<
 
 /// Represents a single grep match.
 #[derive(Debug)]
-struct GrepMatch {
-    line_number: usize,
-    line: String,
+pub(crate) struct GrepMatch {
+    pub(crate) line_number: usize,
+    pub(crate) line: String,
 }
 
 /// Maximum directory recursion depth for grep.
@@ -98,7 +102,7 @@ const MAX_GREP_MATCHES: usize = 10_000;
 /// boundary to prevent recursive traversal from escaping the sandbox.
 /// Recursion is limited to [`MAX_GREP_DEPTH`] levels and results are
 /// capped at [`MAX_GREP_MATCHES`] entries.
-fn tool_grep(
+pub(crate) fn tool_grep(
     pattern: &str,
     path: &str,
     sandbox: &dyn SandboxPolicy,
@@ -213,7 +217,7 @@ fn grep_dir(
 ///
 /// Rejects patterns containing `..` to prevent scanning outside the sandbox
 /// (even though results are filtered, directory traversal is observable via timing).
-fn tool_glob(
+pub(crate) fn tool_glob(
     pattern: &str,
     dir: Option<&str>,
     sandbox: &dyn SandboxPolicy,
@@ -257,7 +261,7 @@ fn tool_glob(
 /// Creates a directory (and all parents) under the sandbox.
 ///
 /// The path is validated via `sandbox.validate_write()` before creation.
-fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+pub(crate) fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&target).map_err(|e| format!("mkdir failed: {path} ({e})"))
 }
@@ -266,7 +270,7 @@ fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
 ///
 /// Uses `remove_file` for files and `remove_dir_all` for directories.
 /// Validated via `validate_write()` (destructive) + `validate_read()` (symlink resolution).
-fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     // Destructive operation: check write boundary
     sandbox.validate_write(path).map_err(|e| e.to_string())?;
     // Canonicalize + existence check via validate_read
@@ -285,7 +289,7 @@ fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
 ///
 /// Both source and destination are validated through the sandbox.
 /// Creates destination parent directories if they don't exist.
-fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+pub(crate) fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     let src_canonical = sandbox.validate_read(src).map_err(|e| e.to_string())?;
     let dst_target = sandbox.validate_write(dst).map_err(|e| e.to_string())?;
 

@@ -5,10 +5,14 @@
 //! Note: LuaTestHarness internally calls register_tool_functions which
 //! captures cwd as the sandbox root. All temp files must be under cwd.
 
-use orcs_component::EventCategory;
+use orcs_component::{
+    Capability, ChildConfig, ChildContext, ChildHandle, ChildResult, CommandPermission,
+    EventCategory, RunError, SpawnError,
+};
 use orcs_lua::testing::LuaTestHarness;
 use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
-use serde_json::json;
+use orcs_types::ChannelId;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -355,4 +359,214 @@ fn write_then_grep() {
     let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
     let result = h.request(EventCategory::Echo, "test", json!(null)).unwrap();
     assert_eq!(result["count"], 2);
+}
+
+// ─── Capability-gated file tools ────────────────────────────────────
+
+/// Minimal mock ChildContext with configurable capabilities.
+#[derive(Debug, Clone)]
+struct CapMockContext {
+    caps: Capability,
+}
+
+impl CapMockContext {
+    fn with_caps(caps: Capability) -> Box<dyn ChildContext> {
+        Box::new(Self { caps })
+    }
+}
+
+impl ChildContext for CapMockContext {
+    fn parent_id(&self) -> &str {
+        "cap-test"
+    }
+    fn emit_output(&self, _msg: &str) {}
+    fn emit_output_with_level(&self, _msg: &str, _level: &str) {}
+    fn child_count(&self) -> usize {
+        0
+    }
+    fn max_children(&self) -> usize {
+        0
+    }
+    fn spawn_child(&self, _config: ChildConfig) -> Result<Box<dyn ChildHandle>, SpawnError> {
+        Err(SpawnError::Internal("not supported".into()))
+    }
+    fn send_to_child(&self, _id: &str, _input: Value) -> Result<ChildResult, RunError> {
+        Err(RunError::NotFound("not supported".into()))
+    }
+    fn capabilities(&self) -> Capability {
+        self.caps
+    }
+    fn check_command_permission(&self, _cmd: &str) -> CommandPermission {
+        CommandPermission::Denied("not supported".into())
+    }
+    fn can_execute_command(&self, _cmd: &str) -> bool {
+        false
+    }
+    fn can_spawn_child_auth(&self) -> bool {
+        false
+    }
+    fn can_spawn_runner_auth(&self) -> bool {
+        false
+    }
+    fn grant_command(&self, _pattern: &str) {}
+    fn spawn_runner_from_script(
+        &self,
+        _script: &str,
+        _id: Option<&str>,
+    ) -> Result<ChannelId, SpawnError> {
+        Err(SpawnError::Internal("not supported".into()))
+    }
+    fn clone_box(&self) -> Box<dyn ChildContext> {
+        Box::new(self.clone())
+    }
+}
+
+mod capability_gating {
+    use super::*;
+
+    /// Lua script that tries read/write/remove and returns results.
+    fn cap_test_script(file_path: &str) -> String {
+        format!(
+            r#"
+            return {{
+                id = "cap-test",
+                subscriptions = {{"Echo"}},
+                on_request = function(req)
+                    if req.operation == "read" then
+                        local r = orcs.read("{path}")
+                        return {{ success = r.ok, data = {{ content = r.content, error = r.error }} }}
+                    elseif req.operation == "write" then
+                        local r = orcs.write("{path}", "written by test")
+                        return {{ success = r.ok, data = {{ bytes = r.bytes_written, error = r.error }} }}
+                    elseif req.operation == "remove" then
+                        local r = orcs.remove("{path}")
+                        return {{ success = r.ok, data = {{ error = r.error }} }}
+                    end
+                    return {{ success = false, error = "unknown op" }}
+                end,
+                on_signal = function(sig) return "Ignored" end,
+            }}
+            "#,
+            path = file_path
+        )
+    }
+
+    #[test]
+    fn read_allowed_with_read_capability() {
+        let dir = tempdir();
+        let file = dir.join("cap_read.txt");
+        fs::write(&file, "cap-gated content").unwrap();
+
+        let script = cap_test_script(&escape_path(&file));
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+
+        // Set ChildContext with READ capability
+        h.component_mut()
+            .set_child_context(CapMockContext::with_caps(Capability::ALL));
+
+        let result = h.request(EventCategory::Echo, "read", json!(null)).unwrap();
+        assert_eq!(result["content"], "cap-gated content");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_denied_without_read_capability() {
+        let dir = tempdir();
+        let file = dir.join("cap_read_deny.txt");
+        fs::write(&file, "should not read").unwrap();
+
+        let script = cap_test_script(&escape_path(&file));
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+
+        // Set ChildContext with WRITE only (no READ)
+        h.component_mut()
+            .set_child_context(CapMockContext::with_caps(Capability::WRITE));
+
+        let result = h.request(EventCategory::Echo, "read", json!(null));
+        // Request succeeds (Lua returns success=false), so check inner data
+        assert!(
+            result.is_err() || {
+                let v = result.unwrap();
+                let err = v["error"].as_str().unwrap_or("");
+                err.contains("Capability::READ")
+            }
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_denied_without_write_capability() {
+        let dir = tempdir();
+        let file = dir.join("cap_write_deny.txt");
+
+        let script = cap_test_script(&escape_path(&file));
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+
+        // Set ChildContext with READ only (no WRITE)
+        h.component_mut()
+            .set_child_context(CapMockContext::with_caps(Capability::READ));
+
+        let result = h.request(EventCategory::Echo, "write", json!(null));
+        assert!(
+            result.is_err() || {
+                let v = result.unwrap();
+                let err = v["error"].as_str().unwrap_or("");
+                err.contains("Capability::WRITE")
+            }
+        );
+
+        // File should NOT have been created
+        assert!(!file.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_denied_without_delete_capability() {
+        let dir = tempdir();
+        let file = dir.join("cap_remove_deny.txt");
+        fs::write(&file, "should survive").unwrap();
+
+        let script = cap_test_script(&escape_path(&file));
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+
+        // Set ChildContext with READ | WRITE (no DELETE)
+        h.component_mut()
+            .set_child_context(CapMockContext::with_caps(
+                Capability::READ | Capability::WRITE,
+            ));
+
+        let result = h.request(EventCategory::Echo, "remove", json!(null));
+        assert!(
+            result.is_err() || {
+                let v = result.unwrap();
+                let err = v["error"].as_str().unwrap_or("");
+                err.contains("Capability::DELETE")
+            }
+        );
+
+        // File should still exist
+        assert!(file.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn without_child_context_read_works_sandbox_only() {
+        // Without ChildContext, base tools (sandbox-only) are used
+        let dir = tempdir();
+        let file = dir.join("no_ctx_read.txt");
+        fs::write(&file, "sandbox only").unwrap();
+
+        let script = cap_test_script(&escape_path(&file));
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+
+        // No set_child_context — base tools active
+        let result = h.request(EventCategory::Echo, "read", json!(null)).unwrap();
+        assert_eq!(result["content"], "sandbox only");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

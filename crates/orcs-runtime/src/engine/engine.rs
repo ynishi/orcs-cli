@@ -1109,10 +1109,7 @@ mod tests {
 
         // Should receive the signal
         let received = rx.recv().await.expect("receive signal");
-        assert!(matches!(
-            received.kind,
-            orcs_event::SignalKind::Cancel
-        ));
+        assert!(matches!(received.kind, orcs_event::SignalKind::Cancel));
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
