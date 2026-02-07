@@ -41,7 +41,7 @@ end
 return {
     id = "shell",
     namespace = "builtin",
-    subscriptions = {"UserInput"},
+    subscriptions = {"Echo"},
 
     on_request = function(request)
         local cmd = request.payload
