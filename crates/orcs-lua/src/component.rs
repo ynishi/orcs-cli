@@ -952,6 +952,9 @@ impl LuaComponent {
         })?;
         orcs_table.set("output_with_level", output_level_noop_fn)?;
 
+        // orcs.pwd - sandbox root as string
+        orcs_table.set("pwd", sandbox.root().display().to_string())?;
+
         lua.globals().set("orcs", orcs_table)?;
 
         // Register native Rust tools (read, write, grep, glob)

@@ -680,6 +680,7 @@ impl OrcsAppBuilder {
         let subagent_channel = world.create_channel(ChannelConfig::default());
         let agent_mgr_channel = world.create_channel(ChannelConfig::default());
         let shell_channel = world.create_channel(ChannelConfig::default());
+        let tool_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -769,6 +770,27 @@ impl OrcsAppBuilder {
             shell_id.fqn()
         );
 
+        // Spawn ChannelRunner for tool component (file tool verification)
+        // Uses auth so ChildContext is set → Capability gating is active
+        let tool_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+        let tool_component = ScriptLoader::load_embedded("tool", Arc::clone(&sandbox))
+            .map_err(|e| AppError::Config(format!("Failed to load tool script: {e}")))?;
+        let tool_id = tool_component.id().clone();
+        let _tool_handle = engine.spawn_runner_full_auth(
+            tool_channel,
+            Box::new(tool_component),
+            Some(io_event_tx.clone()),
+            None,
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
+            tool_grants,
+        );
+        tracing::info!(
+            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
+            tool_channel,
+            tool_id.fqn()
+        );
+
         // Spawn ChannelRunner for agent_mgr with child spawning enabled
         let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr", Arc::clone(&sandbox))
             .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
@@ -814,6 +836,7 @@ impl OrcsAppBuilder {
         component_routes.insert("claude_cli".to_string(), claude_channel);
         component_routes.insert("subagent".to_string(), subagent_channel);
         component_routes.insert("shell".to_string(), shell_channel);
+        component_routes.insert("tool".to_string(), tool_channel);
         component_routes.insert("agent_mgr".to_string(), agent_mgr_channel);
         tracing::info!(
             "Component routes registered: {:?}",
