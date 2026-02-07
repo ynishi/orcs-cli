@@ -160,7 +160,7 @@ pub fn register_base_orcs_functions(
     crate::tools::register_tool_functions(lua, Arc::clone(&sandbox))?;
 
     // Register dispatch and tool_schemas
-    crate::tool_registry::register_dispatch_functions(lua, sandbox)?;
+    crate::tool_registry::register_dispatch_functions(lua)?;
 
     // Disable dangerous Lua stdlib functions
     sandbox_lua_globals(lua)?;

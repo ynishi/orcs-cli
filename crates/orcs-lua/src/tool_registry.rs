@@ -24,10 +24,7 @@
 //! ```
 
 use crate::error::LuaError;
-use crate::tools;
 use mlua::{Lua, Table};
-use orcs_runtime::sandbox::SandboxPolicy;
-use std::sync::Arc;
 
 /// Argument type for tool schema definitions.
 #[derive(Debug, Clone, Copy)]
@@ -211,110 +208,63 @@ pub fn generate_descriptions() -> String {
 
 /// Dispatches a tool call by name with validated arguments.
 ///
-/// Returns a unified result table: `{ok, ...data}` or `{ok=false, error}`.
-fn dispatch_tool(
-    lua: &Lua,
-    name: &str,
-    args: &Table,
-    sandbox: &dyn SandboxPolicy,
-) -> mlua::Result<Table> {
-    let result = lua.create_table()?;
+/// Delegates to the registered `orcs.*` Lua functions, which may be
+/// the base sandbox-only versions or capability-gated overrides.
+/// This ensures dispatch respects the same permission checks as direct calls.
+fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
+    let orcs: Table = lua.globals().get("orcs")?;
 
     match name {
         "read" => {
             let path: String = get_required_arg(args, "path")?;
-            match tools::tool_read(&path, sandbox) {
-                Ok((content, size)) => {
-                    result.set("ok", true)?;
-                    result.set("content", content)?;
-                    result.set("size", size)?;
-                }
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("read")?;
+            f.call(path)
         }
         "write" => {
             let path: String = get_required_arg(args, "path")?;
             let content: String = get_required_arg(args, "content")?;
-            match tools::tool_write(&path, &content, sandbox) {
-                Ok(bytes) => {
-                    result.set("ok", true)?;
-                    result.set("bytes_written", bytes)?;
-                }
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("write")?;
+            f.call((path, content))
         }
         "grep" => {
             let pattern: String = get_required_arg(args, "pattern")?;
             let path: String = get_required_arg(args, "path")?;
-            match tools::tool_grep(&pattern, &path, sandbox) {
-                Ok(matches) => {
-                    let matches_table = lua.create_table()?;
-                    for (i, m) in matches.iter().enumerate() {
-                        let entry = lua.create_table()?;
-                        entry.set("line_number", m.line_number)?;
-                        entry.set("line", m.line.as_str())?;
-                        matches_table.set(i + 1, entry)?;
-                    }
-                    result.set("ok", true)?;
-                    result.set("matches", matches_table)?;
-                    result.set("count", matches.len())?;
-                }
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("grep")?;
+            f.call((pattern, path))
         }
         "glob" => {
             let pattern: String = get_required_arg(args, "pattern")?;
             let dir: Option<String> = args.get("dir").ok();
-            match tools::tool_glob(&pattern, dir.as_deref(), sandbox) {
-                Ok(files) => {
-                    let files_table = lua.create_table()?;
-                    for (i, f) in files.iter().enumerate() {
-                        files_table.set(i + 1, f.as_str())?;
-                    }
-                    result.set("ok", true)?;
-                    result.set("files", files_table)?;
-                    result.set("count", files.len())?;
-                }
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("glob")?;
+            f.call((pattern, dir))
         }
         "mkdir" => {
             let path: String = get_required_arg(args, "path")?;
-            match tools::tool_mkdir(&path, sandbox) {
-                Ok(()) => result.set("ok", true)?,
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("mkdir")?;
+            f.call(path)
         }
         "remove" => {
             let path: String = get_required_arg(args, "path")?;
-            match tools::tool_remove(&path, sandbox) {
-                Ok(()) => result.set("ok", true)?,
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("remove")?;
+            f.call(path)
         }
         "mv" => {
             let src: String = get_required_arg(args, "src")?;
             let dst: String = get_required_arg(args, "dst")?;
-            match tools::tool_mv(&src, &dst, sandbox) {
-                Ok(()) => result.set("ok", true)?,
-                Err(e) => set_error(&result, &e)?,
-            }
+            let f: mlua::Function = orcs.get("mv")?;
+            f.call((src, dst))
         }
         "exec" => {
-            // exec via dispatch always calls orcs.exec (which may be the deny-stub
-            // or the permission-checked version, depending on ChildContext).
-            // We delegate to the registered orcs.exec function.
             let cmd: String = get_required_arg(args, "cmd")?;
-            let orcs: Table = lua.globals().get("orcs")?;
-            let exec_fn: mlua::Function = orcs.get("exec")?;
-            return exec_fn.call(cmd);
+            let f: mlua::Function = orcs.get("exec")?;
+            f.call(cmd)
         }
         _ => {
+            let result = lua.create_table()?;
             set_error(&result, &format!("unknown tool: {name}"))?;
+            Ok(result)
         }
     }
-
-    Ok(result)
 }
 
 /// Extracts a required string argument from the args table.
@@ -335,18 +285,14 @@ fn set_error(result: &Table, msg: &str) -> mlua::Result<()> {
 /// - `orcs.dispatch(name, args)` — unified tool dispatcher
 /// - `orcs.tool_schemas()` — returns structured tool definitions as Lua table
 ///
-/// These replace the need for agents to maintain their own dispatch tables.
-pub fn register_dispatch_functions(
-    lua: &Lua,
-    sandbox: Arc<dyn SandboxPolicy>,
-) -> Result<(), LuaError> {
+/// `dispatch` delegates to the registered `orcs.*` functions, so it
+/// automatically respects capability gating if overrides are installed.
+pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
     let orcs_table: Table = lua.globals().get("orcs")?;
 
     // orcs.dispatch(name, args) -> result table
-    let sb = Arc::clone(&sandbox);
-    let dispatch_fn = lua.create_function(move |lua, (name, args): (String, Table)| {
-        dispatch_tool(lua, &name, &args, sb.as_ref())
-    })?;
+    let dispatch_fn =
+        lua.create_function(|lua, (name, args): (String, Table)| dispatch_tool(lua, &name, &args))?;
     orcs_table.set("dispatch", dispatch_fn)?;
 
     // orcs.tool_schemas() -> table of tool schemas
@@ -389,9 +335,10 @@ pub fn register_dispatch_functions(
 mod tests {
     use super::*;
     use crate::orcs_helpers::register_base_orcs_functions;
-    use orcs_runtime::sandbox::ProjectSandbox;
+    use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn test_sandbox() -> (PathBuf, Arc<dyn SandboxPolicy>) {
         let dir = tempdir();
@@ -414,8 +361,7 @@ mod tests {
 
     fn setup_lua(sandbox: Arc<dyn SandboxPolicy>) -> Lua {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, Arc::clone(&sandbox)).unwrap();
-        register_dispatch_functions(&lua, sandbox).unwrap();
+        register_base_orcs_functions(&lua, sandbox).unwrap();
         lua
     }
 
