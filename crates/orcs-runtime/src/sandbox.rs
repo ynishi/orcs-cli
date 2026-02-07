@@ -22,6 +22,19 @@
 //!
 //! All paths are canonicalized to prevent symlink/traversal escapes.
 //! Writes validate the deepest existing ancestor for new-file creation.
+//!
+//! ## Known Limitations
+//!
+//! `validate_write` performs a check-then-use sequence on the filesystem.
+//! Between the boundary check and the actual I/O, an attacker with local
+//! access could swap a directory for a symlink (TOCTOU race). In practice
+//! this is mitigated by:
+//!
+//! 1. Running inside a Docker/OS-level sandbox (primary security boundary)
+//! 2. Returning a canonicalized path so callers never follow un-resolved symlinks
+//!
+//! For environments without OS-level sandboxing, consider `openat(2)`-based
+//! path resolution for stronger guarantees.
 
 // Re-export trait and error from orcs-auth for backward compatibility
 pub use orcs_auth::{SandboxError, SandboxPolicy};
@@ -142,16 +155,23 @@ impl SandboxPolicy for ProjectSandbox {
         let mut ancestor = absolute.as_path();
         loop {
             if ancestor.exists() {
-                let canonical = ancestor.canonicalize().map_err(|e| {
+                let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
                     SandboxError::Init(format!("path resolution failed: {path} ({e})"))
                 })?;
-                if !canonical.starts_with(&self.permissive_root) {
+                if !canonical_ancestor.starts_with(&self.permissive_root) {
                     return Err(SandboxError::OutsideBoundary {
                         path: path.to_string(),
                         root: self.permissive_root.display().to_string(),
                     });
                 }
-                return Ok(absolute);
+                // Return canonicalized ancestor + remaining non-existent suffix.
+                // This prevents callers from following symlinks in the
+                // un-resolved portion of the path.
+                let suffix = absolute.strip_prefix(ancestor).unwrap_or(Path::new(""));
+                if suffix.as_os_str().is_empty() {
+                    return Ok(canonical_ancestor);
+                }
+                return Ok(canonical_ancestor.join(suffix));
             }
             match ancestor.parent() {
                 Some(p) if !p.as_os_str().is_empty() => ancestor = p,
@@ -362,5 +382,67 @@ mod tests {
 
         assert!(policy.validate_read("arc_test.txt").is_ok());
         assert!(clone.validate_write("new.txt").is_ok());
+    }
+
+    // ─── Symlink Attack Tests ───────────────────────────────────────
+
+    #[cfg(unix)]
+    mod symlink_tests {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        #[test]
+        fn read_rejects_symlink_escape() {
+            let (tmp, sandbox) = test_sandbox();
+            symlink("/etc/hosts", tmp.path().join("evil_link")).unwrap();
+
+            let result = sandbox.validate_read("evil_link");
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().to_string().contains("access denied"),
+                "symlink to /etc/hosts should be rejected"
+            );
+        }
+
+        #[test]
+        fn write_rejects_symlink_parent_escape() {
+            let (tmp, sandbox) = test_sandbox();
+            let outside = tempfile::tempdir().unwrap();
+            symlink(outside.path(), tmp.path().join("escape_dir")).unwrap();
+
+            let result = sandbox.validate_write("escape_dir/evil.txt");
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().to_string().contains("access denied"),
+                "symlink directory escape should be rejected"
+            );
+        }
+
+        #[test]
+        fn read_allows_symlink_within_sandbox() {
+            let (tmp, sandbox) = test_sandbox();
+            let real = tmp.path().join("real.txt");
+            fs::write(&real, "ok").unwrap();
+            symlink(&real, tmp.path().join("good_link")).unwrap();
+
+            let result = sandbox.validate_read("good_link");
+            assert!(result.is_ok(), "symlink within sandbox should be allowed");
+        }
+
+        #[test]
+        fn scoped_read_rejects_symlink_to_parent() {
+            let (tmp, sandbox) = test_sandbox();
+            let sub = tmp.path().join("sub");
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(tmp.path().join("secret.txt"), "secret").unwrap();
+            symlink(tmp.path().join("secret.txt"), sub.join("link_to_parent")).unwrap();
+
+            let scoped = sandbox.scoped("sub").unwrap();
+            let result = scoped.validate_read("link_to_parent");
+            assert!(
+                result.is_err(),
+                "symlink escaping scoped sandbox should be rejected"
+            );
+        }
     }
 }

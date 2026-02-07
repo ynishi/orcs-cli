@@ -49,31 +49,32 @@ fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), S
 }
 
 /// Writes content to a file atomically (write to temp, then rename).
+///
+/// Uses [`tempfile::NamedTempFile`] to create a temp file with an
+/// unpredictable name in the same directory as the target. This prevents
+/// symlink attacks on predictable temp file paths.
 fn tool_write(path: &str, content: &str, sandbox: &dyn SandboxPolicy) -> Result<usize, String> {
     let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
 
     // Ensure parent directory exists
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create parent directory: {e}"))?;
-    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("cannot determine parent directory: {path}"))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("cannot create parent directory: {e}"))?;
 
     let bytes = content.len();
 
-    // Atomic write: write to temp file with unique name, then rename
-    let temp_name = format!(
-        ".orcs-tmp-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    );
-    let temp_path = target.with_file_name(temp_name);
-    std::fs::write(&temp_path, content).map_err(|e| format!("write failed: {path} ({e})"))?;
+    // Atomic write: create temp file in the same (validated) directory, then persist.
+    // parent is derived from validate_write() output, so it is within the sandbox.
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("temp file creation failed: {path} ({e})"))?;
 
-    std::fs::rename(&temp_path, &target).map_err(|e| {
-        // Clean up temp file on rename failure
-        let _ = std::fs::remove_file(&temp_path);
-        format!("rename failed: {path} ({e})")
-    })?;
+    use std::io::Write;
+    temp.write_all(content.as_bytes())
+        .map_err(|e| format!("write failed: {path} ({e})"))?;
+
+    temp.persist(&target)
+        .map_err(|e| format!("rename failed: {path} ({e})"))?;
 
     Ok(bytes)
 }
@@ -85,10 +86,18 @@ struct GrepMatch {
     line: String,
 }
 
+/// Maximum directory recursion depth for grep.
+const MAX_GREP_DEPTH: usize = 32;
+
+/// Maximum number of grep matches to collect.
+const MAX_GREP_MATCHES: usize = 10_000;
+
 /// Searches a file (or directory recursively) for a regex pattern.
 ///
 /// When searching a directory, uses `sandbox.root()` as the symlink
 /// boundary to prevent recursive traversal from escaping the sandbox.
+/// Recursion is limited to [`MAX_GREP_DEPTH`] levels and results are
+/// capped at [`MAX_GREP_MATCHES`] entries.
 fn tool_grep(
     pattern: &str,
     path: &str,
@@ -103,7 +112,7 @@ fn tool_grep(
     if canonical.is_file() {
         grep_file(&re, &canonical, &mut matches)?;
     } else if canonical.is_dir() {
-        grep_dir(&re, &canonical, sandbox_root, &mut matches)?;
+        grep_dir(&re, &canonical, sandbox_root, &mut matches, 0)?;
     } else {
         return Err(format!("not a file or directory: {path}"));
     }
@@ -116,6 +125,9 @@ fn grep_file(re: &regex::Regex, path: &Path, matches: &mut Vec<GrepMatch>) -> Re
         std::fs::read_to_string(path).map_err(|e| format!("read failed: {:?} ({e})", path))?;
 
     for (i, line) in content.lines().enumerate() {
+        if matches.len() >= MAX_GREP_MATCHES {
+            break;
+        }
         if re.is_match(line) {
             matches.push(GrepMatch {
                 line_number: i + 1,
@@ -132,16 +144,32 @@ fn grep_file(re: &regex::Regex, path: &Path, matches: &mut Vec<GrepMatch>) -> Re
 /// `sandbox_root` is used as the symlink boundary: any path that
 /// canonicalizes outside `sandbox_root` is silently skipped.
 /// Binary files (detected by null bytes in the first 512 bytes) are also skipped.
+///
+/// Recursion is bounded by `depth` (max [`MAX_GREP_DEPTH`]) and total
+/// matches are capped at [`MAX_GREP_MATCHES`].
 fn grep_dir(
     re: &regex::Regex,
     dir: &Path,
     sandbox_root: &Path,
     matches: &mut Vec<GrepMatch>,
+    depth: usize,
 ) -> Result<(), String> {
+    if depth > MAX_GREP_DEPTH {
+        tracing::debug!("grep: max depth ({MAX_GREP_DEPTH}) reached at {:?}", dir);
+        return Ok(());
+    }
+    if matches.len() >= MAX_GREP_MATCHES {
+        return Ok(());
+    }
+
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read directory: {:?} ({e})", dir))?;
 
     for entry in entries.flatten() {
+        if matches.len() >= MAX_GREP_MATCHES {
+            break;
+        }
+
         let path = entry.path();
 
         // Symlink guard: canonicalize and verify still within sandbox
@@ -152,19 +180,29 @@ fn grep_dir(
 
         if canonical.is_file() {
             // Skip binary files (best-effort: check for null bytes in first 512 bytes)
-            {
+            let is_binary = {
                 use std::io::Read;
-                if let Ok(mut file) = std::fs::File::open(&canonical) {
-                    let mut buf = [0u8; 512];
-                    let n = file.read(&mut buf).unwrap_or(0);
-                    if buf[..n].contains(&0) {
-                        continue;
+                match std::fs::File::open(&canonical) {
+                    Ok(mut file) => {
+                        let mut buf = [0u8; 512];
+                        match file.read(&mut buf) {
+                            Ok(n) => buf[..n].contains(&0),
+                            Err(_) => true, // read failure → skip
+                        }
                     }
+                    Err(_) => true, // open failure → skip
                 }
+            };
+            if is_binary {
+                continue;
             }
-            let _ = grep_file(re, &canonical, matches);
+            if let Err(e) = grep_file(re, &canonical, matches) {
+                tracing::debug!("grep: skip {:?}: {e}", canonical);
+            }
         } else if canonical.is_dir() {
-            let _ = grep_dir(re, &canonical, sandbox_root, matches);
+            if let Err(e) = grep_dir(re, &canonical, sandbox_root, matches, depth + 1) {
+                tracing::debug!("grep: skip dir {:?}: {e}", canonical);
+            }
         }
     }
 
@@ -172,11 +210,19 @@ fn grep_dir(
 }
 
 /// Finds files matching a glob pattern.
+///
+/// Rejects patterns containing `..` to prevent scanning outside the sandbox
+/// (even though results are filtered, directory traversal is observable via timing).
 fn tool_glob(
     pattern: &str,
     dir: Option<&str>,
     sandbox: &dyn SandboxPolicy,
 ) -> Result<Vec<String>, String> {
+    // Reject path traversal in glob patterns
+    if pattern.contains("..") {
+        return Err("glob pattern must not contain '..'".to_string());
+    }
+
     let full_pattern = match dir {
         Some(d) => {
             let base = sandbox.validate_read(d).map_err(|e| e.to_string())?;
@@ -623,6 +669,39 @@ mod tests {
         assert!(result.unwrap_err().contains("access denied"));
     }
 
+    #[test]
+    fn glob_rejects_dotdot_in_pattern() {
+        let (_root, sandbox) = test_sandbox();
+        let result = tool_glob("../../**/*", None, sandbox.as_ref());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("'..'"),
+            "expected dotdot rejection"
+        );
+    }
+
+    // ─── tool_grep limits ───────────────────────────────────────────
+
+    #[test]
+    fn grep_respects_depth_limit() {
+        let (root, sandbox) = test_sandbox();
+
+        // Create a directory deeper than MAX_GREP_DEPTH
+        let mut deep = root.clone();
+        for i in 0..35 {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep.txt"), "needle").unwrap();
+
+        // Also create a shallow file
+        fs::write(root.join("shallow.txt"), "needle").unwrap();
+
+        let matches = tool_grep("needle", root.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        // Shallow file should be found, deep file should be skipped
+        assert_eq!(matches.len(), 1);
+    }
+
     // ─── Lua Integration ────────────────────────────────────────────
 
     #[test]
@@ -755,6 +834,80 @@ mod tests {
             error.contains("access denied"),
             "expected 'access denied', got: {error}"
         );
+    }
+
+    // ─── Symlink Attack Tests ──────────────────────────────────────
+
+    #[cfg(unix)]
+    mod symlink_tests {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        #[test]
+        fn glob_skips_symlink_outside_sandbox() {
+            let (root, sandbox) = test_sandbox();
+            let outside = tempfile::tempdir().unwrap();
+            let outside_canon = outside.path().canonicalize().unwrap();
+            fs::write(outside_canon.join("leaked.txt"), "secret").unwrap();
+            symlink(&outside_canon, root.join("escape")).unwrap();
+            fs::write(root.join("ok.txt"), "safe").unwrap();
+
+            let files = tool_glob("**/*.txt", None, sandbox.as_ref()).unwrap();
+            for f in &files {
+                assert!(!f.contains("leaked"), "leaked file found: {f}");
+            }
+            assert_eq!(files.len(), 1, "only ok.txt should be found");
+        }
+
+        #[test]
+        fn grep_dir_skips_symlink_outside_sandbox() {
+            let (root, sandbox) = test_sandbox();
+            let outside = tempfile::tempdir().unwrap();
+            let outside_canon = outside.path().canonicalize().unwrap();
+            fs::write(outside_canon.join("secret.txt"), "password123").unwrap();
+            symlink(&outside_canon, root.join("escape")).unwrap();
+            fs::write(root.join("ok.txt"), "password123").unwrap();
+
+            let matches = tool_grep("password", root.to_str().unwrap(), sandbox.as_ref()).unwrap();
+            // Only sandbox-internal ok.txt should match
+            assert_eq!(matches.len(), 1, "symlinked outside file should be skipped");
+        }
+
+        #[test]
+        fn write_via_symlink_escape_rejected() {
+            let (root, sandbox) = test_sandbox();
+            let outside = tempfile::tempdir().unwrap();
+            let outside_canon = outside.path().canonicalize().unwrap();
+            symlink(&outside_canon, root.join("escape")).unwrap();
+
+            let result = tool_write(
+                root.join("escape/evil.txt").to_str().unwrap(),
+                "evil",
+                sandbox.as_ref(),
+            );
+            assert!(
+                result.is_err(),
+                "write via symlink escape should be rejected"
+            );
+        }
+
+        #[test]
+        fn read_via_symlink_escape_rejected() {
+            let (root, sandbox) = test_sandbox();
+            let outside = tempfile::tempdir().unwrap();
+            let outside_canon = outside.path().canonicalize().unwrap();
+            fs::write(outside_canon.join("secret.txt"), "secret").unwrap();
+            symlink(&outside_canon, root.join("escape")).unwrap();
+
+            let result = tool_read(
+                root.join("escape/secret.txt").to_str().unwrap(),
+                sandbox.as_ref(),
+            );
+            assert!(
+                result.is_err(),
+                "read via symlink escape should be rejected"
+            );
+        }
     }
 
     // ─── Test Helpers ───────────────────────────────────────────────

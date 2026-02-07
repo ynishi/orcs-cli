@@ -22,6 +22,7 @@ serde_json = "1.0"
 # File tools
 regex = "1.11"
 glob = "0.3"
+tempfile = "3"
 
 # Error handling
 thiserror = "2.0"
