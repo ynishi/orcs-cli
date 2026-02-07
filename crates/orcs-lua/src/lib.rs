@@ -100,6 +100,7 @@ mod error;
 mod loader;
 pub mod orcs_helpers;
 pub mod testing;
+pub mod tool_registry;
 pub mod tools;
 mod types;
 

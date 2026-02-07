@@ -42,7 +42,7 @@
 //! ```
 
 use crate::error::LuaError;
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaSerdeExt, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
 use std::sync::Arc;
 
@@ -134,8 +134,33 @@ pub fn register_base_orcs_functions(
         orcs_table.set("tool_descriptions", tool_desc)?;
     }
 
+    // orcs.json_parse(str) -> value
+    // Parses a JSON string into a Lua value (table/string/number/boolean/nil).
+    {
+        let json_parse = lua.create_function(|lua, s: String| {
+            let value: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| mlua::Error::RuntimeError(format!("json parse error: {e}")))?;
+            lua.to_value(&value)
+        })?;
+        orcs_table.set("json_parse", json_parse)?;
+    }
+
+    // orcs.json_encode(value) -> string
+    // Encodes a Lua value (table/string/number/boolean/nil) into a JSON string.
+    {
+        let json_encode = lua.create_function(|lua, value: mlua::Value| {
+            let json_value: serde_json::Value = lua.from_value(value)?;
+            serde_json::to_string(&json_value)
+                .map_err(|e| mlua::Error::RuntimeError(format!("json encode error: {e}")))
+        })?;
+        orcs_table.set("json_encode", json_encode)?;
+    }
+
     // Register native Rust tools (read, write, grep, glob, mkdir, remove, mv)
-    crate::tools::register_tool_functions(lua, sandbox)?;
+    crate::tools::register_tool_functions(lua, Arc::clone(&sandbox))?;
+
+    // Register dispatch and tool_schemas
+    crate::tool_registry::register_dispatch_functions(lua, sandbox)?;
 
     // Disable dangerous Lua stdlib functions
     sandbox_lua_globals(lua)?;
@@ -329,6 +354,78 @@ mod tests {
 
         // Now it exists
         assert!(lua.globals().get::<Table>(ORCS_TABLE_NAME).is_ok());
+    }
+
+    #[test]
+    fn json_parse_object() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: Table = lua
+            .load(r#"return orcs.json_parse('{"name":"test","count":42,"active":true}')"#)
+            .eval()
+            .unwrap();
+        assert_eq!(result.get::<String>("name").unwrap(), "test");
+        assert_eq!(result.get::<i64>("count").unwrap(), 42);
+        assert!(result.get::<bool>("active").unwrap());
+    }
+
+    #[test]
+    fn json_parse_array() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: Table = lua
+            .load(r#"return orcs.json_parse('[1,2,3]')"#)
+            .eval()
+            .unwrap();
+        assert_eq!(result.get::<i64>(1).unwrap(), 1);
+        assert_eq!(result.get::<i64>(2).unwrap(), 2);
+        assert_eq!(result.get::<i64>(3).unwrap(), 3);
+    }
+
+    #[test]
+    fn json_parse_invalid_returns_error() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result = lua
+            .load(r#"return orcs.json_parse('not json')"#)
+            .eval::<mlua::Value>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn json_encode_table() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: String = lua
+            .load(r#"return orcs.json_encode({name="test", count=42})"#)
+            .eval()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["name"], "test");
+        assert_eq!(parsed["count"], 42);
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: String = lua
+            .load(
+                r#"
+                local obj = orcs.json_parse('{"tool":"read","args":{"path":"src/main.rs"}}')
+                return orcs.json_encode(obj)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["tool"], "read");
+        assert_eq!(parsed["args"]["path"], "src/main.rs");
     }
 
     #[test]

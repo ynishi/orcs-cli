@@ -1,144 +1,137 @@
 -- code_agent.lua
--- POC: Lua agent that uses orcs.llm() + orcs tools for coding tasks.
+-- Lua agent that uses orcs.llm() + orcs.dispatch() for coding tasks.
 --
 -- Flow:
 --   1. Receives user message
---   2. Builds prompt with tool descriptions + project context
---   3. Calls orcs.llm() (claude -p)
---   4. Parses tool calls from response and executes them
+--   2. Builds prompt with tool schemas + project context
+--   3. Calls orcs.llm()
+--   4. Parses JSON tool calls from response and dispatches them
 --   5. Feeds results back for follow-up if needed
+--
+-- Tool calls are JSON objects on their own line:
+--   TOOL_CALL: {"tool":"read","args":{"path":"src/main.rs"}}
 --
 -- Usage: @code_agent <task description>
 
 local MAX_TURNS = 5
 
+--- Build tool description from schemas for LLM prompt.
+local function build_tool_section()
+    local schemas = orcs.tool_schemas()
+    local lines = { "Available tools:" }
+
+    for _, schema in ipairs(schemas) do
+        local arg_parts = {}
+        for _, arg in ipairs(schema.args) do
+            local marker = arg.required and "" or "?"
+            table.insert(arg_parts, arg.name .. marker .. ": " .. arg.type)
+        end
+        table.insert(lines, "  " .. schema.name .. "(" .. table.concat(arg_parts, ", ") .. ")")
+        table.insert(lines, "    " .. schema.description)
+    end
+
+    return table.concat(lines, "\n")
+end
+
 --- Build system prompt with tool context.
 local function build_system()
-    local tools = orcs.tool_descriptions()
     return "You are a coding assistant working in: " .. orcs.pwd .. "\n\n"
-        .. tools .. "\n"
+        .. build_tool_section() .. "\n\n"
         .. "When you need to use a tool, output EXACTLY this format on its own line:\n"
-        .. "TOOL_CALL: <tool_name>(<args>)\n"
-        .. "Example: TOOL_CALL: read(\"src/main.rs\")\n"
-        .. "Example: TOOL_CALL: grep(\"TODO\", \"src\")\n"
-        .. "Example: TOOL_CALL: write(\"out.txt\", \"content here\")\n\n"
+        .. 'TOOL_CALL: {"tool":"<name>","args":{<named_args>}}\n\n'
+        .. 'Examples:\n'
+        .. 'TOOL_CALL: {"tool":"read","args":{"path":"src/main.rs"}}\n'
+        .. 'TOOL_CALL: {"tool":"grep","args":{"pattern":"TODO","path":"src"}}\n'
+        .. 'TOOL_CALL: {"tool":"write","args":{"path":"out.txt","content":"hello"}}\n'
+        .. 'TOOL_CALL: {"tool":"exec","args":{"cmd":"cargo test"}}\n\n'
+        .. "You may output multiple TOOL_CALL lines in a single response.\n"
         .. "After receiving tool results, continue your analysis.\n"
         .. "When done, output your final answer without any TOOL_CALL lines."
 end
 
+--- Format a dispatch result into a human-readable string for LLM context.
+local function format_result(tool_name, result)
+    if not result.ok then
+        return "[" .. tool_name .. "] ERROR: " .. (result.error or "unknown error")
+    end
+
+    if tool_name == "read" then
+        local content = result.content or ""
+        if #content > 2000 then
+            content = content:sub(1, 2000) .. "\n... (truncated)"
+        end
+        return "[read] " .. (result.size or 0) .. " bytes:\n" .. content
+
+    elseif tool_name == "grep" then
+        local lines = {}
+        local count = result.count or 0
+        local show = math.min(count, 20)
+        if result.matches then
+            for i = 1, show do
+                local m = result.matches[i]
+                if m then
+                    table.insert(lines, m.line_number .. ": " .. m.line)
+                end
+            end
+        end
+        local suffix = count > show and ("\n... (" .. count .. " total)") or ""
+        return "[grep] " .. count .. " matches:\n" .. table.concat(lines, "\n") .. suffix
+
+    elseif tool_name == "glob" then
+        local items = {}
+        local count = result.count or 0
+        local show = math.min(count, 50)
+        if result.files then
+            for i = 1, show do
+                if result.files[i] then
+                    table.insert(items, result.files[i])
+                end
+            end
+        end
+        local suffix = count > show and ("\n... (" .. count .. " total)") or ""
+        return "[glob] " .. count .. " files:\n" .. table.concat(items, "\n") .. suffix
+
+    elseif tool_name == "exec" then
+        local stdout = result.stdout or ""
+        if #stdout > 2000 then
+            stdout = stdout:sub(1, 2000) .. "\n... (truncated)"
+        end
+        return "[exec] OK:\n" .. stdout
+
+    elseif tool_name == "write" then
+        return "[write] OK: " .. (result.bytes_written or 0) .. " bytes"
+
+    else
+        return "[" .. tool_name .. "] OK"
+    end
+end
+
 --- Parse TOOL_CALL lines from LLM response.
---- Returns: list of {tool, args_str}, remaining text
+--- Returns: list of {tool, args}, remaining text
 local function parse_tool_calls(text)
     local calls = {}
     local clean_lines = {}
 
     for line in text:gmatch("[^\n]+") do
-        local tool, args = line:match("^TOOL_CALL:%s*(%w+)%((.+)%)%s*$")
-        if tool then
-            table.insert(calls, { tool = tool, args_str = args })
+        local json_str = line:match("^TOOL_CALL:%s*(.+)%s*$")
+        if json_str then
+            local ok, parsed = pcall(orcs.json_parse, json_str)
+            if ok and type(parsed) == "table" and parsed.tool then
+                table.insert(calls, {
+                    tool = parsed.tool,
+                    args = parsed.args or {},
+                })
+            else
+                -- Malformed JSON — keep as text so the LLM sees it
+                table.insert(clean_lines, line)
+                orcs.log("warn", "[code_agent] malformed tool call: " .. json_str)
+            end
         else
             table.insert(clean_lines, line)
         end
     end
 
     return calls, table.concat(clean_lines, "\n")
-end
-
---- Execute a single tool call and return result string.
-local function execute_tool(call)
-    local t, a = call.tool, call.args_str
-
-    -- Parse quoted string arguments
-    local function unquote(s)
-        return s:match('^"(.*)"$') or s:match("^'(.*)'$") or s
-    end
-
-    if t == "read" then
-        local path = unquote(a:match("^%s*(.-)%s*$"))
-        local r = orcs.read(path)
-        if r.ok then
-            return "[read " .. path .. "] " .. r.size .. " bytes:\n" .. r.content:sub(1, 2000)
-        else
-            return "[read " .. path .. "] ERROR: " .. r.error
-        end
-
-    elseif t == "write" then
-        local path, content = a:match('^%s*"(.-)"%s*,%s*"(.*)"')
-        if not path then
-            path, content = a:match("^%s*'(.-)'%s*,%s*'(.*)'")
-        end
-        if path and content then
-            local r = orcs.write(path, content)
-            if r.ok then
-                return "[write " .. path .. "] OK: " .. r.bytes_written .. " bytes"
-            else
-                return "[write " .. path .. "] ERROR: " .. r.error
-            end
-        end
-        return "[write] ERROR: could not parse arguments"
-
-    elseif t == "grep" then
-        local pattern, path = a:match('^%s*"(.-)"%s*,%s*"(.-)"')
-        if not pattern then
-            pattern, path = a:match("^%s*'(.-)'%s*,%s*'(.-)'")
-        end
-        if pattern and path then
-            local r = orcs.grep(pattern, path)
-            if r.ok then
-                local lines = {}
-                for i = 1, math.min(r.count, 20) do
-                    table.insert(lines, r.matches[i].line_number .. ": " .. r.matches[i].line)
-                end
-                return "[grep " .. pattern .. " in " .. path .. "] " .. r.count .. " matches:\n" .. table.concat(lines, "\n")
-            else
-                return "[grep] ERROR: " .. r.error
-            end
-        end
-        return "[grep] ERROR: could not parse arguments"
-
-    elseif t == "glob" then
-        local pattern = unquote(a:match("^%s*(.-)%s*$"))
-        local r = orcs.glob(pattern)
-        if r.ok then
-            local list = {}
-            for i = 1, math.min(r.count, 50) do
-                table.insert(list, r.files[i])
-            end
-            return "[glob " .. pattern .. "] " .. r.count .. " files:\n" .. table.concat(list, "\n")
-        else
-            return "[glob] ERROR: " .. r.error
-        end
-
-    elseif t == "exec" then
-        local cmd = unquote(a:match("^%s*(.-)%s*$"))
-        local r = orcs.exec(cmd)
-        if r.ok then
-            return "[exec] OK:\n" .. r.stdout:sub(1, 2000)
-        else
-            return "[exec] ERROR (code " .. r.code .. "):\n" .. r.stderr:sub(1, 1000)
-        end
-
-    elseif t == "mkdir" then
-        local path = unquote(a:match("^%s*(.-)%s*$"))
-        local r = orcs.mkdir(path)
-        return r.ok and ("[mkdir " .. path .. "] OK") or ("[mkdir] ERROR: " .. r.error)
-
-    elseif t == "remove" then
-        local path = unquote(a:match("^%s*(.-)%s*$"))
-        local r = orcs.remove(path)
-        return r.ok and ("[remove " .. path .. "] OK") or ("[remove] ERROR: " .. r.error)
-
-    elseif t == "mv" then
-        local src, dst = a:match('^%s*"(.-)"%s*,%s*"(.-)"')
-        if src and dst then
-            local r = orcs.mv(src, dst)
-            return r.ok and ("[mv " .. src .. " -> " .. dst .. "] OK") or ("[mv] ERROR: " .. r.error)
-        end
-        return "[mv] ERROR: could not parse arguments"
-
-    else
-        return "[unknown tool: " .. t .. "]"
-    end
 end
 
 return {
@@ -178,12 +171,12 @@ return {
                 return { success = true, data = { turns = turn, response = resp.content } }
             end
 
-            -- Execute tool calls
+            -- Execute tool calls via dispatch
             local tool_results = {}
             for _, call in ipairs(calls) do
-                orcs.log("info", "[code_agent] tool: " .. call.tool .. "(" .. call.args_str .. ")")
-                local result = execute_tool(call)
-                table.insert(tool_results, result)
+                orcs.log("info", "[code_agent] dispatch: " .. call.tool)
+                local result = orcs.dispatch(call.tool, call.args)
+                table.insert(tool_results, format_result(call.tool, result))
             end
 
             -- Append results to conversation for next turn
