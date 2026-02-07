@@ -170,6 +170,10 @@ pub fn parse_signal_response(s: &str) -> SignalResponse {
 }
 
 /// Parse EventCategory from Lua string.
+///
+/// Known categories are matched exactly (case-sensitive).
+/// Unknown strings fall back to `Extension { namespace: "lua", kind: s }`
+/// with a warning log, since this often indicates a typo.
 pub fn parse_event_category(s: &str) -> Option<EventCategory> {
     match s {
         "Lifecycle" => Some(EventCategory::Lifecycle),
@@ -178,7 +182,11 @@ pub fn parse_event_category(s: &str) -> Option<EventCategory> {
         "UserInput" => Some(EventCategory::UserInput),
         "Output" => Some(EventCategory::Output),
         _ => {
-            // Treat as Extension category
+            tracing::warn!(
+                category = s,
+                known = "Lifecycle, Hil, Echo, UserInput, Output",
+                "Unknown event category in Lua subscription, treating as Extension"
+            );
             Some(EventCategory::Extension {
                 namespace: "lua".to_string(),
                 kind: s.to_string(),

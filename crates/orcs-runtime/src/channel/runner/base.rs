@@ -127,6 +127,11 @@ pub struct ChannelRunner {
     world: Arc<RwLock<World>>,
     /// Bound Component (1:1 relationship).
     component: Arc<Mutex<Box<dyn Component>>>,
+    /// Cached event subscriptions from Component.
+    ///
+    /// Populated at build time to avoid locking Component on every event.
+    /// Events whose category is not in this list are silently skipped.
+    subscriptions: Vec<EventCategory>,
     /// Queue for events received while paused.
     paused_queue: PausedEventQueue,
     /// Child spawner for managing spawned children (optional).
@@ -392,7 +397,19 @@ impl ChannelRunner {
     }
 
     /// Processes a single event by delivering it to the Component.
+    ///
+    /// Events whose category does not match any of this runner's
+    /// subscriptions are silently skipped.
     async fn process_event(&self, event: Event) {
+        // Subscription filter: skip events for categories we don't subscribe to
+        if !self.subscriptions.contains(&event.category) {
+            debug!(
+                "ChannelRunner {}: skipping {:?} (not subscribed)",
+                self.id, event.category
+            );
+            return;
+        }
+
         let request = Request::new(
             event.category,
             &event.operation,
@@ -808,6 +825,9 @@ impl ChannelRunnerBuilder {
             None
         };
 
+        // Cache subscriptions from Component to avoid locking on every event
+        let subscriptions = self.component.subscriptions().to_vec();
+
         let runner = ChannelRunner {
             id: self.id,
             event_rx,
@@ -815,6 +835,7 @@ impl ChannelRunnerBuilder {
             world_tx: self.world_tx,
             world: self.world,
             component: Arc::new(Mutex::new(self.component)),
+            subscriptions,
             paused_queue: PausedEventQueue::new(),
             child_spawner,
             event_tx: event_tx_for_context,
@@ -883,6 +904,10 @@ mod tests {
 
         fn status(&self) -> Status {
             self.status
+        }
+
+        fn subscriptions(&self) -> &[EventCategory] {
+            &[EventCategory::Echo, EventCategory::Lifecycle]
         }
 
         fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
@@ -1086,6 +1111,10 @@ mod tests {
 
             fn status(&self) -> Status {
                 Status::Idle
+            }
+
+            fn subscriptions(&self) -> &[EventCategory] {
+                &[EventCategory::Echo]
             }
 
             fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
