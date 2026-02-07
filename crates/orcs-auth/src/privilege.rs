@@ -1,6 +1,5 @@
 //! Privilege level types.
 
-use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// The current privilege level of a session.
@@ -39,7 +38,7 @@ use std::time::{Duration, Instant};
 /// let elevated = PrivilegeLevel::Elevated { until };
 /// assert!(elevated.is_elevated());
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub enum PrivilegeLevel {
     /// Normal operations only.
     ///
@@ -64,7 +63,6 @@ pub enum PrivilegeLevel {
     /// * `until` - When elevation expires (automatically serializes as duration from now)
     Elevated {
         /// Expiration time for elevated privileges.
-        #[serde(with = "instant_serde")]
         until: Instant,
     },
 }
@@ -148,40 +146,6 @@ impl PrivilegeLevel {
                 }
             }
         }
-    }
-}
-
-/// Serde support for `Instant`.
-///
-/// **Lossy**: Serializes as remaining seconds from "now" at serialization time.
-/// Deserializing reconstructs an `Instant` relative to the deserializer's "now",
-/// so the absolute point in time is **not** preserved across serialize/deserialize.
-///
-/// This is acceptable for in-process use (e.g., session cache) but **must not**
-/// be used for cross-process persistence or durable storage.
-mod instant_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::time::{Duration, Instant};
-
-    pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let now = Instant::now();
-        let duration = if *instant > now {
-            instant.duration_since(now)
-        } else {
-            Duration::ZERO
-        };
-        duration.as_secs().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Instant, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(Instant::now() + Duration::from_secs(secs))
     }
 }
 

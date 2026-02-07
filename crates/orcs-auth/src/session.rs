@@ -2,7 +2,6 @@
 
 use crate::PrivilegeLevel;
 use orcs_types::Principal;
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// An active security context combining identity and privilege.
@@ -20,7 +19,7 @@ use std::time::Duration;
 ///
 /// - Safe sharing across threads
 /// - Clear audit trails (old session vs new session)
-/// - Simple `Clone`, `Serialize`, `Deserialize`
+/// - Simple `Clone`
 ///
 /// # Dynamic Permissions
 ///
@@ -57,7 +56,7 @@ use std::time::Duration;
 /// let standard = elevated.drop_privilege();
 /// assert!(!standard.is_elevated());
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Session {
     /// The actor performing operations.
     principal: Principal,
