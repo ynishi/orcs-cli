@@ -168,7 +168,7 @@ return {
         else
             orcs.output("[tool] Unknown command: " .. cmd)
             orcs.output("[tool] Commands: read, write, grep, glob, mkdir, remove, mv, pwd")
-            return { success = false }
+            return { success = false, error = "unknown command: " .. cmd }
         end
     end,
 
