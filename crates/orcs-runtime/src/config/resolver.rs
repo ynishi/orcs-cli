@@ -78,9 +78,10 @@ mod tests {
 
         impl ConfigResolver for TestResolver {
             fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
-                let mut config = OrcsConfig::default();
-                config.debug = self.debug;
-                Ok(config)
+                Ok(OrcsConfig {
+                    debug: self.debug,
+                    ..OrcsConfig::default()
+                })
             }
         }
 

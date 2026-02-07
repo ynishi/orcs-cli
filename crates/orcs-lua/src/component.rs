@@ -255,7 +255,11 @@ impl LuaComponent {
                 .lua
                 .lock()
                 .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
-            Self::register_child_context_functions(&lua, Arc::clone(ctx))?;
+            Self::register_child_context_functions(
+                &lua,
+                Arc::clone(ctx),
+                self.sandbox.root().to_path_buf(),
+            )?;
         }
 
         tracing::info!("Reloaded Lua component: {}", self.id);
@@ -294,7 +298,11 @@ impl LuaComponent {
 
         // Register child context functions in Lua
         if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = Self::register_child_context_functions(&lua, ctx_arc) {
+            if let Err(e) = Self::register_child_context_functions(
+                &lua,
+                ctx_arc,
+                self.sandbox.root().to_path_buf(),
+            ) {
                 tracing::warn!("Failed to register child context functions: {}", e);
             }
         }
@@ -303,7 +311,8 @@ impl LuaComponent {
     /// Registers child context functions in Lua's orcs table.
     ///
     /// Adds:
-    /// - `orcs.exec(cmd)` - Execute shell command (permission-checked override)
+    /// - `orcs.exec(cmd)` - Execute shell command (permission-checked, cwd = sandbox root)
+    /// - `orcs.llm(prompt)` - Call LLM (capability-checked, cwd = sandbox root)
     /// - `orcs.check_command(cmd)` - Check command permission without executing
     /// - `orcs.grant_command(pattern)` - Grant a command pattern (after HIL approval)
     /// - `orcs.spawn_child(config)` - Spawn a child
@@ -312,6 +321,7 @@ impl LuaComponent {
     fn register_child_context_functions(
         lua: &Lua,
         ctx: Arc<Mutex<Box<dyn ChildContext>>>,
+        sandbox_root: std::path::PathBuf,
     ) -> Result<(), LuaError> {
         let orcs_table: Table = lua.globals().get("orcs")?;
 
@@ -319,6 +329,7 @@ impl LuaComponent {
         // This replaces the basic exec from register_orcs_functions
         // Uses check_command_permission() which respects dynamic grants from HIL approval
         let ctx_clone = Arc::clone(&ctx);
+        let exec_sandbox_root = sandbox_root.clone();
         let exec_fn = lua.create_function(move |lua, cmd: String| {
             let ctx_guard = ctx_clone
                 .lock()
@@ -356,6 +367,7 @@ impl LuaComponent {
             let output = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
+                .current_dir(&exec_sandbox_root)
                 .output()
                 .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
 
@@ -380,6 +392,58 @@ impl LuaComponent {
             Ok(result)
         })?;
         orcs_table.set("exec", exec_fn)?;
+
+        // Override orcs.llm with capability-checked version
+        // Requires Capability::LLM. Calls `claude -p` with sandbox root as cwd.
+        {
+            let ctx_clone = Arc::clone(&ctx);
+            let llm_sandbox_root = sandbox_root.clone();
+            let llm_fn = lua.create_function(move |lua, prompt: String| {
+                let result = lua.create_table()?;
+
+                // Capability check
+                let ctx_guard = ctx_clone.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("context lock failed: {}", e))
+                })?;
+
+                if !ctx_guard.has_capability(orcs_component::Capability::LLM) {
+                    result.set("ok", false)?;
+                    result.set("error", "permission denied: Capability::LLM not granted")?;
+                    return Ok(result);
+                }
+                drop(ctx_guard);
+
+                let output = std::process::Command::new("claude")
+                    .arg("-p")
+                    .arg(&prompt)
+                    .current_dir(&llm_sandbox_root)
+                    .output();
+
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let content = String::from_utf8_lossy(&out.stdout).to_string();
+                        result.set("ok", true)?;
+                        result.set("content", content)?;
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        result.set("ok", false)?;
+                        result.set(
+                            "error",
+                            if stderr.is_empty() { stdout } else { stderr },
+                        )?;
+                    }
+                    Err(e) => {
+                        result.set("ok", false)?;
+                        result.set("error", format!("failed to spawn claude: {e}"))?;
+                    }
+                }
+
+                Ok(result)
+            })?;
+            orcs_table.set("llm", llm_fn)?;
+        }
 
         // orcs.spawn_child(config) -> { ok, id, handle, error }
         // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
@@ -838,7 +902,11 @@ impl Component for LuaComponent {
 
         // Register child context functions in Lua
         if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = Self::register_child_context_functions(&lua, ctx_arc) {
+            if let Err(e) = Self::register_child_context_functions(
+                &lua,
+                ctx_arc,
+                self.sandbox.root().to_path_buf(),
+            ) {
                 tracing::warn!("Failed to register child context functions: {}", e);
             }
         }

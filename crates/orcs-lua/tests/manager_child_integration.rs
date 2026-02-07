@@ -769,13 +769,15 @@ mod component_spawns_child {
         // orcs.spawn_child won't exist or will error
         // The Lua script might error, which maps to ComponentError
         // This is expected behavior - spawn_child requires context
-        if result.is_err() {
-            // Expected: Lua error because orcs.spawn_child doesn't exist
-            println!("Expected error: {:?}", result.err());
-        } else {
-            // If it somehow succeeds, spawned should be empty
-            let data = result.unwrap();
-            println!("Unexpected success: {:?}", data);
+        match result {
+            Err(e) => {
+                // Expected: Lua error because orcs.spawn_child doesn't exist
+                println!("Expected error: {:?}", e);
+            }
+            Ok(data) => {
+                // If it somehow succeeds, spawned should be empty
+                println!("Unexpected success: {:?}", data);
+            }
         }
     }
 }

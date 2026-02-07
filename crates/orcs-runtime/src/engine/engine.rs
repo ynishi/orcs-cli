@@ -1111,7 +1111,7 @@ mod tests {
         let received = rx.recv().await.expect("receive signal");
         assert!(matches!(
             received.kind,
-            orcs_event::SignalKind::Cancel { .. }
+            orcs_event::SignalKind::Cancel
         ));
 
         // Cleanup

@@ -111,37 +111,17 @@ pub fn register_base_orcs_functions(
     // orcs.pwd - sandbox root as string (always available)
     orcs_table.set("pwd", sandbox.root().display().to_string())?;
 
-    // orcs.llm(prompt) -> {ok, content, error}
-    // Calls `claude -p` (headless SDK mode) with sandbox root as cwd.
-    {
-        let sandbox_root = sandbox.root().to_path_buf();
-        let llm_fn = lua.create_function(move |lua, prompt: String| {
+    // orcs.llm(prompt) -> {ok=false, error="..."}
+    // Deny by default: llm requires ChildContext with Capability::LLM.
+    // Overridden by capability-checked version when ChildContext is set.
+    if orcs_table.get::<mlua::Function>("llm").is_err() {
+        let llm_fn = lua.create_function(|lua, _prompt: String| {
             let result = lua.create_table()?;
-
-            let output = std::process::Command::new("claude")
-                .arg("-p")
-                .arg(&prompt)
-                .current_dir(&sandbox_root)
-                .output();
-
-            match output {
-                Ok(out) if out.status.success() => {
-                    let content = String::from_utf8_lossy(&out.stdout).to_string();
-                    result.set("ok", true)?;
-                    result.set("content", content)?;
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    result.set("ok", false)?;
-                    result.set("error", if stderr.is_empty() { stdout } else { stderr })?;
-                }
-                Err(e) => {
-                    result.set("ok", false)?;
-                    result.set("error", format!("failed to spawn claude: {e}"))?;
-                }
-            }
-
+            result.set("ok", false)?;
+            result.set(
+                "error",
+                "llm denied: no execution context (ChildContext with Capability::LLM required)",
+            )?;
             Ok(result)
         })?;
         orcs_table.set("llm", llm_fn)?;
@@ -199,10 +179,13 @@ orcs.pwd
 
 /// Disables dangerous Lua standard library functions.
 ///
-/// Removes filesystem and process access that would bypass the sandbox:
-/// - `io.*` — entire module replaced with nil (use `orcs.read`/`orcs.write` instead)
+/// Removes filesystem, process, and introspection access that would bypass the sandbox:
+/// - `io.*` — entire module (use `orcs.read`/`orcs.write` instead)
 /// - `os.execute`, `os.remove`, `os.rename`, `os.exit`, `os.tmpname`
 /// - `loadfile`, `dofile` — arbitrary file loading
+/// - `load` — dynamic code generation from strings
+/// - `debug` — introspection (stack frames, registry, upvalue manipulation)
+/// - `require`, `package` — C module loading and arbitrary file require
 ///
 /// Preserves safe `os` functions: `os.time`, `os.clock`, `os.date`, `os.difftime`.
 pub(crate) fn sandbox_lua_globals(lua: &Lua) -> Result<(), LuaError> {
@@ -220,9 +203,17 @@ pub(crate) fn sandbox_lua_globals(lua: &Lua) -> Result<(), LuaError> {
             os.tmpname = nil
         end
 
-        -- Remove arbitrary file loading
+        -- Remove arbitrary file/code loading
         loadfile = nil
         dofile = nil
+        load = nil
+
+        -- Remove introspection (can bypass sandbox via registry/upvalue access)
+        debug = nil
+
+        -- Remove module loading (can load C modules or arbitrary files)
+        require = nil
+        package = nil
         "#,
     )
     .exec()

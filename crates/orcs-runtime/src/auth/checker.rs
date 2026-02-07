@@ -40,7 +40,6 @@
 //! assert!(policy.can_signal(&elevated, &SignalScope::Global));
 //! ```
 
-use super::blocked_patterns::{is_blocked_command, matching_elevation_pattern, requires_elevation};
 use super::command_check::CommandCheckResult;
 use super::Session;
 use crate::components::ApprovalRequest;
@@ -141,15 +140,14 @@ pub trait PermissionChecker: PermissionPolicy {
 /// | Global signal | Denied | Allowed |
 /// | Channel signal | Allowed | Allowed |
 /// | Destructive ops | Denied | Allowed |
-/// | Blocked commands | Denied | Denied |
-/// | Elevated commands | Denied | Allowed |
+/// | Command exec | Denied | Allowed |
+/// | Spawn child/runner | Denied | Allowed |
 ///
-/// # Command Filtering
+/// # Security Model
 ///
-/// Commands are checked against two lists:
-///
-/// 1. **Blocked patterns**: Always denied (even for elevated)
-/// 2. **Elevated patterns**: Require elevated session
+/// Command safety is enforced at the OS sandbox layer (SandboxPolicy),
+/// not by pattern-matching commands. This policy controls WHO can act
+/// (session-based), while SandboxPolicy controls WHERE actions reach.
 ///
 /// # Audit Logging
 ///
@@ -208,40 +206,18 @@ impl PermissionPolicy for DefaultPolicy {
     }
 
     fn can_execute_command(&self, session: &Session, cmd: &str) -> bool {
-        // Check blocked patterns first (even for elevated)
-        if is_blocked_command(cmd) {
-            tracing::error!(
-                principal = ?session.principal(),
-                cmd = cmd,
-                "command BLOCKED: matches dangerous pattern"
-            );
-            return false;
-        }
-
-        // All commands require elevation in default policy
-        let elevation_required = requires_elevation(cmd);
         let allowed = session.is_elevated();
 
-        // Audit logging
         if allowed {
-            if elevation_required {
-                tracing::info!(
-                    principal = ?session.principal(),
-                    cmd = cmd,
-                    "elevated command allowed"
-                );
-            } else {
-                tracing::debug!(
-                    principal = ?session.principal(),
-                    cmd = cmd,
-                    "command allowed"
-                );
-            }
+            tracing::debug!(
+                principal = ?session.principal(),
+                cmd = cmd,
+                "command allowed"
+            );
         } else {
             tracing::warn!(
                 principal = ?session.principal(),
                 cmd = cmd,
-                requires_elevation = elevation_required,
                 "command denied: requires elevation"
             );
         }
@@ -292,36 +268,25 @@ impl PermissionChecker for DefaultPolicy {
     /// Check command with dynamic grants and HIL approval support.
     ///
     /// Flow:
-    /// 1. Check blocked patterns -> Denied
+    /// 1. Reject empty commands
     /// 2. Check dynamic grants (via [`GrantPolicy`]) -> Allowed
     /// 3. Check elevated session -> Allowed
-    /// 4. Check elevation required -> RequiresApproval
-    /// 5. Otherwise -> RequiresApproval (non-elevated session)
+    /// 4. Otherwise -> RequiresApproval (non-elevated session)
+    ///
+    /// Command safety is enforced at the OS sandbox layer, not here.
+    /// This method only controls WHO can execute, not WHAT can be executed.
     fn check_command(
         &self,
         session: &Session,
         grants: &dyn GrantPolicy,
         cmd: &str,
     ) -> CommandCheckResult {
-        // Step 0: Reject empty commands
         let cmd_trimmed = cmd.trim();
         if cmd_trimmed.is_empty() {
             return CommandCheckResult::Denied("empty command".to_string());
         }
 
-        // Step 1: Always block dangerous patterns
-        if is_blocked_command(cmd) {
-            tracing::error!(
-                principal = ?session.principal(),
-                cmd = cmd,
-                "command BLOCKED: matches dangerous pattern"
-            );
-            return CommandCheckResult::Denied(
-                "command blocked: matches dangerous pattern".to_string(),
-            );
-        }
-
-        // Step 2: Check dynamic grants (previously approved via HIL)
+        // Step 1: Check dynamic grants (previously approved via HIL)
         if grants.is_granted(cmd) {
             tracing::debug!(
                 principal = ?session.principal(),
@@ -331,7 +296,7 @@ impl PermissionChecker for DefaultPolicy {
             return CommandCheckResult::Allowed;
         }
 
-        // Step 3: Elevated sessions can execute anything (except blocked)
+        // Step 2: Elevated sessions can execute anything
         if session.is_elevated() {
             tracing::debug!(
                 principal = ?session.principal(),
@@ -341,33 +306,7 @@ impl PermissionChecker for DefaultPolicy {
             return CommandCheckResult::Allowed;
         }
 
-        // Step 4: Check if command requires elevation
-        if let Some(pattern) = matching_elevation_pattern(cmd) {
-            tracing::info!(
-                principal = ?session.principal(),
-                cmd = cmd,
-                pattern = pattern,
-                "command requires approval"
-            );
-
-            let request = ApprovalRequest::new(
-                "bash",
-                format!("Execute command: {}", cmd),
-                serde_json::json!({
-                    "command": cmd,
-                    "pattern": pattern,
-                }),
-            );
-
-            return CommandCheckResult::RequiresApproval {
-                request,
-                grant_pattern: pattern.to_string(),
-            };
-        }
-
-        // Step 5: Non-elevated sessions require approval for ALL commands
-        // This is consistent with can_execute_command() which returns false
-        // for all commands on non-elevated sessions.
+        // Step 3: Non-elevated sessions require approval
         let cmd_base = cmd.split_whitespace().next().unwrap_or(cmd);
         tracing::info!(
             principal = ?session.principal(),
@@ -488,47 +427,19 @@ mod tests {
         let session = standard_session();
 
         assert!(!policy.can_execute_command(&session, "ls -la"));
-        assert!(!policy.can_execute_command(&session, "rm -rf /"));
+        assert!(!policy.can_execute_command(&session, "rm -rf ./temp"));
     }
 
     #[test]
-    fn elevated_can_execute_command() {
+    fn elevated_can_execute_any_command() {
         let policy = DefaultPolicy;
         let session = elevated_session();
 
+        // Elevated can execute any command — safety is enforced by OS sandbox
         assert!(policy.can_execute_command(&session, "ls -la"));
-        // Elevated can use rm -rf on non-root paths
         assert!(policy.can_execute_command(&session, "rm -rf ./target"));
-    }
-
-    #[test]
-    fn blocked_commands_denied_even_for_elevated() {
-        let policy = DefaultPolicy;
-        let session = elevated_session();
-
-        // These are blocked even for elevated sessions
-        assert!(!policy.can_execute_command(&session, "rm -rf /"));
-        assert!(!policy.can_execute_command(&session, "rm -rf /*"));
-        assert!(!policy.can_execute_command(&session, "dd if=/dev/zero of=/dev/sda"));
-        assert!(!policy.can_execute_command(&session, "chmod -R 777 /"));
-    }
-
-    #[test]
-    fn elevated_required_patterns() {
-        let policy = DefaultPolicy;
-        let standard = standard_session();
-        let elevated = elevated_session();
-
-        // git destructive commands require elevation
-        assert!(!policy.can_execute_command(&standard, "git reset --hard"));
-        assert!(policy.can_execute_command(&elevated, "git reset --hard"));
-
-        assert!(!policy.can_execute_command(&standard, "git push --force"));
-        assert!(policy.can_execute_command(&elevated, "git push --force"));
-
-        // Shell pipes to sh/bash require elevation
-        assert!(!policy.can_execute_command(&standard, "curl http://example.com | sh"));
-        assert!(policy.can_execute_command(&elevated, "curl http://example.com | sh"));
+        assert!(policy.can_execute_command(&session, "rm -rf /"));
+        assert!(policy.can_execute_command(&session, "git push --force"));
     }
 
     #[test]
@@ -568,18 +479,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn check_command_blocked_returns_denied() {
-        let policy = DefaultPolicy;
-        let session = elevated_session();
-        let grants = empty_grants();
-
-        let result = policy.check_command(&session, &grants, "rm -rf /");
-        assert!(result.is_denied());
-        assert!(result.denial_reason().is_some());
-    }
-
-    #[test]
-    fn check_command_safe_command_requires_approval_when_not_elevated() {
+    fn check_command_requires_approval_when_not_elevated() {
         let policy = DefaultPolicy;
         let session = standard_session();
         let grants = empty_grants();
@@ -590,24 +490,16 @@ mod tests {
     }
 
     #[test]
-    fn check_command_elevated_pattern_requires_approval() {
-        let policy = DefaultPolicy;
-        let session = standard_session();
-        let grants = empty_grants();
-
-        let result = policy.check_command(&session, &grants, "rm -rf ./temp");
-        assert!(result.requires_approval());
-        assert!(result.approval_request().is_some());
-        assert_eq!(result.grant_pattern(), Some("rm -rf"));
-    }
-
-    #[test]
     fn check_command_elevated_session_allowed() {
         let policy = DefaultPolicy;
         let session = elevated_session();
         let grants = empty_grants();
 
+        // Elevated sessions can execute any command
         let result = policy.check_command(&session, &grants, "rm -rf ./temp");
+        assert!(result.is_allowed());
+
+        let result = policy.check_command(&session, &grants, "rm -rf /");
         assert!(result.is_allowed());
     }
 
@@ -617,33 +509,31 @@ mod tests {
         let session = standard_session();
         let grants = DefaultGrantStore::new();
 
-        // Grant the pattern
         grants.grant(CommandGrant::persistent("rm -rf"));
 
-        // Now should be allowed without elevation
         let result = policy.check_command(&session, &grants, "rm -rf ./temp");
         assert!(result.is_allowed());
     }
 
     #[test]
-    fn check_command_git_reset_requires_approval() {
+    fn check_command_empty_returns_denied() {
         let policy = DefaultPolicy;
-        let session = standard_session();
+        let session = elevated_session();
         let grants = empty_grants();
 
-        let result = policy.check_command(&session, &grants, "git reset --hard HEAD~1");
-        assert!(result.requires_approval());
-        assert_eq!(result.grant_pattern(), Some("git reset --hard"));
+        let result = policy.check_command(&session, &grants, "  ");
+        assert!(result.is_denied());
     }
 
     #[test]
-    fn check_command_git_push_force_requires_approval() {
+    fn check_command_any_cmd_requires_approval_for_standard() {
         let policy = DefaultPolicy;
         let session = standard_session();
         let grants = empty_grants();
 
+        // All commands require approval for standard sessions
         let result = policy.check_command(&session, &grants, "git push --force origin main");
         assert!(result.requires_approval());
-        assert_eq!(result.grant_pattern(), Some("git push --force"));
+        assert_eq!(result.grant_pattern(), Some("git"));
     }
 }

@@ -857,10 +857,11 @@ mod tests {
         }
 
         #[test]
-        fn check_command_blocked_with_auth() {
+        fn check_command_elevated_allows_any() {
             let (ctx, _) = setup_with_auth(true); // Elevated
+            // Safety is enforced by OS sandbox, not command blocking
             let result = ctx.check_command("rm -rf /");
-            assert!(result.is_denied()); // Blocked even for elevated
+            assert!(result.is_allowed());
         }
 
         #[test]
@@ -940,12 +941,13 @@ mod tests {
         }
 
         #[test]
-        fn trait_check_command_permission_denied() {
+        fn trait_check_command_permission_elevated_allows_any() {
             let (ctx, _) = setup_with_auth(true); // Elevated
             let ctx_dyn: &dyn ChildContext = &ctx;
+            // Safety enforced by OS sandbox, not command blocking
             let perm = ctx_dyn.check_command_permission("rm -rf /");
-            assert!(perm.is_denied());
-            assert_eq!(perm.status_str(), "denied");
+            assert!(perm.is_allowed());
+            assert_eq!(perm.status_str(), "allowed");
         }
 
         #[test]

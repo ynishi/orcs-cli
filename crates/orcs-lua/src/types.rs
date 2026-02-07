@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(int_result, serde_json::json!(42));
 
         // Float
-        let float_result = lua_to_json(Value::Number(3.14), &lua).unwrap();
-        assert!(float_result.as_f64().unwrap() - 3.14 < 0.001);
+        let float_result = lua_to_json(Value::Number(2.72), &lua).unwrap();
+        assert!(float_result.as_f64().unwrap() - 2.72 < 0.001);
     }
 }

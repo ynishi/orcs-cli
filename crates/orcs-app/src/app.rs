@@ -1007,9 +1007,10 @@ mod tests {
         }
         impl ConfigResolver for ToggleResolver {
             fn resolve(&self) -> Result<OrcsConfig, orcs_runtime::ConfigError> {
-                let mut config = OrcsConfig::default();
-                config.debug = self.debug.load(Ordering::Relaxed);
-                Ok(config)
+                Ok(OrcsConfig {
+                    debug: self.debug.load(Ordering::Relaxed),
+                    ..OrcsConfig::default()
+                })
             }
         }
 
