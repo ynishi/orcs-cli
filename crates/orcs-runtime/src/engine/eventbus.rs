@@ -367,7 +367,11 @@ impl EventBus {
     ///
     /// * `component_id` - The Component's identifier (FQN is extracted)
     /// * `channel_id` - The Channel hosting the Component
-    pub fn register_component_channel(&mut self, component_id: &ComponentId, channel_id: ChannelId) {
+    pub fn register_component_channel(
+        &mut self,
+        component_id: &ComponentId,
+        channel_id: ChannelId,
+    ) {
         self.component_channel_map
             .write()
             .expect("component_channel_map lock poisoned")

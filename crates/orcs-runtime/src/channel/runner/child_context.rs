@@ -410,11 +410,8 @@ impl ChildContextImpl {
     /// Creates a sub-ChildContext for a spawned child, inheriting RPC
     /// handles, auth context, and sandbox from the parent.
     fn create_child_context(&self, child_id: &str) -> Box<dyn ChildContext> {
-        let mut ctx = ChildContextImpl::new(
-            child_id,
-            self.output_tx.clone(),
-            Arc::clone(&self.spawner),
-        );
+        let mut ctx =
+            ChildContextImpl::new(child_id, self.output_tx.clone(), Arc::clone(&self.spawner));
         if let Some(loader) = &self.lua_loader {
             ctx = ctx.with_lua_loader(Arc::clone(loader));
         }
@@ -686,11 +683,8 @@ impl ChildContext for ChildContextImpl {
                     .await
                     .map_err(|_| "request channel closed".to_string())?;
 
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(timeout),
-                    reply_rx,
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_millis(timeout), reply_rx)
+                    .await
                 {
                     Ok(Ok(result)) => result,
                     Ok(Err(_)) => Err("response channel closed".into()),
