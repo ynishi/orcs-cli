@@ -681,6 +681,7 @@ impl OrcsAppBuilder {
         let agent_mgr_channel = world.create_channel(ChannelConfig::default());
         let shell_channel = world.create_channel(ChannelConfig::default());
         let tool_channel = world.create_channel(ChannelConfig::default());
+        let skill_mgr_channel = world.create_channel(ChannelConfig::default());
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -867,6 +868,29 @@ impl OrcsAppBuilder {
             agent_mgr_id.fqn()
         );
 
+        // Spawn ChannelRunner for skill_manager (skill discovery / registration / RPC)
+        let skill_mgr_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+        let skill_mgr_component =
+            ScriptLoader::load_embedded("skill_manager", Arc::clone(&sandbox))
+                .map_err(|e| {
+                    AppError::Config(format!("Failed to load skill_manager script: {e}"))
+                })?;
+        let skill_mgr_id = skill_mgr_component.id().clone();
+        let _skill_mgr_handle = engine.spawn_runner_full_auth(
+            skill_mgr_channel,
+            Box::new(skill_mgr_component),
+            None, // No IO output routing (internal service)
+            None, // No child spawner
+            Arc::clone(&auth_session),
+            Arc::clone(&auth_checker),
+            skill_mgr_grants,
+        );
+        tracing::info!(
+            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
+            skill_mgr_channel,
+            skill_mgr_id.fqn()
+        );
+
         // Load or create session
         let (session, is_resumed, restored_count) =
             if let Some(session_id) = &self.resume_session_id {
@@ -892,6 +916,7 @@ impl OrcsAppBuilder {
         component_routes.insert("shell".to_string(), shell_channel);
         component_routes.insert("tool".to_string(), tool_channel);
         component_routes.insert("agent_mgr".to_string(), agent_mgr_channel);
+        component_routes.insert("skill_manager".to_string(), skill_mgr_channel);
         tracing::info!(
             "Component routes registered: {:?}",
             component_routes.keys().collect::<Vec<_>>()
