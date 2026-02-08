@@ -198,6 +198,7 @@ impl OrcsEngine {
         channel_id: ChannelId,
         component: Box<dyn Component>,
     ) -> ChannelHandle {
+        let component_id = component.id().clone();
         let signal_rx = self.signal_tx.subscribe();
         let (runner, handle) = ChannelRunner::builder(
             channel_id,
@@ -206,10 +207,13 @@ impl OrcsEngine {
             signal_rx,
             component,
         )
+        .with_request_channel()
         .build();
 
-        // Register handle with EventBus for event injection
+        // Register handle with EventBus for event injection + RPC routing
         self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id, channel_id);
 
         // Store handle
         self.channel_handles.insert(channel_id, handle.clone());
@@ -268,7 +272,8 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
-        .with_board(Arc::clone(&self.board));
+        .with_board(Arc::clone(&self.board))
+        .with_request_channel();
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -277,8 +282,10 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection
+        // Register handle with EventBus for event injection + RPC routing
         self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id.clone(), channel_id);
 
         // Store handle
         self.channel_handles.insert(channel_id, handle.clone());
@@ -332,7 +339,8 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
-        .with_board(Arc::clone(&self.board));
+        .with_board(Arc::clone(&self.board))
+        .with_request_channel();
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -347,8 +355,10 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection
+        // Register handle with EventBus for event injection + RPC routing
         self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id.clone(), channel_id);
 
         // Store handle
         self.channel_handles.insert(channel_id, handle.clone());
@@ -542,10 +552,13 @@ impl OrcsEngine {
         .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
+        .with_request_channel()
         .build();
 
-        // Register handle with EventBus for event injection
+        // Register handle with EventBus for event injection + RPC routing
         self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id.clone(), channel_id);
 
         // Store handle
         self.channel_handles.insert(channel_id, handle.clone());
@@ -609,7 +622,8 @@ impl OrcsEngine {
         .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
-        .with_grants(grants);
+        .with_grants(grants)
+        .with_request_channel();
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -624,8 +638,10 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection
+        // Register handle with EventBus for event injection + RPC routing
         self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id.clone(), channel_id);
 
         // Store handle
         self.channel_handles.insert(channel_id, handle.clone());

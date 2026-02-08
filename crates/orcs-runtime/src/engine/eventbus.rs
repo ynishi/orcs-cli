@@ -75,9 +75,9 @@ pub type SharedChannelHandles = Arc<RwLock<HashMap<ChannelId, ChannelHandle>>>;
 /// EventBus itself is not `Send`/`Sync`. Use it within a single async task
 /// or wrap with appropriate synchronization.
 pub struct EventBus {
-    /// Request senders per component
+    /// Request senders per component (for standalone ComponentHandle, used in tests).
     request_senders: HashMap<ComponentId, mpsc::Sender<Request>>,
-    /// Pending response receivers
+    /// Pending response receivers (for standalone ComponentHandle path).
     pending_responses: HashMap<RequestId, oneshot::Sender<Result<Value, EngineError>>>,
     /// Signal broadcaster
     ///
@@ -90,6 +90,13 @@ pub struct EventBus {
     ///
     /// This is shared with ClientRunner to enable UserInput broadcast.
     channel_handles: SharedChannelHandles,
+    /// Maps ComponentId to ChannelId for routing RPC requests via ChannelHandle.
+    ///
+    /// Populated by [`register_component_channel()`] when Engine spawns runners.
+    /// When `request()` is called, this mapping is checked first to route
+    /// via the ChannelHandle's request channel (instead of the standalone
+    /// ComponentHandle path).
+    component_channel_map: HashMap<ComponentId, ChannelId>,
 }
 
 impl EventBus {
@@ -103,6 +110,7 @@ impl EventBus {
             signal_tx,
             subscriptions: HashMap::new(),
             channel_handles: Arc::new(RwLock::new(HashMap::new())),
+            component_channel_map: HashMap::new(),
         }
     }
 
@@ -198,6 +206,36 @@ impl EventBus {
             return Err(EngineError::NoTarget);
         };
 
+        // Try ChannelRunner-backed routing first (production path).
+        //
+        // If the target Component is hosted by a ChannelRunner with a
+        // request channel enabled, route directly via ChannelHandle.
+        // The reply comes back through a oneshot in the RequestEnvelope,
+        // bypassing pending_responses entirely.
+        if let Some(channel_id) = self.component_channel_map.get(target).copied() {
+            let handle = {
+                let handles = self.channel_handles.read().expect("lock poisoned");
+                handles.get(&channel_id).cloned()
+            };
+
+            if let Some(handle) = handle {
+                if handle.accepts_requests() {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    if handle.send_request(req, reply_tx).await.is_err() {
+                        return Err(EngineError::SendFailed("request channel closed".into()));
+                    }
+
+                    let timeout_duration = Duration::from_millis(timeout_ms);
+                    return match tokio::time::timeout(timeout_duration, reply_rx).await {
+                        Ok(Ok(result)) => result.map_err(EngineError::ComponentFailed),
+                        Ok(Err(_)) => Err(EngineError::ChannelClosed),
+                        Err(_) => Err(EngineError::Timeout(request_id)),
+                    };
+                }
+            }
+        }
+
+        // Fallback: standalone ComponentHandle path (tests, non-channel components).
         let Some(sender) = self.request_senders.get(target) else {
             return Err(EngineError::ComponentNotFound(target.clone()));
         };
@@ -296,12 +334,28 @@ impl EventBus {
         handles.insert(handle.id, handle);
     }
 
+    /// Registers a ComponentId → ChannelId mapping for RPC routing.
+    ///
+    /// After registration, [`request()`] will route requests targeting
+    /// this ComponentId through the ChannelHandle's request channel
+    /// instead of the standalone ComponentHandle path.
+    ///
+    /// # Arguments
+    ///
+    /// * `component_id` - The Component's identifier
+    /// * `channel_id` - The Channel hosting the Component
+    pub fn register_component_channel(&mut self, component_id: ComponentId, channel_id: ChannelId) {
+        self.component_channel_map.insert(component_id, channel_id);
+    }
+
     /// Unregisters a channel handle.
     ///
     /// Call this when a channel is killed or completed.
     pub fn unregister_channel(&mut self, id: &ChannelId) {
         let mut handles = self.channel_handles.write().expect("lock poisoned");
         handles.remove(id);
+        // Clean up component → channel mapping
+        self.component_channel_map.retain(|_, cid| cid != id);
     }
 
     /// Injects a direct event into a specific channel (subscription filter bypassed).
@@ -863,5 +917,225 @@ mod tests {
         let evt = rx1.try_recv();
         assert!(evt.is_ok());
         assert_eq!(evt.unwrap().into_event().operation, "async_input");
+    }
+
+    // === Component-to-Component RPC via ChannelHandle Tests ===
+
+    /// Helper: creates a ChannelRunner with request channel enabled,
+    /// returning the handle (with request_tx) and the runner task.
+    /// The runner echoes on_request payloads, so RPC callers get their payload back.
+    async fn setup_runner_with_request_channel() -> (
+        ChannelHandle,
+        tokio::task::JoinHandle<crate::channel::RunnerResult>,
+        ChannelId,
+        tokio::sync::broadcast::Sender<orcs_event::Signal>,
+        tokio::sync::mpsc::Sender<crate::channel::WorldCommand>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::channel::ChannelRunner;
+        use crate::channel::{ChannelConfig, World, WorldManager};
+        use orcs_component::{ComponentError, Status};
+        use orcs_event::SignalResponse;
+        use tokio::sync::broadcast;
+
+        struct EchoRpcComponent {
+            id: ComponentId,
+        }
+        impl orcs_component::Component for EchoRpcComponent {
+            fn id(&self) -> &ComponentId {
+                &self.id
+            }
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+            fn on_request(
+                &mut self,
+                request: &orcs_event::Request,
+            ) -> Result<Value, ComponentError> {
+                Ok(request.payload.clone())
+            }
+            fn on_signal(&mut self, signal: &orcs_event::Signal) -> SignalResponse {
+                if signal.is_veto() {
+                    SignalResponse::Abort
+                } else {
+                    SignalResponse::Handled
+                }
+            }
+            fn abort(&mut self) {}
+        }
+
+        let mut world = World::new();
+        let channel_id = world.create_channel(ChannelConfig::interactive());
+        let (manager, world_tx) = WorldManager::with_world(world);
+        let world_handle = manager.world();
+        let manager_task = tokio::spawn(manager.run());
+        let (signal_tx, _) = broadcast::channel(64);
+
+        let component: Box<dyn orcs_component::Component> = Box::new(EchoRpcComponent {
+            id: ComponentId::builtin("rpc_target"),
+        });
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            channel_id,
+            world_tx.clone(),
+            world_handle,
+            signal_rx,
+            component,
+        )
+        .with_request_channel()
+        .build();
+
+        let runner_task = tokio::spawn(runner.run());
+
+        (
+            handle,
+            runner_task,
+            channel_id,
+            signal_tx,
+            world_tx,
+            manager_task,
+        )
+    }
+
+    #[tokio::test]
+    async fn request_via_channel_handle_routes_and_responds() {
+        let (handle, runner_task, channel_id, signal_tx, world_tx, manager_task) =
+            setup_runner_with_request_channel().await;
+
+        let mut bus = EventBus::new();
+        let source = ComponentId::builtin("source");
+        let target = ComponentId::builtin("rpc_target");
+
+        bus.register_channel(handle);
+        bus.register_component_channel(target.clone(), channel_id);
+
+        let req = Request::new(
+            EventCategory::Echo,
+            "echo",
+            source,
+            channel_id,
+            Value::String("rpc_test".into()),
+        )
+        .with_target(target);
+
+        let result = bus.request(req).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::String("rpc_test".into()));
+
+        // Cleanup
+        signal_tx
+            .send(orcs_event::Signal::cancel(
+                channel_id,
+                crate::Principal::System,
+            ))
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+        let _ = world_tx.send(crate::channel::WorldCommand::Shutdown).await;
+        let _ = manager_task.await;
+    }
+
+    #[tokio::test]
+    async fn request_via_channel_handle_timeout() {
+        use orcs_types::ErrorCode;
+
+        // Use a component that never responds quickly enough
+        let (handle, runner_task, channel_id, signal_tx, world_tx, manager_task) =
+            setup_runner_with_request_channel().await;
+
+        let mut bus = EventBus::new();
+        let source = ComponentId::builtin("source");
+        let target = ComponentId::builtin("rpc_target");
+
+        bus.register_channel(handle);
+        bus.register_component_channel(target.clone(), channel_id);
+
+        // Stop the runner first so reply never comes
+        signal_tx
+            .send(orcs_event::Signal::veto(crate::Principal::System))
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), runner_task).await;
+
+        let req = Request::new(
+            EventCategory::Echo,
+            "slow_op",
+            source,
+            channel_id,
+            Value::Null,
+        )
+        .with_target(target)
+        .with_timeout(50);
+
+        let result = bus.request(req).await;
+
+        // After runner stops, request_rx is dropped, so send_request fails
+        // or the oneshot reply_tx is dropped → ChannelClosed
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let code = err.code();
+        assert!(
+            code == "ENGINE_SEND_FAILED" || code == "ENGINE_CHANNEL_CLOSED",
+            "expected send_failed or channel_closed, got: {}",
+            code,
+        );
+
+        let _ = world_tx.send(crate::channel::WorldCommand::Shutdown).await;
+        let _ = manager_task.await;
+    }
+
+    #[tokio::test]
+    async fn request_falls_back_to_component_handle_when_no_channel_map() {
+        let mut bus = EventBus::new();
+        let source = ComponentId::builtin("source");
+        let target = ComponentId::builtin("target");
+        let channel = ChannelId::new();
+
+        // Register via ComponentHandle (standalone path), not ChannelHandle
+        let mut handle = bus.register(target.clone(), vec![EventCategory::Echo]);
+
+        let req = Request::new(
+            EventCategory::Echo,
+            "echo",
+            source,
+            channel,
+            Value::String("fallback".into()),
+        )
+        .with_target(target);
+        let request_id = req.id;
+
+        // Spawn receiver on ComponentHandle path
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Some(req) = handle.recv_request().await {
+                tx.send(req).ok();
+            }
+        });
+
+        let _response_task = tokio::spawn(async move {
+            let mut bus = bus;
+            bus.request(req).await
+        });
+
+        let received = rx.await.unwrap();
+        assert_eq!(received.id, request_id);
+    }
+
+    #[tokio::test]
+    async fn unregister_channel_cleans_up_component_channel_map() {
+        let mut bus = EventBus::new();
+        let target = ComponentId::builtin("target");
+        let channel_id = ChannelId::new();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(32);
+        let handle = ChannelHandle::new(channel_id, event_tx);
+
+        bus.register_channel(handle);
+        bus.register_component_channel(target.clone(), channel_id);
+
+        // Verify mapping exists
+        assert!(bus.component_channel_map.contains_key(&target));
+
+        // Unregister should clean up
+        bus.unregister_channel(&channel_id);
+        assert!(!bus.component_channel_map.contains_key(&target));
     }
 }

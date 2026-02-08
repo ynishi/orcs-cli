@@ -50,8 +50,9 @@ use orcs_component::{
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// An event that can be injected into a channel.
@@ -196,6 +197,21 @@ pub struct RunnerResult {
     pub snapshot: Option<ComponentSnapshot>,
 }
 
+/// An RPC request paired with its reply channel.
+///
+/// Created by [`EventBus::request()`] and delivered to [`ChannelRunner`]
+/// via its `request_rx` channel. The runner calls `Component::on_request()`
+/// and sends the result back through `reply_tx`.
+pub(crate) struct RequestEnvelope {
+    /// The incoming request.
+    pub request: Request,
+    /// One-shot channel to send the response back to the caller.
+    pub reply_tx: oneshot::Sender<Result<Value, String>>,
+}
+
+/// Buffer size for the request channel (Component-to-Component RPC).
+const REQUEST_BUFFER_SIZE: usize = 32;
+
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
 
@@ -206,13 +222,48 @@ pub struct ChannelHandle {
     pub id: ChannelId,
     /// Event sender (carries [`InboundEvent`] internally).
     event_tx: mpsc::Sender<InboundEvent>,
+    /// Request sender for Component-to-Component RPC (None if not enabled).
+    request_tx: Option<mpsc::Sender<RequestEnvelope>>,
 }
 
 impl ChannelHandle {
     /// Creates a new handle with the given sender.
     #[must_use]
     pub(crate) fn new(id: ChannelId, event_tx: mpsc::Sender<InboundEvent>) -> Self {
-        Self { id, event_tx }
+        Self {
+            id,
+            event_tx,
+            request_tx: None,
+        }
+    }
+
+    /// Returns `true` if this handle accepts RPC requests.
+    #[must_use]
+    pub fn accepts_requests(&self) -> bool {
+        self.request_tx.is_some()
+    }
+
+    /// Sends an RPC request to the bound Component.
+    ///
+    /// The request is delivered to the ChannelRunner's `request_rx` and
+    /// processed by `Component::on_request()`. The result is sent back
+    /// through `reply_tx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the request channel is not enabled or is closed.
+    pub(crate) async fn send_request(
+        &self,
+        request: Request,
+        reply_tx: oneshot::Sender<Result<Value, String>>,
+    ) -> Result<(), mpsc::error::SendError<RequestEnvelope>> {
+        match &self.request_tx {
+            Some(tx) => tx.send(RequestEnvelope { request, reply_tx }).await,
+            None => Err(mpsc::error::SendError(RequestEnvelope {
+                request,
+                reply_tx,
+            })),
+        }
     }
 
     /// Injects a broadcast event into the channel (subscription filter applies).
@@ -294,8 +345,25 @@ pub struct ChannelRunner {
     child_spawner: Option<Arc<StdMutex<ChildSpawner>>>,
     /// Event sender for child context (kept for context creation).
     event_tx: Option<mpsc::Sender<InboundEvent>>,
+    /// Receiver for incoming RPC requests from other Components.
+    ///
+    /// When enabled via [`ChannelRunnerBuilder::with_request_channel()`],
+    /// the runner accepts [`RequestEnvelope`]s, calls `Component::on_request()`,
+    /// and sends the result back through the envelope's `reply_tx`.
+    request_rx: Option<mpsc::Receiver<RequestEnvelope>>,
     /// Initial snapshot to restore before init (session resume).
     initial_snapshot: Option<ComponentSnapshot>,
+}
+
+/// Helper for `tokio::select!`: receives from an optional request channel.
+///
+/// Returns `None` immediately if the receiver is `None` (request channel
+/// not enabled), allowing the select! branch to be skipped.
+async fn recv_request(rx: &mut Option<mpsc::Receiver<RequestEnvelope>>) -> Option<RequestEnvelope> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl ChannelRunner {
@@ -455,7 +523,7 @@ impl ChannelRunner {
 
         loop {
             tokio::select! {
-                // Priority: signals first
+                // Priority: signals > requests > events
                 biased;
 
                 signal = self.signal_rx.recv() => {
@@ -473,6 +541,11 @@ impl ChannelRunner {
                             warn!(lagged = n, "signal receiver lagged");
                         }
                     }
+                }
+
+                // RPC requests from other Components (higher priority than events)
+                Some(envelope) = recv_request(&mut self.request_rx) => {
+                    self.handle_rpc_request(envelope).await;
                 }
 
                 event = self.event_rx.recv() => {
@@ -675,6 +748,29 @@ impl ChannelRunner {
         }
     }
 
+    /// Handles an incoming RPC request from another Component.
+    ///
+    /// Calls `Component::on_request()` and sends the result back through
+    /// the envelope's `reply_tx`.
+    async fn handle_rpc_request(&self, envelope: RequestEnvelope) {
+        debug!(
+            request_id = %envelope.request.id,
+            operation = %envelope.request.operation,
+            source = %envelope.request.source,
+            "handling RPC request"
+        );
+
+        let result = {
+            let mut comp = self.component.lock().await;
+            comp.on_request(&envelope.request)
+        };
+
+        let response = result.map_err(|e| e.to_string());
+        if envelope.reply_tx.send(response).is_err() {
+            debug!("RPC reply dropped (caller cancelled)");
+        }
+    }
+
     /// Spawns a child channel with a bound Component.
     ///
     /// Returns the new channel's ID and handle, or None if spawn failed.
@@ -762,6 +858,8 @@ pub struct ChannelRunnerBuilder {
     board: Option<crate::board::SharedBoard>,
     /// Initial snapshot to restore before init (session resume).
     initial_snapshot: Option<ComponentSnapshot>,
+    /// Enable request channel for Component-to-Component RPC.
+    enable_request_channel: bool,
 }
 
 impl ChannelRunnerBuilder {
@@ -791,6 +889,7 @@ impl ChannelRunnerBuilder {
             shared_handles: None,
             board: None,
             initial_snapshot: None,
+            enable_request_channel: false,
         }
     }
 
@@ -932,6 +1031,18 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_initial_snapshot(mut self, snapshot: ComponentSnapshot) -> Self {
         self.initial_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Enables the request channel for Component-to-Component RPC.
+    ///
+    /// When enabled, the runner's [`ChannelHandle`] will accept
+    /// [`RequestEnvelope`]s via `send_request()`, allowing other
+    /// Components to call this Component's `on_request()` and receive
+    /// a response.
+    #[must_use]
+    pub fn with_request_channel(mut self) -> Self {
+        self.enable_request_channel = true;
         self
     }
 
@@ -1120,6 +1231,14 @@ impl ChannelRunnerBuilder {
         // Cache subscriptions from Component to avoid locking on every event
         let subscriptions = self.component.subscriptions().to_vec();
 
+        // Create request channel if enabled
+        let (request_tx, request_rx) = if self.enable_request_channel {
+            let (tx, rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let runner = ChannelRunner {
             id: self.id,
             event_rx,
@@ -1131,10 +1250,12 @@ impl ChannelRunnerBuilder {
             paused_queue: PausedEventQueue::new(),
             child_spawner,
             event_tx: event_tx_for_context,
+            request_rx,
             initial_snapshot: self.initial_snapshot,
         };
 
-        let handle = ChannelHandle::new(self.id, event_tx);
+        let mut handle = ChannelHandle::new(self.id, event_tx);
+        handle.request_tx = request_tx;
 
         (runner, handle)
     }
@@ -1604,6 +1725,163 @@ mod tests {
         let ctx = runner.create_child_context("child-1");
         assert!(ctx.is_none());
 
+        teardown(manager_task, world_tx).await;
+    }
+
+    // === Request Channel (Component-to-Component RPC) Tests ===
+
+    #[tokio::test]
+    async fn builder_with_request_channel_enables_accepts_requests() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (_runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_request_channel()
+        .build();
+
+        assert!(handle.accepts_requests());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn builder_without_request_channel_rejects_requests() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (_runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .build();
+
+        assert!(!handle.accepts_requests());
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_request_routed_to_runner_and_responded() {
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) = ChannelRunner::builder(
+            primary,
+            world_tx.clone(),
+            world,
+            signal_rx,
+            mock_component(),
+        )
+        .with_request_channel()
+        .build();
+
+        let runner_task = tokio::spawn(runner.run());
+
+        // Send RPC request via handle
+        let source = ComponentId::builtin("caller");
+        let target = ComponentId::builtin("test");
+        let req = Request::new(
+            EventCategory::Echo,
+            "echo",
+            source,
+            primary,
+            Value::String("rpc_payload".into()),
+        )
+        .with_target(target);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle.send_request(req, reply_tx).await.unwrap();
+
+        // Should receive the echoed payload back
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), reply_rx)
+            .await
+            .expect("reply should arrive within timeout")
+            .expect("reply channel should not be dropped");
+
+        assert_eq!(result.unwrap(), Value::String("rpc_payload".into()));
+
+        // Cleanup
+        signal_tx
+            .send(Signal::cancel(primary, Principal::System))
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_request_component_error_returned_as_string() {
+        /// Component that always returns error from on_request.
+        struct FailingComponent {
+            id: ComponentId,
+        }
+
+        impl Component for FailingComponent {
+            fn id(&self) -> &ComponentId {
+                &self.id
+            }
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+                Err(ComponentError::ExecutionFailed(
+                    "deliberate test failure".into(),
+                ))
+            }
+            fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+                if signal.is_veto() {
+                    SignalResponse::Abort
+                } else {
+                    SignalResponse::Handled
+                }
+            }
+            fn abort(&mut self) {}
+        }
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let component: Box<dyn Component> = Box::new(FailingComponent {
+            id: ComponentId::builtin("failing"),
+        });
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) =
+            ChannelRunner::builder(primary, world_tx.clone(), world, signal_rx, component)
+                .with_request_channel()
+                .build();
+
+        let runner_task = tokio::spawn(runner.run());
+
+        let source = ComponentId::builtin("caller");
+        let target = ComponentId::builtin("failing");
+        let req = Request::new(EventCategory::Echo, "op", source, primary, Value::Null)
+            .with_target(target);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle.send_request(req, reply_tx).await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), reply_rx)
+            .await
+            .expect("reply should arrive")
+            .expect("channel should not be dropped");
+
+        assert!(result.is_err(), "should return Err for component failure");
+        assert!(
+            result.unwrap_err().contains("deliberate test failure"),
+            "error message should contain original error"
+        );
+
+        signal_tx
+            .send(Signal::cancel(primary, Principal::System))
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         teardown(manager_task, world_tx).await;
     }
 }
