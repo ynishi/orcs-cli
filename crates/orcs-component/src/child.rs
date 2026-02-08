@@ -183,7 +183,14 @@ impl ChildError {
 ///     children: Vec<C>,
 /// }
 /// ```
-pub trait Child: Identifiable + SignalReceiver + Statusable + Send + Sync {}
+pub trait Child: Identifiable + SignalReceiver + Statusable + Send + Sync {
+    /// Inject a [`ChildContext`] so the child can use `orcs.*` functions at
+    /// runtime (RPC, exec, spawn, file tools, etc.).
+    ///
+    /// The default implementation is a no-op — override when the child
+    /// actually needs context (e.g. `LuaChild`).
+    fn set_context(&mut self, _ctx: Box<dyn super::ChildContext>) {}
+}
 
 // ============================================
 // Internal Result Type

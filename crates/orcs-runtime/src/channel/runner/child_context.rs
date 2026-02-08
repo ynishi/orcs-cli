@@ -407,6 +407,32 @@ impl ChildContextImpl {
         Ok(channel_id)
     }
 
+    /// Creates a sub-ChildContext for a spawned child, inheriting RPC
+    /// handles, auth context, and sandbox from the parent.
+    fn create_child_context(&self, child_id: &str) -> Box<dyn ChildContext> {
+        let mut ctx = ChildContextImpl::new(
+            child_id,
+            self.output_tx.clone(),
+            Arc::clone(&self.spawner),
+        );
+        if let Some(loader) = &self.lua_loader {
+            ctx = ctx.with_lua_loader(Arc::clone(loader));
+        }
+        if let Some(s) = &self.session {
+            ctx = ctx.with_session_arc(Arc::clone(s));
+        }
+        if let Some(c) = &self.checker {
+            ctx = ctx.with_checker(Arc::clone(c));
+        }
+        if let Some(g) = &self.grants {
+            ctx = ctx.with_grants(Arc::clone(g));
+        }
+        if let (Some(h), Some(m)) = (&self.shared_handles, &self.component_channel_map) {
+            ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m));
+        }
+        Box::new(ctx)
+    }
+
     /// Creates an output event.
     fn create_output_event(&self, message: &str, level: &str) -> Event {
         Event {
@@ -482,7 +508,11 @@ impl ChildContext for ChildContextImpl {
             .ok_or_else(|| SpawnError::Internal("no lua loader configured".into()))?;
 
         // Load child from config
-        let child = loader.load(&config)?;
+        let mut child = loader.load(&config)?;
+
+        // Inject a ChildContext so the child can use orcs.request(), orcs.exec(), etc.
+        let child_ctx = self.create_child_context(&config.id);
+        child.set_context(child_ctx);
 
         // Spawn via spawner
         let mut spawner = self
@@ -702,7 +732,11 @@ impl AsyncChildContext for ChildContextImpl {
             .ok_or_else(|| SpawnError::Internal("no lua loader configured".into()))?;
 
         // Load child from config
-        let child = loader.load(&config)?;
+        let mut child = loader.load(&config)?;
+
+        // Inject a ChildContext so the child can use orcs.request(), orcs.exec(), etc.
+        let child_ctx = self.create_child_context(&config.id);
+        child.set_context(child_ctx);
 
         // Spawn via spawner (spawn_async returns Box<dyn AsyncChildHandle>)
         let mut spawner = self

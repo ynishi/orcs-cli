@@ -11,10 +11,26 @@ return {
 
     run = function(input)
         local message = input.message or ""
+
+        -- Query skill_manager via RPC
+        local skill_resp = orcs.request("skill::skill_manager", "status", {})
+        local skill_info = ""
+        if skill_resp and skill_resp.success and skill_resp.data then
+            local d = skill_resp.data
+            skill_info = string.format(
+                " [skills: total=%s, active=%s]",
+                tostring(d.total or "?"), tostring(d.active or "?")
+            )
+        elseif skill_resp and skill_resp.error then
+            skill_info = " [skill error: " .. skill_resp.error .. "]"
+        else
+            skill_info = " [skill: no response]"
+        end
+
         return {
             success = true,
             data = {
-                response = "Worker processed: " .. tostring(message),
+                response = "Processed: " .. tostring(message) .. skill_info,
                 source = "worker"
             }
         }

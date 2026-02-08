@@ -375,7 +375,11 @@ impl Statusable for LuaChild {
     }
 }
 
-impl Child for LuaChild {}
+impl Child for LuaChild {
+    fn set_context(&mut self, ctx: Box<dyn ChildContext>) {
+        self.context = Some(ctx);
+    }
+}
 
 impl RunnableChild for LuaChild {
     fn run(&mut self, input: serde_json::Value) -> ChildResult {
