@@ -61,11 +61,12 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// Uses std::sync::RwLock for sync access in EventBus methods.
 pub type SharedChannelHandles = Arc<RwLock<HashMap<ChannelId, ChannelHandle>>>;
 
-/// Shared mapping from ComponentId to ChannelId for RPC routing.
+/// Shared mapping from Component FQN to ChannelId for RPC routing.
 ///
+/// Keys are FQN strings (`"namespace::name"`, e.g. `"skill::skill_manager"`).
 /// Used by both EventBus and EventEmitter to resolve which ChannelRunner
 /// hosts a given Component, enabling `orcs.request()` from Lua.
-pub type SharedComponentChannelMap = Arc<RwLock<HashMap<ComponentId, ChannelId>>>;
+pub type SharedComponentChannelMap = Arc<RwLock<HashMap<String, ChannelId>>>;
 
 /// EventBus - routes messages between components and channels.
 ///
@@ -232,7 +233,7 @@ impl EventBus {
             .component_channel_map
             .read()
             .expect("component_channel_map lock poisoned")
-            .get(target)
+            .get(&target.fqn())
             .copied();
         if let Some(channel_id) = resolved_channel_id {
             let handle = {
@@ -356,21 +357,21 @@ impl EventBus {
         handles.insert(handle.id, handle);
     }
 
-    /// Registers a ComponentId → ChannelId mapping for RPC routing.
+    /// Registers a Component FQN → ChannelId mapping for RPC routing.
     ///
     /// After registration, [`request()`] will route requests targeting
-    /// this ComponentId through the ChannelHandle's request channel
+    /// this Component through the ChannelHandle's request channel
     /// instead of the standalone ComponentHandle path.
     ///
     /// # Arguments
     ///
-    /// * `component_id` - The Component's identifier
+    /// * `component_id` - The Component's identifier (FQN is extracted)
     /// * `channel_id` - The Channel hosting the Component
-    pub fn register_component_channel(&mut self, component_id: ComponentId, channel_id: ChannelId) {
+    pub fn register_component_channel(&mut self, component_id: &ComponentId, channel_id: ChannelId) {
         self.component_channel_map
             .write()
             .expect("component_channel_map lock poisoned")
-            .insert(component_id, channel_id);
+            .insert(component_id.fqn(), channel_id);
     }
 
     /// Unregisters a channel handle.
@@ -1035,7 +1036,7 @@ mod tests {
         let target = ComponentId::builtin("rpc_target");
 
         bus.register_channel(handle);
-        bus.register_component_channel(target.clone(), channel_id);
+        bus.register_component_channel(&target, channel_id);
 
         let req = Request::new(
             EventCategory::Echo,
@@ -1075,7 +1076,7 @@ mod tests {
         let target = ComponentId::builtin("rpc_target");
 
         bus.register_channel(handle);
-        bus.register_component_channel(target.clone(), channel_id);
+        bus.register_component_channel(&target, channel_id);
 
         // Stop the runner first so reply never comes
         signal_tx
@@ -1157,14 +1158,14 @@ mod tests {
         let handle = ChannelHandle::new(channel_id, event_tx);
 
         bus.register_channel(handle);
-        bus.register_component_channel(target.clone(), channel_id);
+        bus.register_component_channel(&target, channel_id);
 
         // Verify mapping exists
         assert!(bus
             .component_channel_map
             .read()
             .unwrap()
-            .contains_key(&target));
+            .contains_key(&target.fqn()));
 
         // Unregister should clean up
         bus.unregister_channel(&channel_id);
@@ -1172,6 +1173,6 @@ mod tests {
             .component_channel_map
             .read()
             .unwrap()
-            .contains_key(&target));
+            .contains_key(&target.fqn()));
     }
 }

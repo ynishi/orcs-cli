@@ -386,13 +386,12 @@ impl Emitter for EventEmitter {
             .as_ref()
             .ok_or("shared_handles not configured")?;
 
-        let target_id = ComponentId::builtin(target);
         let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
 
-        // Resolve ComponentId → ChannelId
+        // Resolve FQN → ChannelId (target is FQN like "skill::skill_manager")
         let channel_id = {
             let m = map.read().map_err(|e| format!("map lock poisoned: {e}"))?;
-            *m.get(&target_id)
+            *m.get(target)
                 .ok_or_else(|| format!("component not found: {target}"))?
         };
 
@@ -410,7 +409,11 @@ impl Emitter for EventEmitter {
             return Err(format!("component {target} does not accept requests"));
         }
 
-        // Build Request
+        // Build Request — parse FQN for target ComponentId (informational)
+        let target_id = match target.split_once("::") {
+            Some((ns, name)) => ComponentId::new(ns, name),
+            None => ComponentId::new("unknown", target),
+        };
         let source_channel = self.channel_id.unwrap_or_else(ChannelId::new);
         let req = Request::new(
             EventCategory::Extension {

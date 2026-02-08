@@ -197,7 +197,7 @@ impl OrcsEngine {
     ) -> ChannelHandle {
         self.eventbus.register_channel(handle.clone());
         self.eventbus
-            .register_component_channel(component_id.clone(), channel_id);
+            .register_component_channel(component_id, channel_id);
         self.channel_handles.insert(channel_id, handle.clone());
         let runner_task = tokio::spawn(runner.run());
         self.runner_tasks.insert(channel_id, runner_task);
