@@ -283,6 +283,7 @@ impl PermissionChecker for DefaultPolicy {
     ) -> CommandCheckResult {
         let cmd_trimmed = cmd.trim();
         if cmd_trimmed.is_empty() {
+            tracing::debug!("command denied: empty command");
             return CommandCheckResult::Denied("empty command".to_string());
         }
 

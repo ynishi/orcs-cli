@@ -15,6 +15,7 @@ use orcs_types::ChannelId;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 fn test_sandbox() -> Arc<dyn SandboxPolicy> {
@@ -22,15 +23,17 @@ fn test_sandbox() -> Arc<dyn SandboxPolicy> {
 }
 
 /// Creates a temp dir under cwd/target/test-tmp/ so it's within the sandbox root.
+///
+/// Uses PID + atomic counter to guarantee uniqueness across parallel test threads.
+/// (nanosecond timestamps alone can collide on macOS due to clock granularity)
 fn tempdir() -> PathBuf {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let cwd = std::env::current_dir().unwrap();
     let dir = cwd.join(format!(
         "target/test-tmp/orcs-tools-e2e-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        seq,
     ));
     fs::create_dir_all(&dir).unwrap();
     dir

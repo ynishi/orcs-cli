@@ -1045,11 +1045,15 @@ impl Component for LuaComponent {
         self.status
     }
 
+    #[tracing::instrument(
+        skip(self, request),
+        fields(component = %self.id.fqn(), operation = %request.operation)
+    )]
     fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
         self.status = Status::Running;
 
-        let lua = self.lua.lock().map_err(|e| {
-            tracing::error!("Lua mutex poisoned: {}", e);
+        let lua = self.lua.lock().map_err(|_| {
+            tracing::error!("Lua mutex poisoned");
             ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
         })?;
 
@@ -1081,6 +1085,10 @@ impl Component for LuaComponent {
         }
     }
 
+    #[tracing::instrument(
+        skip(self, signal),
+        fields(component = %self.id.fqn(), signal_kind = ?signal.kind)
+    )]
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
         let Ok(lua) = self.lua.lock() else {
             return SignalResponse::Ignored;
@@ -1114,6 +1122,7 @@ impl Component for LuaComponent {
         self.status = Status::Aborted;
     }
 
+    #[tracing::instrument(skip(self), fields(component = %self.id.fqn()))]
     fn init(&mut self) -> Result<(), ComponentError> {
         let Some(init_key) = &self.init_key else {
             return Ok(());
@@ -1137,6 +1146,7 @@ impl Component for LuaComponent {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(component = %self.id.fqn()))]
     fn shutdown(&mut self) {
         let Some(shutdown_key) = &self.shutdown_key else {
             return;

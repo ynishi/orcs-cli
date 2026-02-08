@@ -177,7 +177,8 @@ impl EventEmitter {
             source: self.source_id.clone(),
             payload,
         };
-        let _ = self.emit_to_output(event);
+        let ok = self.emit_to_output(event);
+        tracing::debug!(source = %self.source_id.fqn(), success = ok, "emit_output");
     }
 
     /// Emits an Output event with a specific level.
@@ -233,7 +234,9 @@ impl EventEmitter {
     ///
     /// `true` if the signal was sent successfully.
     pub fn broadcast(&self, signal: Signal) -> bool {
-        self.signal_tx.send(signal).is_ok()
+        let ok = self.signal_tx.send(signal).is_ok();
+        tracing::debug!(source = %self.source_id.fqn(), success = ok, "broadcast signal");
+        ok
     }
 
     /// Broadcasts a custom Extension event to all registered channels.
@@ -279,10 +282,24 @@ impl EventEmitter {
                     delivered += 1;
                 }
             }
+            tracing::debug!(
+                source = %self.source_id.fqn(),
+                category = category,
+                operation = operation,
+                delivered = delivered,
+                "emit_event broadcast"
+            );
             delivered > 0
         } else {
             // Fallback: emit to own channel only
-            self.emit(event)
+            let ok = self.emit(event);
+            tracing::debug!(
+                source = %self.source_id.fqn(),
+                category = category,
+                success = ok,
+                "emit_event fallback"
+            );
+            ok
         }
     }
 

@@ -234,6 +234,13 @@ impl ChildSpawner {
         // Store managed child
         self.children.insert(id.clone(), managed);
 
+        tracing::debug!(
+            parent = %self.parent_id,
+            child_id = %id,
+            child_count = self.children.len(),
+            "child spawned"
+        );
+
         Ok(SpawnedChildHandle {
             id,
             child: child_arc,
@@ -317,6 +324,12 @@ impl ChildSpawner {
                 .unwrap_or(Status::Error);
 
             if matches!(status, Status::Completed | Status::Error | Status::Aborted) {
+                tracing::debug!(
+                    parent = %self.parent_id,
+                    child_id = %id,
+                    status = ?status,
+                    "child reaped"
+                );
                 finished.push((id.clone(), status));
                 false // Remove from map
             } else {

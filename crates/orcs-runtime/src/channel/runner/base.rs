@@ -405,14 +405,15 @@ impl ChannelRunner {
     /// - The channel is completed or killed
     /// - A Veto signal is received
     /// - All event senders are dropped
+    #[tracing::instrument(skip_all, level = "info", fields(channel_id = %self.id))]
     pub async fn run(mut self) {
-        info!("ChannelRunner {} started", self.id);
+        info!("ChannelRunner started");
 
         // Initialize component
         {
             let mut comp = self.component.lock().await;
             if let Err(e) = comp.init() {
-                warn!("ChannelRunner {}: component init failed: {}", self.id, e);
+                warn!(error = %e, "component init failed");
             }
         }
 
@@ -429,11 +430,11 @@ impl ChannelRunner {
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            info!("ChannelRunner {}: signal channel closed", self.id);
+                            info!("signal channel closed");
                             break;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("ChannelRunner {}: lagged {} signals", self.id, n);
+                            warn!(lagged = n, "signal receiver lagged");
                         }
                     }
                 }
@@ -446,7 +447,7 @@ impl ChannelRunner {
                             }
                         }
                         None => {
-                            info!("ChannelRunner {}: event channel closed", self.id);
+                            info!("event channel closed");
                             break;
                         }
                     }
@@ -455,22 +456,19 @@ impl ChannelRunner {
 
             // Check if channel is still running
             if !is_channel_active(&self.world, self.id).await {
-                debug!("ChannelRunner {}: channel no longer active", self.id);
+                debug!("channel no longer active");
                 break;
             }
         }
 
-        info!("ChannelRunner {} stopped", self.id);
+        info!("ChannelRunner stopped");
     }
 
     /// Handles an incoming signal.
     ///
     /// Returns `false` if the runner should stop.
     async fn handle_signal(&mut self, signal: Signal) -> bool {
-        debug!(
-            "ChannelRunner {}: received signal {:?}",
-            self.id, signal.kind
-        );
+        debug!(signal_kind = ?signal.kind, "received signal");
 
         // Check if signal affects this channel
         if !signal.affects_channel(self.id) {
@@ -487,10 +485,7 @@ impl ChannelRunner {
         // Dispatch to component first
         let component_action = dispatch_signal_to_component(&signal, &self.component).await;
         if let SignalAction::Stop { reason } = component_action {
-            info!(
-                "ChannelRunner {}: component requested stop: {}",
-                self.id, reason
-            );
+            info!(reason = %reason, "component requested stop");
             // Abort all children before stopping
             self.abort_all_children();
             send_abort(&self.world_tx, self.id, &reason).await;
@@ -501,7 +496,7 @@ impl ChannelRunner {
         let action = determine_channel_action(&signal.kind);
         match action {
             SignalAction::Stop { reason } => {
-                info!("ChannelRunner {}: stopping - {}", self.id, reason);
+                info!(reason = %reason, "stopping channel");
                 // Abort all children before stopping
                 self.abort_all_children();
                 send_abort(&self.world_tx, self.id, &reason).await;
@@ -526,7 +521,7 @@ impl ChannelRunner {
         if let Some(spawner) = &self.child_spawner {
             if let Ok(mut s) = spawner.lock() {
                 s.abort_all();
-                debug!("ChannelRunner {}: aborted all children", self.id);
+                debug!("aborted all children");
             }
         }
     }
@@ -541,17 +536,16 @@ impl ChannelRunner {
         let event = inbound.into_event();
 
         debug!(
-            "ChannelRunner {}: received event {:?} op={} (direct={})",
-            self.id, event.category, event.operation, is_direct
+            category = ?event.category,
+            operation = %event.operation,
+            direct = is_direct,
+            "received event"
         );
 
         // Subscription filter first: drop broadcast events we don't subscribe to.
         // This runs BEFORE the pause check so unsubscribed events never enter the queue.
         if !is_direct && !self.subscriptions.contains(&event.category) {
-            debug!(
-                "ChannelRunner {}: skipping {:?} (not subscribed)",
-                self.id, event.category
-            );
+            debug!(category = ?event.category, "skipping event (not subscribed)");
             return true;
         }
 
@@ -574,10 +568,7 @@ impl ChannelRunner {
     async fn process_event(&self, event: Event, is_direct: bool) {
         // Subscription filter: skip broadcast events for categories we don't subscribe to
         if !is_direct && !self.subscriptions.contains(&event.category) {
-            debug!(
-                "ChannelRunner {}: skipping {:?} (not subscribed)",
-                self.id, event.category
-            );
+            debug!(category = ?event.category, "skipping event (not subscribed)");
             return;
         }
 
@@ -596,13 +587,10 @@ impl ChannelRunner {
 
         match result {
             Ok(response) => {
-                debug!(
-                    "ChannelRunner {}: Component returned success: {:?}",
-                    self.id, response
-                );
+                debug!(response = ?response, "component returned success");
             }
             Err(e) => {
-                warn!("ChannelRunner {}: Component returned error: {}", self.id, e);
+                warn!(error = %e, "component returned error");
             }
         }
     }
