@@ -168,46 +168,6 @@ pub fn register_base_orcs_functions(
     Ok(())
 }
 
-/// Registers Board query functions in Lua.
-///
-/// Adds `orcs.board_recent(n)` which returns the most recent `n` entries
-/// from the shared Board as a Lua table array.
-///
-/// Each entry is a table with fields: `timestamp`, `source`, `kind`, `operation`, `payload`.
-///
-/// # Arguments
-///
-/// * `lua` - The Lua runtime
-/// * `board` - Shared Board handle from OrcsEngine
-///
-/// # Errors
-///
-/// Returns error if function registration fails.
-pub fn register_board_functions(
-    lua: &Lua,
-    board: orcs_runtime::board::SharedBoard,
-) -> Result<(), LuaError> {
-    let orcs_table = ensure_orcs_table(lua)?;
-
-    // orcs.board_recent(n) -> table[]
-    let board_recent = lua.create_function(move |lua, n: usize| {
-        let entries = board
-            .read()
-            .map_err(|e| mlua::Error::RuntimeError(format!("board lock poisoned: {e}")))?
-            .recent_as_json(n);
-
-        let result = lua.create_table()?;
-        for (i, entry) in entries.into_iter().enumerate() {
-            let lua_val = lua.to_value(&entry)?;
-            result.set(i + 1, lua_val)?;
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("board_recent", board_recent)?;
-
-    Ok(())
-}
-
 /// Tool descriptions for prompt embedding.
 ///
 /// Kept in sync with the actual registered tools in [`register_tool_functions`](crate::tools::register_tool_functions).
@@ -241,9 +201,6 @@ orcs.exec(cmd) -> {ok, stdout, stderr, code}
 orcs.pwd
   Project root path (string).
 
-orcs.board_recent(n) -> table[]
-  Returns the most recent n Board entries.
-  Each entry: {timestamp, source, kind, operation, payload}.
 "#;
 
 /// Disables dangerous Lua standard library functions.
@@ -470,114 +427,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["tool"], "read");
         assert_eq!(parsed["args"]["path"], "src/main.rs");
-    }
-
-    #[test]
-    fn board_recent_returns_entries() {
-        use orcs_runtime::board::{BoardEntry, BoardEntryKind};
-
-        let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
-
-        let board = orcs_runtime::board::shared_board();
-        {
-            let mut b = board.write().unwrap();
-            b.append(BoardEntry {
-                timestamp: chrono::Utc::now(),
-                source: orcs_types::ComponentId::builtin("tool"),
-                kind: BoardEntryKind::Output {
-                    level: "info".into(),
-                },
-                operation: "display".into(),
-                payload: serde_json::json!({"message": "hello from board"}),
-            });
-            b.append(BoardEntry {
-                timestamp: chrono::Utc::now(),
-                source: orcs_types::ComponentId::builtin("agent"),
-                kind: BoardEntryKind::Event {
-                    category: "tool:result".into(),
-                },
-                operation: "complete".into(),
-                payload: serde_json::json!({"tool": "read"}),
-            });
-        }
-
-        register_board_functions(&lua, board).unwrap();
-
-        // Query all
-        let result: Table = lua
-            .load("return orcs.board_recent(10)")
-            .eval()
-            .expect("board_recent should work");
-        assert_eq!(result.len().unwrap(), 2);
-
-        // First entry
-        let entry1: Table = result.get(1).unwrap();
-        let payload1: Table = entry1.get("payload").unwrap();
-        assert_eq!(
-            payload1.get::<String>("message").unwrap(),
-            "hello from board"
-        );
-
-        // Second entry
-        let entry2: Table = result.get(2).unwrap();
-        assert_eq!(entry2.get::<String>("operation").unwrap(), "complete");
-    }
-
-    #[test]
-    fn board_recent_empty() {
-        let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
-
-        let board = orcs_runtime::board::shared_board();
-        register_board_functions(&lua, board).unwrap();
-
-        let result: Table = lua
-            .load("return orcs.board_recent(10)")
-            .eval()
-            .expect("board_recent should work");
-        assert_eq!(result.len().unwrap(), 0);
-    }
-
-    #[test]
-    fn board_recent_respects_limit() {
-        use orcs_runtime::board::{BoardEntry, BoardEntryKind};
-
-        let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
-
-        let board = orcs_runtime::board::shared_board();
-        {
-            let mut b = board.write().unwrap();
-            for i in 0..5 {
-                b.append(BoardEntry {
-                    timestamp: chrono::Utc::now(),
-                    source: orcs_types::ComponentId::builtin("tool"),
-                    kind: BoardEntryKind::Output {
-                        level: "info".into(),
-                    },
-                    operation: "display".into(),
-                    payload: serde_json::json!({"index": i}),
-                });
-            }
-        }
-
-        register_board_functions(&lua, board).unwrap();
-
-        let result: Table = lua
-            .load("return orcs.board_recent(2)")
-            .eval()
-            .expect("board_recent should work");
-        assert_eq!(result.len().unwrap(), 2);
-
-        // Should be the last 2 entries (index 3 and 4)
-        let entry1: Table = result.get(1).unwrap();
-        let payload1: Table = entry1.get("payload").unwrap();
-        assert_eq!(payload1.get::<i64>("index").unwrap(), 3);
-
-        let entry2: Table = result.get(2).unwrap();
-        let payload2: Table = entry2.get("payload").unwrap();
-        assert_eq!(payload2.get::<i64>("index").unwrap(), 4);
     }
 
     #[test]

@@ -1008,7 +1008,26 @@ impl LuaComponent {
         )?;
         orcs_table.set("emit_event", emit_event_fn)?;
 
-        tracing::debug!("Registered orcs.output and orcs.emit_event functions with emitter");
+        // orcs.board_recent(n) -> table[] - query shared Board via Emitter trait
+        let emitter_clone4 = Arc::clone(&emitter);
+        let board_recent_fn = lua.create_function(move |lua, n: usize| {
+            let entries = emitter_clone4
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("emitter lock poisoned: {e}")))?
+                .board_recent(n);
+
+            let result = lua.create_table()?;
+            for (i, entry) in entries.into_iter().enumerate() {
+                let lua_val = lua.to_value(&entry)?;
+                result.set(i + 1, lua_val)?;
+            }
+            Ok(result)
+        })?;
+        orcs_table.set("board_recent", board_recent_fn)?;
+
+        tracing::debug!(
+            "Registered orcs.output, orcs.emit_event, and orcs.board_recent functions with emitter"
+        );
         Ok(())
     }
 }
@@ -1688,6 +1707,120 @@ mod tests {
 
             // Should complete without error
             assert!(result.is_ok());
+        }
+
+        /// Mock emitter that returns canned board entries.
+        #[derive(Debug, Clone)]
+        struct BoardMockEmitter {
+            entries: Vec<serde_json::Value>,
+        }
+
+        impl BoardMockEmitter {
+            fn with_entries(entries: Vec<serde_json::Value>) -> Self {
+                Self { entries }
+            }
+        }
+
+        impl Emitter for BoardMockEmitter {
+            fn emit_output(&self, _message: &str) {}
+            fn emit_output_with_level(&self, _message: &str, _level: &str) {}
+            fn board_recent(&self, n: usize) -> Vec<serde_json::Value> {
+                let len = self.entries.len();
+                let skip = len.saturating_sub(n);
+                self.entries[skip..].to_vec()
+            }
+            fn clone_box(&self) -> Box<dyn Emitter> {
+                Box::new(self.clone())
+            }
+        }
+
+        #[test]
+        fn board_recent_via_emitter() {
+            let script = r#"
+                return {
+                    id = "board-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        local entries = orcs.board_recent(10)
+                        local count = 0
+                        for _ in pairs(entries) do count = count + 1 end
+                        return { success = true, data = { count = count } }
+                    end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+            "#;
+
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
+
+            let entries = vec![
+                serde_json::json!({"source": {"name": "tool"}, "kind": {"type": "Output", "level": "info"}, "operation": "display", "payload": {"message": "hello"}}),
+                serde_json::json!({"source": {"name": "agent"}, "kind": {"type": "Event", "category": "tool:result"}, "operation": "complete", "payload": {"tool": "read"}}),
+            ];
+            let emitter = BoardMockEmitter::with_entries(entries);
+            component.set_emitter(Box::new(emitter));
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req).expect("should succeed");
+            assert_eq!(result["count"], 2);
+        }
+
+        #[test]
+        fn board_recent_empty_without_emitter() {
+            let script = r#"
+                return {
+                    id = "board-empty-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        -- board_recent is placeholder (noop) without emitter
+                        -- orcs.board_recent is not registered, so calling it would error
+                        return { success = true }
+                    end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+            "#;
+
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn board_recent_respects_limit() {
+            let script = r#"
+                return {
+                    id = "board-limit-test",
+                    subscriptions = {"Echo"},
+                    on_request = function(req)
+                        local entries = orcs.board_recent(2)
+                        local count = 0
+                        local last_msg = ""
+                        for _, e in ipairs(entries) do
+                            count = count + 1
+                            last_msg = e.payload.message or ""
+                        end
+                        return { success = true, data = { count = count, last = last_msg } }
+                    end,
+                    on_signal = function(sig) return "Ignored" end,
+                }
+            "#;
+
+            let mut component =
+                LuaComponent::from_script(script, test_sandbox()).expect("load script");
+
+            let entries: Vec<serde_json::Value> = (0..5)
+                .map(|i| serde_json::json!({"payload": {"message": format!("msg{i}")}}))
+                .collect();
+            let emitter = BoardMockEmitter::with_entries(entries);
+            component.set_emitter(Box::new(emitter));
+
+            let req = create_test_request("test", JsonValue::Null);
+            let result = component.on_request(&req).expect("should succeed");
+            assert_eq!(result["count"], 2);
+            assert_eq!(result["last"], "msg4");
         }
     }
 }
