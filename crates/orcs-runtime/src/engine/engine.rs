@@ -34,6 +34,7 @@
 //! bound Components.
 
 use super::eventbus::EventBus;
+use crate::board::{self, SharedBoard};
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, LuaChildLoader,
     OutputSender, World, WorldCommand, WorldCommandSender, WorldManager,
@@ -120,6 +121,8 @@ pub struct OrcsEngine {
     /// This is a required field - every engine must have an IO channel
     /// for Human interaction.
     io_channel: ChannelId,
+    /// Shared Board for cross-component event visibility.
+    board: SharedBoard,
 }
 
 impl OrcsEngine {
@@ -170,6 +173,7 @@ impl OrcsEngine {
             runner_tasks: HashMap::new(),
             runner_components: HashMap::new(),
             io_channel,
+            board: board::shared_board(),
         }
     }
 
@@ -259,7 +263,8 @@ impl OrcsEngine {
             component,
         )
         .with_emitter(self.signal_tx.clone())
-        .with_shared_handles(self.eventbus.shared_handles());
+        .with_shared_handles(self.eventbus.shared_handles())
+        .with_board(Arc::clone(&self.board));
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -326,7 +331,8 @@ impl OrcsEngine {
             component,
         )
         .with_emitter(self.signal_tx.clone())
-        .with_shared_handles(self.eventbus.shared_handles());
+        .with_shared_handles(self.eventbus.shared_handles())
+        .with_board(Arc::clone(&self.board));
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -537,6 +543,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
         .build();
@@ -607,6 +614,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
         .with_grants(grants);
@@ -706,6 +714,15 @@ impl OrcsEngine {
     pub fn stop(&self) {
         info!("Engine stop requested");
         let _ = self.signal_tx.send(Signal::veto(Principal::System));
+    }
+
+    /// Returns the shared Board handle.
+    ///
+    /// External code (e.g., Lua API registration) can use this to
+    /// query the Board for recent events.
+    #[must_use]
+    pub fn board(&self) -> &SharedBoard {
+        &self.board
     }
 
     /// Returns the IO channel ID.

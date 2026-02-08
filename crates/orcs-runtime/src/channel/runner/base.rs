@@ -40,10 +40,10 @@ use super::common::{
 use super::paused_queue::PausedEventQueue;
 use super::EventEmitter;
 use crate::auth::{PermissionChecker, Session};
-use crate::engine::SharedChannelHandles;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
+use crate::engine::SharedChannelHandles;
 use orcs_component::{AsyncChildContext, ChildContext, Component, ComponentLoader};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
@@ -703,6 +703,8 @@ pub struct ChannelRunnerBuilder {
     grants: Option<Arc<dyn orcs_auth::GrantPolicy>>,
     /// Shared channel handles for event broadcasting via Emitter.
     shared_handles: Option<SharedChannelHandles>,
+    /// Shared Board for auto-recording emitted events.
+    board: Option<crate::board::SharedBoard>,
 }
 
 impl ChannelRunnerBuilder {
@@ -730,6 +732,7 @@ impl ChannelRunnerBuilder {
             checker: None,
             grants: None,
             shared_handles: None,
+            board: None,
         }
     }
 
@@ -849,6 +852,16 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the shared Board for auto-recording emitted events.
+    ///
+    /// When set, the EventEmitter will automatically append entries
+    /// to the Board on `emit_output()` and `emit_event()`.
+    #[must_use]
+    pub fn with_board(mut self, board: crate::board::SharedBoard) -> Self {
+        self.board = Some(board);
+        self
+    }
+
     /// Builds the ChannelRunner and returns it with a ChannelHandle.
     #[must_use]
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
@@ -882,6 +895,11 @@ impl ChannelRunnerBuilder {
                     "ChannelRunnerBuilder: enabled event broadcast for {}",
                     component_id.fqn()
                 );
+            }
+
+            // Attach Board for auto-recording
+            if let Some(board) = self.board.take() {
+                emitter = emitter.with_board(board);
             }
 
             self.component.set_emitter(Box::new(emitter));

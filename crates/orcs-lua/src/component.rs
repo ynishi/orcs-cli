@@ -997,14 +997,15 @@ impl LuaComponent {
 
         // orcs.emit_event(category, operation, payload) - broadcast Extension event
         let emitter_clone3 = Arc::clone(&emitter);
-        let emit_event_fn =
-            lua.create_function(move |lua, (category, operation, payload): (String, String, LuaValue)| {
+        let emit_event_fn = lua.create_function(
+            move |lua, (category, operation, payload): (String, String, LuaValue)| {
                 let json_payload: serde_json::Value = lua.from_value(payload)?;
                 if let Ok(em) = emitter_clone3.lock() {
                     em.emit_event(&category, &operation, json_payload);
                 }
                 Ok(())
-            })?;
+            },
+        )?;
         orcs_table.set("emit_event", emit_event_fn)?;
 
         tracing::debug!("Registered orcs.output and orcs.emit_event functions with emitter");

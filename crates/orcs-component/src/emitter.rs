@@ -61,6 +61,21 @@ pub trait Emitter: Send + Sync + Debug {
         false
     }
 
+    /// Returns the most recent `n` Board entries as JSON values.
+    ///
+    /// The Board is a shared rolling buffer of recent Output and Extension
+    /// events. Components can query it to see what other components have
+    /// emitted recently.
+    ///
+    /// Default implementation returns an empty vec (no board attached).
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Maximum number of entries to return
+    fn board_recent(&self, _n: usize) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+
     /// Clones the emitter into a boxed trait object.
     ///
     /// This allows storing the emitter in the Component.

@@ -103,6 +103,7 @@
 //! 4. **Clear boundaries**: Prevents accidental coupling to internal details
 
 pub mod auth;
+pub mod board;
 pub mod channel;
 pub mod components;
 pub mod config;
@@ -115,6 +116,9 @@ pub mod session;
 pub use auth::{
     AccessDenied, CommandPermission, DefaultGrantStore, DefaultPolicy, GrantPolicy,
     PermissionChecker, PermissionPolicy, PrivilegeLevel, Session,
+};
+pub use board::{
+    shared_board, shared_board_with_capacity, Board, BoardEntry, BoardEntryKind, SharedBoard,
 };
 pub use channel::{
     priority, BaseChannel, Channel, ChannelConfig, ChannelCore, ChannelError, ChannelHandle,

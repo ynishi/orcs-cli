@@ -20,6 +20,7 @@
 
 use super::base::OutputSender;
 use super::Event;
+use crate::board::{BoardEntry, BoardEntryKind, SharedBoard};
 use crate::engine::SharedChannelHandles;
 use orcs_component::Emitter;
 use orcs_event::{EventCategory, Signal};
@@ -48,6 +49,8 @@ pub struct EventEmitter {
     source_id: ComponentId,
     /// Shared channel handles for broadcasting events to all channels.
     shared_handles: Option<SharedChannelHandles>,
+    /// Shared Board for auto-recording emitted events.
+    board: Option<SharedBoard>,
 }
 
 impl EventEmitter {
@@ -70,6 +73,7 @@ impl EventEmitter {
             signal_tx,
             source_id,
             shared_handles: None,
+            board: None,
         }
     }
 
@@ -98,6 +102,38 @@ impl EventEmitter {
         self
     }
 
+    /// Sets the shared Board for auto-recording emitted events.
+    ///
+    /// When set, `emit_output()` and `emit_event()` will automatically
+    /// append entries to the Board for cross-component visibility.
+    #[must_use]
+    pub(crate) fn with_board(mut self, board: SharedBoard) -> Self {
+        self.board = Some(board);
+        self
+    }
+
+    /// Appends an entry to the Board (if attached).
+    fn record_to_board(&self, kind: BoardEntryKind, operation: &str, payload: &serde_json::Value) {
+        if let Some(board) = &self.board {
+            let entry = BoardEntry {
+                timestamp: chrono::Utc::now(),
+                source: self.source_id.clone(),
+                kind,
+                operation: operation.to_string(),
+                payload: payload.clone(),
+            };
+            match board.write() {
+                Ok(mut b) => b.append(entry),
+                Err(e) => {
+                    tracing::warn!(
+                        source = %self.source_id.fqn(),
+                        "Board write lock poisoned, skipping record: {e}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Emits an event to the owning Channel.
     ///
     /// The ClientRunner will receive this event and process it.
@@ -124,14 +160,22 @@ impl EventEmitter {
     ///
     /// * `message` - The message to display
     pub fn emit_output(&self, message: &str) {
+        let payload = serde_json::json!({
+            "message": message,
+            "level": "info"
+        });
+        self.record_to_board(
+            BoardEntryKind::Output {
+                level: "info".to_string(),
+            },
+            "display",
+            &payload,
+        );
         let event = Event {
             category: EventCategory::Output,
             operation: "display".to_string(),
             source: self.source_id.clone(),
-            payload: serde_json::json!({
-                "message": message,
-                "level": "info"
-            }),
+            payload,
         };
         let _ = self.emit_to_output(event);
     }
@@ -145,14 +189,22 @@ impl EventEmitter {
     /// * `message` - The message to display
     /// * `level` - Log level ("info", "warn", "error")
     pub fn emit_output_with_level(&self, message: &str, level: &str) {
+        let payload = serde_json::json!({
+            "message": message,
+            "level": level
+        });
+        self.record_to_board(
+            BoardEntryKind::Output {
+                level: level.to_string(),
+            },
+            "display",
+            &payload,
+        );
         let event = Event {
             category: EventCategory::Output,
             operation: "display".to_string(),
             source: self.source_id.clone(),
-            payload: serde_json::json!({
-                "message": message,
-                "level": level
-            }),
+            payload,
         };
         let _ = self.emit_to_output(event);
     }
@@ -201,12 +253,14 @@ impl EventEmitter {
     /// # Returns
     ///
     /// `true` if at least one channel received the event.
-    pub fn emit_event(
-        &self,
-        category: &str,
-        operation: &str,
-        payload: serde_json::Value,
-    ) -> bool {
+    pub fn emit_event(&self, category: &str, operation: &str, payload: serde_json::Value) -> bool {
+        self.record_to_board(
+            BoardEntryKind::Event {
+                category: category.to_string(),
+            },
+            operation,
+            &payload,
+        );
         let event = Event {
             category: EventCategory::Extension {
                 namespace: "lua".to_string(),
@@ -257,13 +311,21 @@ impl Emitter for EventEmitter {
         EventEmitter::emit_output_with_level(self, message, level);
     }
 
-    fn emit_event(
-        &self,
-        category: &str,
-        operation: &str,
-        payload: serde_json::Value,
-    ) -> bool {
+    fn emit_event(&self, category: &str, operation: &str, payload: serde_json::Value) -> bool {
         EventEmitter::emit_event(self, category, operation, payload)
+    }
+
+    fn board_recent(&self, n: usize) -> Vec<serde_json::Value> {
+        match self.board.as_ref() {
+            Some(board) => match board.read() {
+                Ok(b) => b.recent_as_json(n),
+                Err(e) => {
+                    tracing::warn!("Board read lock poisoned: {e}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        }
     }
 
     fn clone_box(&self) -> Box<dyn Emitter> {
@@ -408,8 +470,8 @@ mod tests {
         handles.insert(ch2, ChannelHandle::new(ch2, tx2));
         let shared = Arc::new(RwLock::new(handles));
 
-        let emitter = EventEmitter::new(channel_tx, signal_tx, source_id)
-            .with_shared_handles(shared);
+        let emitter =
+            EventEmitter::new(channel_tx, signal_tx, source_id).with_shared_handles(shared);
 
         let result = emitter.emit_event(
             "tool:result",
@@ -459,5 +521,100 @@ mod tests {
                 kind: "custom:event".to_string(),
             }
         );
+    }
+
+    // === Board integration tests ===
+
+    fn setup_with_board() -> (EventEmitter, OutputReceiver, crate::board::SharedBoard) {
+        let (channel_tx, channel_rx) = OutputSender::channel(64);
+        let (signal_tx, _signal_rx) = broadcast::channel(64);
+        let source_id = ComponentId::builtin("test");
+        let board = crate::board::shared_board();
+
+        let emitter = EventEmitter::new(channel_tx, signal_tx, source_id).with_board(board.clone());
+        (emitter, channel_rx, board)
+    }
+
+    #[test]
+    fn emit_output_records_to_board() {
+        let (emitter, _channel_rx, board) = setup_with_board();
+
+        emitter.emit_output("hello board");
+
+        let b = board.read().unwrap();
+        assert_eq!(b.len(), 1);
+        let entries = b.recent(1);
+        assert_eq!(entries[0].payload["message"], "hello board");
+        assert_eq!(
+            entries[0].kind,
+            crate::board::BoardEntryKind::Output {
+                level: "info".into()
+            }
+        );
+    }
+
+    #[test]
+    fn emit_output_with_level_records_to_board() {
+        let (emitter, _channel_rx, board) = setup_with_board();
+
+        emitter.emit_output_with_level("warning!", "warn");
+
+        let b = board.read().unwrap();
+        assert_eq!(b.len(), 1);
+        let entries = b.recent(1);
+        assert_eq!(entries[0].payload["level"], "warn");
+        assert_eq!(
+            entries[0].kind,
+            crate::board::BoardEntryKind::Output {
+                level: "warn".into()
+            }
+        );
+    }
+
+    #[test]
+    fn emit_event_records_to_board() {
+        let (emitter, _channel_rx, board) = setup_with_board();
+
+        emitter.emit_event(
+            "tool:result",
+            "complete",
+            serde_json::json!({"tool": "read"}),
+        );
+
+        let b = board.read().unwrap();
+        assert_eq!(b.len(), 1);
+        let entries = b.recent(1);
+        assert_eq!(entries[0].operation, "complete");
+        assert_eq!(
+            entries[0].kind,
+            crate::board::BoardEntryKind::Event {
+                category: "tool:result".into()
+            }
+        );
+    }
+
+    #[test]
+    fn board_recent_via_trait() {
+        let (emitter, _channel_rx, _board) = setup_with_board();
+
+        emitter.emit_output("msg1");
+        emitter.emit_output("msg2");
+        emitter.emit_output("msg3");
+
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+        let recent = boxed.board_recent(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0]["payload"]["message"], "msg2");
+        assert_eq!(recent[1]["payload"]["message"], "msg3");
+    }
+
+    #[test]
+    fn board_recent_without_board_returns_empty() {
+        let (emitter, _channel_rx, _signal_rx) = setup();
+
+        emitter.emit_output("no board");
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+        let recent = boxed.board_recent(10);
+        assert!(recent.is_empty());
     }
 }
