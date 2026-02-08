@@ -357,6 +357,10 @@ pub struct ChannelRunner {
     request_rx: Option<mpsc::Receiver<RequestEnvelope>>,
     /// Initial snapshot to restore before init (session resume).
     initial_snapshot: Option<ComponentSnapshot>,
+    /// Shared channel handles for RPC from children.
+    shared_handles: Option<SharedChannelHandles>,
+    /// Shared FQN → ChannelId map for RPC from children.
+    component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -382,11 +386,12 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(
+        let mut ctx = ChildContextImpl::new(
             child_id,
             OutputSender::new(event_tx.clone()),
             Arc::clone(spawner),
         );
+        ctx = self.inject_rpc(ctx);
 
         Some(Box::new(ctx))
     }
@@ -406,12 +411,13 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(
+        let mut ctx = ChildContextImpl::new(
             child_id,
             OutputSender::new(event_tx.clone()),
             Arc::clone(spawner),
         )
         .with_lua_loader(loader);
+        ctx = self.inject_rpc(ctx);
 
         Some(Box::new(ctx))
     }
@@ -426,11 +432,12 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(
+        let mut ctx = ChildContextImpl::new(
             child_id,
             OutputSender::new(event_tx.clone()),
             Arc::clone(spawner),
         );
+        ctx = self.inject_rpc(ctx);
 
         Some(Box::new(ctx))
     }
@@ -450,14 +457,25 @@ impl ChannelRunner {
         let spawner = self.child_spawner.as_ref()?;
         let event_tx = self.event_tx.as_ref()?;
 
-        let ctx = ChildContextImpl::new(
+        let mut ctx = ChildContextImpl::new(
             child_id,
             OutputSender::new(event_tx.clone()),
             Arc::clone(spawner),
         )
         .with_lua_loader(loader);
+        ctx = self.inject_rpc(ctx);
 
         Some(Box::new(ctx))
+    }
+
+    /// Injects RPC support (shared handles + channel map) into a ChildContextImpl
+    /// if the runner was built with RPC resources.
+    fn inject_rpc(&self, ctx: ChildContextImpl) -> ChildContextImpl {
+        if let (Some(handles), Some(map)) = (&self.shared_handles, &self.component_channel_map) {
+            ctx.with_rpc_support(handles.clone(), map.clone())
+        } else {
+            ctx
+        }
     }
 
     /// Returns a reference to the child spawner, if enabled.
@@ -1077,6 +1095,8 @@ impl ChannelRunnerBuilder {
         mut ctx: ChildContextImpl,
         io_output_tx: &Option<OutputSender>,
         component_id: &str,
+        rpc_handles: &Option<SharedChannelHandles>,
+        rpc_map: &Option<crate::engine::SharedComponentChannelMap>,
     ) -> ChildContextImpl {
         if let Some(session) = self.session.take() {
             ctx = ctx.with_session_arc(session);
@@ -1103,6 +1123,9 @@ impl ChannelRunnerBuilder {
                 component_id
             );
         }
+        if let (Some(handles), Some(map)) = (rpc_handles.clone(), rpc_map.clone()) {
+            ctx = ctx.with_rpc_support(handles, map);
+        }
         ctx
     }
 
@@ -1113,6 +1136,10 @@ impl ChannelRunnerBuilder {
 
         // Clone output_tx for ChildContext IO routing (before emitter takes it)
         let io_output_tx = self.output_tx.as_ref().cloned();
+
+        // Clone RPC resources for ChildContext (before emitter takes them)
+        let rpc_handles = self.shared_handles.clone();
+        let rpc_map = self.component_channel_map.clone();
 
         // Set up emitter if enabled
         if let Some(signal_tx) = &self.emitter_signal_tx {
@@ -1207,7 +1234,7 @@ impl ChannelRunnerBuilder {
             }
 
             // Add session, checker, grants, and IO output routing
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id);
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map);
 
             self.component.set_child_context(Box::new(ctx));
 
@@ -1221,7 +1248,7 @@ impl ChannelRunnerBuilder {
             let mut ctx =
                 ChildContextImpl::new(&component_id, dummy_output, Arc::clone(&dummy_arc));
 
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id);
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map);
 
             self.component.set_child_context(Box::new(ctx));
             info!(
@@ -1265,6 +1292,8 @@ impl ChannelRunnerBuilder {
             event_tx: event_tx_for_context,
             request_rx,
             initial_snapshot: self.initial_snapshot,
+            shared_handles: rpc_handles,
+            component_channel_map: rpc_map,
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

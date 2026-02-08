@@ -28,7 +28,7 @@ use crate::error::LuaError;
 use crate::orcs_helpers::register_base_orcs_functions;
 use crate::types::serde_json_to_lua;
 use crate::types::{parse_signal_response, parse_status, LuaResponse, LuaSignal};
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
 use orcs_component::{
     Child, ChildConfig, ChildContext, ChildError, ChildResult, Identifiable, RunnableChild,
     SignalReceiver, Status, Statusable,
@@ -949,6 +949,46 @@ fn register_context_functions(
             Ok(approval_id)
         })?;
     orcs_table.set("request_approval", request_approval_fn)?;
+
+    // orcs.request(target_fqn, operation, payload, opts?) -> { success, data?, error? }
+    // Component-to-Component RPC from child context
+    let request_fn =
+        lua.create_function(
+            |lua,
+             (target, operation, payload, opts): (
+                String,
+                String,
+                mlua::Value,
+                Option<mlua::Table>,
+            )| {
+                let wrapper = lua
+                    .app_data_ref::<ContextWrapper>()
+                    .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+                let ctx = wrapper
+                    .0
+                    .lock()
+                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+                let json_payload: serde_json::Value = lua.from_value(payload)?;
+                let timeout_ms = opts.and_then(|t| t.get::<u64>("timeout_ms").ok());
+
+                let result = lua.create_table()?;
+                match ctx.request(&target, &operation, json_payload, timeout_ms) {
+                    Ok(value) => {
+                        result.set("success", true)?;
+                        let lua_data = lua.to_value(&value)?;
+                        result.set("data", lua_data)?;
+                    }
+                    Err(err) => {
+                        result.set("success", false)?;
+                        result.set("error", err)?;
+                    }
+                }
+                Ok(result)
+            },
+        )?;
+    orcs_table.set("request", request_fn)?;
 
     // orcs.send_to_child(child_id, message) -> { ok, result?, error? }
     let send_to_child_fn =

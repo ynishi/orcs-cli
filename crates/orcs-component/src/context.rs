@@ -517,6 +517,32 @@ pub trait ChildContext: Send + Sync + Debug {
         true
     }
 
+    /// Sends an RPC request to another Component by FQN.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_fqn` - FQN of the target component (e.g. `"skill::skill_manager"`)
+    /// * `operation` - The operation to invoke (e.g. `"list"`, `"catalog"`)
+    /// * `payload` - JSON payload for the operation
+    /// * `timeout_ms` - Optional timeout in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// The response value from the target component.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an error indicating RPC is not supported.
+    fn request(
+        &self,
+        _target_fqn: &str,
+        _operation: &str,
+        _payload: serde_json::Value,
+        _timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        Err("request not supported by this context".into())
+    }
+
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;
 }

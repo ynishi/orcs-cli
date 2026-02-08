@@ -8,6 +8,7 @@ use super::child_spawner::ChildSpawner;
 use super::{ChannelRunner, Event};
 use crate::auth::{CommandCheckResult, PermissionChecker, Session};
 use crate::channel::{World, WorldCommand};
+use crate::engine::{SharedChannelHandles, SharedComponentChannelMap};
 use orcs_auth::{CommandGrant, GrantPolicy};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
@@ -57,6 +58,12 @@ pub struct ChildContextImpl {
     world: Option<Arc<RwLock<World>>>,
     /// Signal sender for subscribing new runners.
     signal_tx: Option<broadcast::Sender<Signal>>,
+
+    // -- RPC support --
+    /// Shared channel handles for RPC request routing.
+    shared_handles: Option<SharedChannelHandles>,
+    /// Shared FQN → ChannelId mapping for RPC target resolution.
+    component_channel_map: Option<SharedComponentChannelMap>,
 }
 
 /// Trait for loading Lua children from config.
@@ -98,6 +105,8 @@ impl ChildContextImpl {
             world_tx: None,
             world: None,
             signal_tx: None,
+            shared_handles: None,
+            component_channel_map: None,
         }
     }
 
@@ -283,6 +292,18 @@ impl ChildContextImpl {
         self.world_tx = Some(world_tx);
         self.world = Some(world);
         self.signal_tx = Some(signal_tx);
+        self
+    }
+
+    /// Enables RPC support by providing shared handles and component map.
+    #[must_use]
+    pub fn with_rpc_support(
+        mut self,
+        shared_handles: SharedChannelHandles,
+        component_channel_map: SharedComponentChannelMap,
+    ) -> Self {
+        self.shared_handles = Some(shared_handles);
+        self.component_channel_map = Some(component_channel_map);
         self
     }
 
@@ -565,6 +586,88 @@ impl ChildContext for ChildContextImpl {
             (Some(session), Some(checker)) => checker.can_spawn_runner(session),
             _ => true, // Permissive mode when not configured
         }
+    }
+
+    fn request(
+        &self,
+        target_fqn: &str,
+        operation: &str,
+        payload: serde_json::Value,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        let map = self
+            .component_channel_map
+            .as_ref()
+            .ok_or("component_channel_map not configured for RPC")?;
+        let handles = self
+            .shared_handles
+            .as_ref()
+            .ok_or("shared_handles not configured for RPC")?;
+
+        let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
+
+        // Resolve FQN → ChannelId
+        let channel_id = {
+            let m = map.read().map_err(|e| format!("map lock poisoned: {e}"))?;
+            *m.get(target_fqn)
+                .ok_or_else(|| format!("component not found: {target_fqn}"))?
+        };
+
+        // Get ChannelHandle
+        let handle = {
+            let h = handles
+                .read()
+                .map_err(|e| format!("handles lock poisoned: {e}"))?;
+            h.get(&channel_id)
+                .cloned()
+                .ok_or_else(|| format!("channel not found for: {target_fqn}"))?
+        };
+
+        if !handle.accepts_requests() {
+            return Err(format!("component {target_fqn} does not accept requests"));
+        }
+
+        // Build Request
+        let target_id = match target_fqn.split_once("::") {
+            Some((ns, name)) => ComponentId::new(ns, name),
+            None => ComponentId::new("unknown", target_fqn),
+        };
+        let source_id = ComponentId::child(&self.parent_id);
+        let source_channel = ChannelId::new();
+        let req = orcs_event::Request::new(
+            EventCategory::Extension {
+                namespace: source_id.namespace.clone(),
+                kind: operation.to_string(),
+            },
+            operation,
+            source_id,
+            source_channel,
+            payload,
+        )
+        .with_target(target_id)
+        .with_timeout(timeout);
+
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                handle
+                    .send_request(req, reply_tx)
+                    .await
+                    .map_err(|_| "request channel closed".to_string())?;
+
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout),
+                    reply_rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err("response channel closed".into()),
+                    Err(_) => Err(format!("request timeout ({timeout}ms)")),
+                }
+            })
+        })
     }
 
     fn clone_box(&self) -> Box<dyn ChildContext> {
