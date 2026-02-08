@@ -5,7 +5,7 @@
 //! - Spawns and manages ChannelRunners (parallel execution)
 //! - Dispatches Signals to all Runners via broadcast
 //! - Coordinates World (Channel hierarchy) management
-//! - Provides session persistence via Runner-bound Components
+//! - Provides session persistence via graceful shutdown snapshots
 //!
 //! # Architecture
 //!
@@ -18,7 +18,7 @@
 //!     │
 //!     ├── channel_handles ──► Event injection to Runners
 //!     │
-//!     └── runner_components ─► Arc<Mutex<Component>> for snapshot
+//!     └── collected_snapshots ─► Snapshots from graceful shutdown
 //! ```
 //!
 //! # Signal Handling
@@ -37,17 +37,18 @@ use super::eventbus::EventBus;
 use crate::board::{self, SharedBoard};
 use crate::channel::{
     ChannelConfig, ChannelHandle, ChannelRunner, ClientRunner, ClientRunnerConfig, LuaChildLoader,
-    OutputSender, World, WorldCommand, WorldCommandSender, WorldManager,
+    OutputSender, RunnerResult, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
 use crate::session::{SessionAsset, SessionStore, StorageError};
 use crate::Principal;
-use orcs_component::{Component, ComponentSnapshot, SnapshotError};
+use orcs_component::{Component, ComponentSnapshot};
 use orcs_event::Signal;
 use orcs_types::ChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
@@ -55,6 +56,9 @@ use tracing::{debug, info, warn};
 /// 256 signals provides sufficient buffering for HIL interactions.
 /// Lagged receivers will miss old signals but continue receiving new ones.
 const SIGNAL_BUFFER_SIZE: usize = 256;
+
+/// Timeout for waiting on each runner task during graceful shutdown.
+const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
@@ -67,7 +71,7 @@ const SIGNAL_BUFFER_SIZE: usize = 256;
 /// - [`WorldManager`](crate::channel::WorldManager) for concurrent World access
 /// - [`ChannelRunner`](crate::channel::ChannelRunner) per channel
 /// - Event injection via channel handles
-/// - Component access via shared `Arc<Mutex<>>` for snapshots
+/// - Snapshot collection via graceful runner shutdown
 ///
 /// # Example
 ///
@@ -108,13 +112,17 @@ pub struct OrcsEngine {
     channel_handles: HashMap<ChannelId, ChannelHandle>,
     /// WorldManager task handle
     manager_task: Option<tokio::task::JoinHandle<()>>,
-    /// Channel runner task handles
-    runner_tasks: HashMap<ChannelId, tokio::task::JoinHandle<()>>,
-    /// Component references for snapshot access.
+    /// Channel runner task handles.
     ///
-    /// Each Runner holds the same Arc, enabling Engine to access
-    /// Components for session persistence without owning them.
-    runner_components: HashMap<ChannelId, Arc<Mutex<Box<dyn Component>>>>,
+    /// Each runner returns a [`RunnerResult`] containing the component's
+    /// shutdown snapshot. The Engine awaits these on shutdown instead of
+    /// aborting them.
+    runner_tasks: HashMap<ChannelId, tokio::task::JoinHandle<RunnerResult>>,
+    /// Snapshots collected from runners during graceful shutdown.
+    ///
+    /// Populated by [`shutdown_parallel()`] when runners complete.
+    /// Keyed by component FQN (fully qualified name).
+    collected_snapshots: HashMap<String, ComponentSnapshot>,
     // --- IO Channel (required) ---
     /// IO channel for Human input/output.
     ///
@@ -171,7 +179,7 @@ impl OrcsEngine {
             channel_handles: HashMap::new(),
             manager_task: Some(manager_task),
             runner_tasks: HashMap::new(),
-            runner_components: HashMap::new(),
+            collected_snapshots: HashMap::new(),
             io_channel,
             board: board::shared_board(),
         }
@@ -199,10 +207,6 @@ impl OrcsEngine {
             component,
         )
         .build();
-
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -273,10 +277,6 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
-
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
 
@@ -346,10 +346,6 @@ impl OrcsEngine {
         }
 
         let (runner, handle) = builder.build();
-
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -548,10 +544,6 @@ impl OrcsEngine {
         .with_checker(checker)
         .build();
 
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
-
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
 
@@ -631,10 +623,6 @@ impl OrcsEngine {
         }
 
         let (runner, handle) = builder.build();
-
-        // Store Component reference for snapshot access
-        let component_ref = Arc::clone(runner.component());
-        self.runner_components.insert(channel_id, component_ref);
 
         // Register handle with EventBus for event injection
         self.eventbus.register_channel(handle.clone());
@@ -785,115 +773,90 @@ impl OrcsEngine {
         info!("OrcsEngine stopped (parallel mode)");
     }
 
-    /// Shutdown parallel execution infrastructure.
+    /// Shutdown parallel execution infrastructure (graceful).
+    ///
+    /// # Shutdown Order
+    ///
+    /// 1. Await all runner tasks with timeout (Veto already broadcast).
+    ///    Runners execute their shutdown sequence (snapshot → shutdown)
+    ///    and return [`RunnerResult`] with captured snapshots.
+    /// 2. Collect snapshots from completed runners into `collected_snapshots`.
+    /// 3. Shutdown WorldManager (runners may need `world_tx` during shutdown,
+    ///    so WorldManager must stay alive until runners complete).
+    /// 4. Unregister channel handles and clean up.
     async fn shutdown_parallel(&mut self) {
-        // Send shutdown to WorldManager
-        let _ = self.world_tx.send(WorldCommand::Shutdown).await;
+        // 1. Await runner tasks with timeout.
+        //    Runners have already received Veto and should be winding down.
+        //    We use tokio::select! so the JoinHandle remains available for
+        //    abort if the timeout fires (dropping a JoinHandle only detaches
+        //    the task — it does NOT cancel it).
+        let tasks: Vec<_> = self.runner_tasks.drain().collect();
+        for (id, mut task) in tasks {
+            tokio::select! {
+                result = &mut task => {
+                    match result {
+                        Ok(result) => {
+                            debug!(
+                                channel = %id,
+                                component = %result.component_fqn,
+                                has_snapshot = result.snapshot.is_some(),
+                                "runner completed gracefully"
+                            );
+                            if let Some(snapshot) = result.snapshot {
+                                self.collected_snapshots
+                                    .insert(result.component_fqn, snapshot);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(channel = %id, error = %e, "runner task panicked");
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(RUNNER_SHUTDOWN_TIMEOUT) => {
+                    warn!(channel = %id, "runner task timed out, aborting");
+                    task.abort();
+                }
+            }
+        }
 
-        // Wait for manager task
+        info!(
+            "collected {} snapshots from runners",
+            self.collected_snapshots.len()
+        );
+
+        // 2. Shutdown WorldManager (after runners complete)
+        let _ = self.world_tx.send(WorldCommand::Shutdown).await;
         if let Some(task) = self.manager_task.take() {
             let _ = task.await;
         }
 
-        // Abort all runner tasks (they should stop on channel close)
-        for (id, task) in self.runner_tasks.drain() {
-            debug!("Aborting runner for channel {}", id);
-            task.abort();
-        }
-
-        // Unregister channel handles
+        // 3. Unregister channel handles
         for id in self.channel_handles.keys() {
             self.eventbus.unregister_channel(id);
         }
         self.channel_handles.clear();
-
-        // Clear component references
-        self.runner_components.clear();
     }
 
     // === Session Persistence ===
 
-    /// Collects snapshots from all Runner-bound Components.
+    /// Returns a reference to snapshots collected during graceful shutdown.
     ///
-    /// Iterates over all runner_components and calls `Component::snapshot()`.
-    /// Components that don't support snapshots are silently skipped.
+    /// Populated by [`shutdown_parallel()`] when runners complete their
+    /// shutdown sequence. Keyed by component FQN.
     ///
-    /// # Returns
+    /// # Usage
     ///
-    /// A map of component FQN (fully qualified name) to snapshot.
-    pub async fn collect_snapshots(&self) -> HashMap<String, ComponentSnapshot> {
-        let mut snapshots = HashMap::new();
-
-        for (channel_id, component_arc) in &self.runner_components {
-            let component = component_arc.lock().await;
-            let fqn = component.id().fqn();
-
-            match component.snapshot() {
-                Ok(snapshot) => {
-                    debug!(
-                        "Collected snapshot for component {} (channel {})",
-                        fqn, channel_id
-                    );
-                    snapshots.insert(fqn, snapshot);
-                }
-                Err(SnapshotError::NotSupported(_)) => {
-                    debug!("Component {} does not support snapshots", fqn);
-                }
-                Err(e) => {
-                    warn!("Failed to collect snapshot from {}: {}", fqn, e);
-                }
-            }
-        }
-
-        info!("Collected {} component snapshots", snapshots.len());
-        snapshots
-    }
-
-    /// Restores components from snapshots in a SessionAsset.
-    ///
-    /// Iterates over all runner_components and restores from matching snapshots.
-    ///
-    /// # Arguments
-    ///
-    /// * `asset` - The session asset containing snapshots
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(count)` - Number of successfully restored components
-    /// - `Err(SnapshotError)` - Restore failed for a component
-    pub async fn restore_snapshots(&self, asset: &SessionAsset) -> Result<usize, SnapshotError> {
-        let mut restored = 0;
-
-        for component_arc in self.runner_components.values() {
-            let mut component = component_arc.lock().await;
-            let fqn = component.id().fqn();
-
-            if let Some(snapshot) = asset.component_snapshots.get(&fqn) {
-                match component.restore(snapshot) {
-                    Ok(()) => {
-                        debug!("Restored component: {}", fqn);
-                        restored += 1;
-                    }
-                    Err(SnapshotError::NotSupported(_)) => {
-                        warn!("Component {} does not support snapshot restore", fqn);
-                    }
-                    Err(e) => {
-                        return Err(SnapshotError::RestoreFailed {
-                            component: fqn,
-                            reason: e.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-
-        info!("Restored {} components from session", restored);
-        Ok(restored)
+    /// Call this after `run()` completes to retrieve snapshots for session
+    /// persistence.
+    #[must_use]
+    pub fn collected_snapshots(&self) -> &HashMap<String, ComponentSnapshot> {
+        &self.collected_snapshots
     }
 
     /// Saves the current session state to a store.
     ///
-    /// Collects snapshots from all Runner-bound Components and saves them.
+    /// Uses snapshots collected during graceful shutdown (populated by
+    /// `shutdown_parallel()`). Must be called after `run()` completes.
     ///
     /// # Arguments
     ///
@@ -908,54 +871,50 @@ impl OrcsEngine {
         store: &S,
         asset: &mut SessionAsset,
     ) -> Result<(), StorageError> {
-        // Collect component snapshots
-        let snapshots = self.collect_snapshots().await;
-
-        // Update asset with snapshots
-        for (id, snapshot) in snapshots {
-            asset.component_snapshots.insert(id, snapshot);
+        // Write collected snapshots into asset
+        for (fqn, snapshot) in &self.collected_snapshots {
+            asset
+                .component_snapshots
+                .insert(fqn.clone(), snapshot.clone());
         }
         asset.touch();
 
         // Save to store
         store.save(asset).await?;
 
-        info!("Session saved: {}", asset.id);
+        info!(
+            "Session saved: {} ({} snapshots)",
+            asset.id,
+            self.collected_snapshots.len()
+        );
         Ok(())
     }
 
-    /// Loads a session and restores component state.
+    /// Loads a session asset from a store.
     ///
-    /// Loads the session from the store and restores all component
-    /// snapshots to their Runner-bound Components.
+    /// Returns the loaded asset containing component snapshots. The caller
+    /// is responsible for passing these snapshots to
+    /// [`ChannelRunnerBuilder::with_initial_snapshot()`] when spawning runners.
     ///
     /// # Arguments
     ///
     /// * `store` - The session store to load from
     /// * `session_id` - The session ID to load
     ///
-    /// # Returns
-    ///
-    /// The loaded SessionAsset with restored component states.
-    ///
     /// # Errors
     ///
-    /// - `StorageError::Storage` - Loading from store failed
-    /// - `StorageError::Snapshot` - Restore failed for a component
+    /// Returns `StorageError` if loading fails.
     pub async fn load_session<S: SessionStore>(
         &self,
         store: &S,
         session_id: &str,
     ) -> Result<SessionAsset, StorageError> {
-        // Load session from store
         let asset = store.load(session_id).await?;
 
-        // Restore component snapshots
-        let restored = self.restore_snapshots(&asset).await?;
-
         info!(
-            "Session loaded: {} ({} components restored)",
-            session_id, restored
+            "Session loaded: {} ({} snapshots available)",
+            session_id,
+            asset.component_snapshots.len()
         );
         Ok(asset)
     }
@@ -1101,16 +1060,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_runner_stores_component_ref() {
+    async fn spawn_runner_creates_task() {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
         let echo = Box::new(EchoComponent::new());
         let _handle = engine.spawn_runner(io, echo);
 
-        // Component should be stored in runner_components
-        assert_eq!(engine.runner_components.len(), 1);
-        assert!(engine.runner_components.contains_key(&io));
+        // Runner task should be stored
+        assert_eq!(engine.runner_tasks.len(), 1);
+        assert!(engine.runner_tasks.contains_key(&io));
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
@@ -1193,7 +1152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collect_snapshots_from_runner_components() {
+    async fn graceful_shutdown_collects_snapshots() {
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);
 
@@ -1201,46 +1160,23 @@ mod tests {
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
         let _handle = engine.spawn_runner(io, comp);
 
-        // Collect snapshots (async now)
-        let snapshots = engine.collect_snapshots().await;
+        // Run engine briefly then stop via Veto
+        let engine_signal_tx = engine.signal_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = engine_signal_tx.send(Signal::veto(Principal::System));
+        });
 
-        // Should have one snapshot
+        engine.run().await;
+
+        // Snapshots should have been collected during graceful shutdown
+        let snapshots = engine.collected_snapshots();
         assert_eq!(snapshots.len(), 1);
         assert!(snapshots.contains_key("builtin::snap"));
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     #[tokio::test]
-    async fn restore_snapshots_to_runner_components() {
-        let (world, io) = test_world();
-        let mut engine = OrcsEngine::new(world, io);
-
-        // Spawn runner with snapshottable component (initial value 0)
-        let comp = Box::new(SnapshottableComponent::new("snap", 0));
-        let _handle = engine.spawn_runner(io, comp);
-
-        // Create asset with snapshot containing different value
-        let mut asset = SessionAsset::new();
-        let snapshot = orcs_component::ComponentSnapshot::from_state("builtin::snap", &100u64)
-            .expect("create snapshot");
-        asset.save_snapshot(snapshot);
-
-        // Restore from asset
-        let restored = engine
-            .restore_snapshots(&asset)
-            .await
-            .expect("restore snapshots");
-
-        assert_eq!(restored, 1);
-
-        // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
-    }
-
-    #[tokio::test]
-    async fn save_and_load_session_via_runners() {
+    async fn save_session_after_graceful_shutdown() {
         use crate::session::LocalFileStore;
         use tempfile::TempDir;
 
@@ -1254,7 +1190,16 @@ mod tests {
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
         let _handle = engine.spawn_runner(io, comp);
 
-        // Save session
+        // Run engine briefly then stop via Veto
+        let engine_signal_tx = engine.signal_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = engine_signal_tx.send(Signal::veto(Principal::System));
+        });
+
+        engine.run().await;
+
+        // Save session (uses collected snapshots from shutdown)
         let mut asset = SessionAsset::new();
         let session_id = asset.id.clone();
         engine
@@ -1262,18 +1207,13 @@ mod tests {
             .await
             .expect("save session");
 
-        // Verify snapshot was saved (uses FQN format)
+        // Verify snapshot was saved
         assert!(asset.get_snapshot("builtin::snap").is_some());
 
-        // Create new engine and load session
+        // Load session from a new engine
         let (world2, io2) = test_world();
-        let mut engine2 = OrcsEngine::new(world2, io2);
+        let engine2 = OrcsEngine::new(world2, io2);
 
-        // Spawn runner with component (different initial value)
-        let comp2 = Box::new(SnapshottableComponent::new("snap", 0));
-        let _handle2 = engine2.spawn_runner(io2, comp2);
-
-        // Load session
         let loaded = engine2
             .load_session(&store, &session_id)
             .await
@@ -1283,7 +1223,6 @@ mod tests {
         assert!(loaded.get_snapshot("builtin::snap").is_some());
 
         // Cleanup
-        let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
         let _ = engine2.world_tx().send(WorldCommand::Shutdown).await;
     }
 
@@ -1369,7 +1308,7 @@ mod tests {
             let handle = engine.spawn_runner_with_auth(io, component, session, checker);
 
             assert_eq!(handle.id, io);
-            assert!(engine.runner_components.contains_key(&io));
+            assert!(engine.runner_tasks.contains_key(&io));
 
             // Cleanup
             let _ = engine.world_tx().send(WorldCommand::Shutdown).await;

@@ -44,7 +44,9 @@ use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
 use crate::engine::SharedChannelHandles;
-use orcs_component::{AsyncChildContext, ChildContext, Component, ComponentLoader};
+use orcs_component::{
+    AsyncChildContext, ChildContext, Component, ComponentLoader, ComponentSnapshot, SnapshotError,
+};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
@@ -179,6 +181,21 @@ impl OutputReceiver {
     }
 }
 
+/// Result of a ChannelRunner's execution.
+///
+/// Returned by [`ChannelRunner::run()`] after the event loop exits and
+/// the shutdown sequence completes. Contains the channel ID, component
+/// FQN, and an optional snapshot captured during graceful shutdown.
+#[derive(Debug)]
+pub struct RunnerResult {
+    /// Channel ID this runner was bound to.
+    pub channel_id: ChannelId,
+    /// Fully qualified name of the bound Component.
+    pub component_fqn: String,
+    /// Snapshot captured during shutdown (None if component doesn't support snapshots).
+    pub snapshot: Option<ComponentSnapshot>,
+}
+
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
 
@@ -277,6 +294,8 @@ pub struct ChannelRunner {
     child_spawner: Option<Arc<StdMutex<ChildSpawner>>>,
     /// Event sender for child context (kept for context creation).
     event_tx: Option<mpsc::Sender<InboundEvent>>,
+    /// Initial snapshot to restore before init (session resume).
+    initial_snapshot: Option<ComponentSnapshot>,
 }
 
 impl ChannelRunner {
@@ -375,12 +394,6 @@ impl ChannelRunner {
         self.child_spawner.as_ref()
     }
 
-    /// Returns a reference to the bound Component.
-    #[must_use]
-    pub fn component(&self) -> &Arc<Mutex<Box<dyn Component>>> {
-        &self.component
-    }
-
     /// Returns this channel's ID.
     #[must_use]
     pub fn id(&self) -> ChannelId {
@@ -405,13 +418,36 @@ impl ChannelRunner {
     /// - The channel is completed or killed
     /// - A Veto signal is received
     /// - All event senders are dropped
+    ///
+    /// After the event loop exits, executes the shutdown sequence:
+    /// 1. Capture component snapshot (if supported)
+    /// 2. Call `component.shutdown()` for cleanup
+    /// 3. Return [`RunnerResult`] with snapshot
+    ///
+    /// If an initial snapshot was provided via
+    /// [`ChannelRunnerBuilder::with_initial_snapshot()`], it is restored
+    /// before `init()` is called.
     #[tracing::instrument(skip_all, level = "info", fields(channel_id = %self.id))]
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> RunnerResult {
         info!("ChannelRunner started");
 
-        // Initialize component
+        // Restore + Initialize component
         {
             let mut comp = self.component.lock().await;
+
+            // Restore from initial snapshot (session resume)
+            if let Some(snapshot) = self.initial_snapshot.take() {
+                match comp.restore(&snapshot) {
+                    Ok(()) => info!("restored component from initial snapshot"),
+                    Err(SnapshotError::NotSupported(_)) => {
+                        debug!("component does not support snapshot restore");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to restore initial snapshot");
+                    }
+                }
+            }
+
             if let Err(e) = comp.init() {
                 warn!(error = %e, "component init failed");
             }
@@ -461,7 +497,38 @@ impl ChannelRunner {
             }
         }
 
+        // === Shutdown Sequence ===
+        let (component_fqn, snapshot) = {
+            let mut comp = self.component.lock().await;
+            let fqn = comp.id().fqn();
+
+            // 1. Capture snapshot
+            let snapshot = match comp.snapshot() {
+                Ok(s) => {
+                    debug!(component = %fqn, "captured shutdown snapshot");
+                    Some(s)
+                }
+                Err(SnapshotError::NotSupported(_)) => None,
+                Err(e) => {
+                    warn!(component = %fqn, error = %e, "snapshot failed during shutdown");
+                    None
+                }
+            };
+
+            // 2. Shutdown
+            comp.shutdown();
+            debug!(component = %fqn, "component shutdown complete");
+
+            (fqn, snapshot)
+        };
+
         info!("ChannelRunner stopped");
+
+        RunnerResult {
+            channel_id: self.id,
+            component_fqn,
+            snapshot,
+        }
     }
 
     /// Handles an incoming signal.
@@ -693,6 +760,8 @@ pub struct ChannelRunnerBuilder {
     shared_handles: Option<SharedChannelHandles>,
     /// Shared Board for auto-recording emitted events.
     board: Option<crate::board::SharedBoard>,
+    /// Initial snapshot to restore before init (session resume).
+    initial_snapshot: Option<ComponentSnapshot>,
 }
 
 impl ChannelRunnerBuilder {
@@ -721,6 +790,7 @@ impl ChannelRunnerBuilder {
             grants: None,
             shared_handles: None,
             board: None,
+            initial_snapshot: None,
         }
     }
 
@@ -847,6 +917,21 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_board(mut self, board: crate::board::SharedBoard) -> Self {
         self.board = Some(board);
+        self
+    }
+
+    /// Sets the initial snapshot to restore before `init()`.
+    ///
+    /// When set, the Component's `restore()` method is called with
+    /// this snapshot before `init()` during `run()`. Used for
+    /// session resume.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot` - Snapshot to restore from
+    #[must_use]
+    pub fn with_initial_snapshot(mut self, snapshot: ComponentSnapshot) -> Self {
+        self.initial_snapshot = Some(snapshot);
         self
     }
 
@@ -1046,6 +1131,7 @@ impl ChannelRunnerBuilder {
             paused_queue: PausedEventQueue::new(),
             child_spawner,
             event_tx: event_tx_for_context,
+            initial_snapshot: self.initial_snapshot,
         };
 
         let handle = ChannelHandle::new(self.id, event_tx);

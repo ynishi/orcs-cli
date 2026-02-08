@@ -29,7 +29,7 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 
-use super::base::{ChannelHandle, Event, InboundEvent};
+use super::base::{ChannelHandle, Event, InboundEvent, RunnerResult};
 use super::common::{
     determine_channel_action, is_channel_active, is_channel_paused, send_abort, send_transition,
     SignalAction,
@@ -48,6 +48,9 @@ use tracing::{debug, info, warn};
 
 /// Default event buffer size per channel.
 const EVENT_BUFFER_SIZE: usize = 64;
+
+/// FQN used by ClientRunner in RunnerResult (not a real component).
+const CLIENT_RUNNER_FQN: &str = "io_bridge";
 
 // --- Response handling ---
 
@@ -264,7 +267,7 @@ impl ClientRunner {
     /// 1. Signals (highest priority - control messages)
     /// 2. Events (component work)
     /// 3. IO input (user interaction → converted to Signals)
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> RunnerResult {
         info!("ClientRunner {} started", self.id);
 
         loop {
@@ -336,6 +339,12 @@ impl ClientRunner {
         }
 
         info!("ClientRunner {} stopped", self.id);
+
+        RunnerResult {
+            channel_id: self.id,
+            component_fqn: CLIENT_RUNNER_FQN.to_string(),
+            snapshot: None,
+        }
     }
 
     /// Handles IO commands that don't map to Signals.
