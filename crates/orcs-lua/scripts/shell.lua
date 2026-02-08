@@ -42,6 +42,8 @@ return {
     id = "shell",
     namespace = "builtin",
     subscriptions = {"Echo"},
+    output_to_io = true,
+    elevated = false,
 
     on_request = function(request)
         local cmd = request.payload

@@ -221,7 +221,7 @@ pub use emitter::Emitter;
 pub use child::{
     AsyncRunnableChild, Child, ChildError, ChildResult, ChildResultDto, RunnableChild,
 };
-pub use component::Component;
+pub use component::{Component, RuntimeHints};
 
 // Re-export async_trait for convenience
 pub use async_trait::async_trait;

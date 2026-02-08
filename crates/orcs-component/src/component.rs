@@ -99,6 +99,22 @@ use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value;
 
+/// Hints from a Component to the Runtime about how it should be spawned.
+///
+/// Components declare these hints; the Runtime inspects them to decide
+/// channel configuration, auth level, and feature enablement.
+///
+/// All fields default to `false` (most restrictive).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeHints {
+    /// Route Output events to the IO channel (visible to user).
+    pub output_to_io: bool,
+    /// Request an elevated session (skip HIL for pre-approved commands).
+    pub elevated: bool,
+    /// Enable child process / child component spawning.
+    pub child_spawner: bool,
+}
+
 /// Component trait for EventBus participants.
 ///
 /// Components are the primary actors in the ORCS system.
@@ -269,6 +285,20 @@ pub trait Component: Send + Sync {
     /// - Cancel background tasks
     fn shutdown(&mut self) {
         // Default: no-op
+    }
+
+    /// Returns runtime hints for this component.
+    ///
+    /// The Runtime uses these hints to configure channel spawning:
+    /// - `output_to_io`: route Output events to the IO channel
+    /// - `elevated`: use an elevated auth session
+    /// - `child_spawner`: enable child spawning capability
+    ///
+    /// # Default
+    ///
+    /// All hints are `false` (most restrictive).
+    fn runtime_hints(&self) -> RuntimeHints {
+        RuntimeHints::default()
     }
 
     /// Returns this component as a [`Packageable`] if supported.

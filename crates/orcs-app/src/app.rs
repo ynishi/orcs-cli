@@ -673,15 +673,21 @@ impl OrcsAppBuilder {
         let store = LocalFileStore::new(session_path)
             .map_err(|e| AppError::Config(format!("Failed to create session store: {e}")))?;
 
-        // Create World with IO channel and channels for components
+        // Create World with IO channel + pre-allocated builtin channels
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
-        let claude_channel = world.create_channel(ChannelConfig::default());
-        let subagent_channel = world.create_channel(ChannelConfig::default());
-        let agent_mgr_channel = world.create_channel(ChannelConfig::default());
-        let shell_channel = world.create_channel(ChannelConfig::default());
-        let tool_channel = world.create_channel(ChannelConfig::default());
-        let skill_mgr_channel = world.create_channel(ChannelConfig::default());
+        let builtin_names: &[&str] = &[
+            "claude_cli",
+            "subagent",
+            "shell",
+            "tool",
+            "agent_mgr",
+            "skill_manager",
+        ];
+        let builtin_channels: Vec<_> = builtin_names
+            .iter()
+            .map(|_| world.create_channel(ChannelConfig::default()))
+            .collect();
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
@@ -695,11 +701,9 @@ impl OrcsAppBuilder {
                     .without_embedded_fallback();
                 let result = script_loader.load_all();
 
-                // Capture counts before consuming
                 let loaded_count = result.loaded_count();
                 let warning_count = result.warning_count();
 
-                // Log warnings but continue
                 for warn in &result.warnings {
                     tracing::warn!(
                         path = %warn.path.display(),
@@ -708,7 +712,6 @@ impl OrcsAppBuilder {
                     );
                 }
 
-                // Spawn each loaded component on its own channel
                 for (name, component) in result.loaded {
                     let world_ref = engine.world_read();
                     let channel_id = {
@@ -743,152 +746,78 @@ impl OrcsAppBuilder {
         let (_io_handle, io_event_tx) = engine.spawn_client_runner(io, io_port, principal.clone());
         tracing::info!("ClientRunner spawned: channel={} (IO bridge)", io);
 
-        // Create shared auth context for all runners
-        // Session starts elevated for interactive use (user is present)
-        let auth_session: Arc<Session> =
+        // Shared auth context
+        let elevated_session: Arc<Session> =
             Arc::new(Session::new(principal.clone()).elevate(std::time::Duration::from_secs(3600)));
+        let non_elevated_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
         let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
-        // Grant stores: セッション中の HIL grant を保持する。
-        // elevated runners は共有 store、shell は独自 store（non-elevated なので
-        // HIL approval → grant_command() が実際に使われる唯一のコンポーネント）。
-        // TODO: 将来的に Grant は Component レベルで管理すべき
-        // （Grant 自体は Domain だが HIL フローは Component の責務）。
-        let auth_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
-        let shell_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+        // Elevated components share grants; non-elevated get their own store.
+        let shared_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
         tracing::info!(
             "Auth context created: principal={:?}, elevated={}",
-            auth_session.principal(),
-            auth_session.is_elevated()
+            elevated_session.principal(),
+            elevated_session.is_elevated()
         );
 
-        // Spawn ChannelRunner for claude_cli with output routed to IO channel
-        let lua_component = ScriptLoader::load_embedded("claude_cli", Arc::clone(&sandbox))
-            .map_err(|e| AppError::Config(format!("Failed to load claude_cli script: {e}")))?;
-        let component_id = lua_component.id().clone();
-        let _claude_handle = engine.spawn_runner_full_auth(
-            claude_channel,
-            Box::new(lua_component),
-            Some(io_event_tx.clone()),
-            None, // No child spawner for claude_cli
-            Arc::clone(&auth_session),
-            Arc::clone(&auth_checker),
-            Arc::clone(&auth_grants),
-        );
-        tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
-            claude_channel,
-            component_id.fqn()
-        );
+        // Spawn builtin components driven by RuntimeHints
+        let mut component_routes = HashMap::new();
 
-        // Spawn ChannelRunner for subagent with output routed to IO channel
-        let subagent_component = ScriptLoader::load_embedded("subagent", Arc::clone(&sandbox))
-            .map_err(|e| AppError::Config(format!("Failed to load subagent script: {e}")))?;
-        let subagent_id = subagent_component.id().clone();
-        let _subagent_handle = engine.spawn_runner_full_auth(
-            subagent_channel,
-            Box::new(subagent_component),
-            Some(io_event_tx.clone()),
-            None, // No child spawner for subagent
-            Arc::clone(&auth_session),
-            Arc::clone(&auth_checker),
-            Arc::clone(&auth_grants),
-        );
-        tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
-            subagent_channel,
-            subagent_id.fqn()
-        );
+        for (name, &channel_id) in builtin_names.iter().zip(builtin_channels.iter()) {
+            let component = ScriptLoader::load_embedded(name, Arc::clone(&sandbox))
+                .map_err(|e| AppError::Config(format!("Failed to load {name} script: {e}")))?;
+            let hints = component.runtime_hints();
+            let component_id = component.id().clone();
 
-        // Spawn ChannelRunner for shell component (auth verification)
-        // Shell uses a non-elevated session so dangerous commands require HIL approval
-        let shell_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
-        tracing::info!(
-            "Shell session created: principal={:?}, elevated={} (HIL approval required for commands)",
-            shell_session.principal(),
-            shell_session.is_elevated()
-        );
-        let shell_component = ScriptLoader::load_embedded("shell", Arc::clone(&sandbox))
-            .map_err(|e| AppError::Config(format!("Failed to load shell script: {e}")))?;
-        let shell_id = shell_component.id().clone();
-        let _shell_handle = engine.spawn_runner_full_auth(
-            shell_channel,
-            Box::new(shell_component),
-            Some(io_event_tx.clone()),
-            None,
-            shell_session,
-            Arc::clone(&auth_checker),
-            shell_grants,
-        );
-        tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
-            shell_channel,
-            shell_id.fqn()
-        );
+            // Derive spawn config from hints
+            let output_tx = if hints.output_to_io {
+                Some(io_event_tx.clone())
+            } else {
+                None
+            };
+            let session = if hints.elevated {
+                Arc::clone(&elevated_session)
+            } else {
+                Arc::clone(&non_elevated_session)
+            };
+            let grants: Arc<dyn GrantPolicy> = if hints.elevated {
+                Arc::clone(&shared_grants)
+            } else {
+                Arc::new(DefaultGrantStore::new())
+            };
+            let lua_loader: Option<Arc<dyn LuaChildLoader>> = if hints.child_spawner {
+                Some(Arc::new(AppLuaChildLoader {
+                    sandbox: Arc::clone(&sandbox),
+                }))
+            } else {
+                None
+            };
 
-        // Spawn ChannelRunner for tool component (file tool verification)
-        // Uses auth so ChildContext is set → Capability gating is active
-        let tool_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
-        let tool_component = ScriptLoader::load_embedded("tool", Arc::clone(&sandbox))
-            .map_err(|e| AppError::Config(format!("Failed to load tool script: {e}")))?;
-        let tool_id = tool_component.id().clone();
-        let _tool_handle = engine.spawn_runner_full_auth(
-            tool_channel,
-            Box::new(tool_component),
-            Some(io_event_tx.clone()),
-            None,
-            Arc::clone(&auth_session),
-            Arc::clone(&auth_checker),
-            tool_grants,
-        );
-        tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
-            tool_channel,
-            tool_id.fqn()
-        );
+            engine.spawn_runner_full_auth(
+                channel_id,
+                Box::new(component),
+                output_tx,
+                lua_loader,
+                session,
+                Arc::clone(&auth_checker),
+                grants,
+            );
 
-        // Spawn ChannelRunner for agent_mgr with child spawning enabled
-        let agent_mgr_component = ScriptLoader::load_embedded("agent_mgr", Arc::clone(&sandbox))
-            .map_err(|e| AppError::Config(format!("Failed to load agent_mgr script: {e}")))?;
-        let agent_mgr_id = agent_mgr_component.id().clone();
-        let lua_loader: Arc<dyn LuaChildLoader> = Arc::new(AppLuaChildLoader {
-            sandbox: Arc::clone(&sandbox),
-        });
-        let _agent_mgr_handle = engine.spawn_runner_full_auth(
-            agent_mgr_channel,
-            Box::new(agent_mgr_component),
-            Some(io_event_tx),
-            Some(lua_loader),
-            Arc::clone(&auth_session),
-            Arc::clone(&auth_checker),
-            Arc::clone(&auth_grants),
-        );
-        tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (child spawner + auth enabled)",
-            agent_mgr_channel,
-            agent_mgr_id.fqn()
-        );
+            let short_name = component_id.name.clone();
+            component_routes.insert(short_name, channel_id);
 
-        // Spawn ChannelRunner for skill_manager (skill discovery / registration / RPC)
-        let skill_mgr_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
-        let skill_mgr_component =
-            ScriptLoader::load_embedded("skill_manager", Arc::clone(&sandbox))
-                .map_err(|e| {
-                    AppError::Config(format!("Failed to load skill_manager script: {e}"))
-                })?;
-        let skill_mgr_id = skill_mgr_component.id().clone();
-        let _skill_mgr_handle = engine.spawn_runner_full_auth(
-            skill_mgr_channel,
-            Box::new(skill_mgr_component),
-            None, // No IO output routing (internal service)
-            None, // No child spawner
-            Arc::clone(&auth_session),
-            Arc::clone(&auth_checker),
-            skill_mgr_grants,
-        );
+            tracing::info!(
+                channel = %channel_id,
+                component = %component_id.fqn(),
+                output_to_io = hints.output_to_io,
+                elevated = hints.elevated,
+                child_spawner = hints.child_spawner,
+                "Spawned component"
+            );
+        }
+
         tracing::info!(
-            "ChannelRunner spawned: channel={}, component={} (auth enabled)",
-            skill_mgr_channel,
-            skill_mgr_id.fqn()
+            "Component routes registered: {:?}",
+            component_routes.keys().collect::<Vec<_>>()
         );
 
         // Load or create session
@@ -908,19 +837,6 @@ impl OrcsAppBuilder {
         } else {
             ConsoleRenderer::new()
         };
-
-        // Build component routing table (name → channel_id)
-        let mut component_routes = HashMap::new();
-        component_routes.insert("claude_cli".to_string(), claude_channel);
-        component_routes.insert("subagent".to_string(), subagent_channel);
-        component_routes.insert("shell".to_string(), shell_channel);
-        component_routes.insert("tool".to_string(), tool_channel);
-        component_routes.insert("agent_mgr".to_string(), agent_mgr_channel);
-        component_routes.insert("skill_manager".to_string(), skill_mgr_channel);
-        tracing::info!(
-            "Component routes registered: {:?}",
-            component_routes.keys().collect::<Vec<_>>()
-        );
 
         tracing::debug!("OrcsApp created with config: debug={}", config.debug);
 

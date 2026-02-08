@@ -10,7 +10,7 @@ use crate::types::{
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
     ChildConfig, ChildContext, Component, ComponentError, ComponentLoader, Emitter, EventCategory,
-    SpawnError, Status,
+    RuntimeHints, SpawnError, Status,
 };
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_runtime::sandbox::SandboxPolicy;
@@ -81,6 +81,8 @@ pub struct LuaComponent {
     /// Injected at construction time. Used by `orcs.read/write/grep/glob` in Lua.
     /// Stored for use during `reload()`.
     sandbox: Arc<dyn SandboxPolicy>,
+    /// Runtime hints declared by the Lua script.
+    hints: RuntimeHints,
 }
 
 // SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
@@ -197,6 +199,13 @@ impl LuaComponent {
             .map(|f| lua.create_registry_value(f))
             .transpose()?;
 
+        // Extract runtime hints (all optional, default false)
+        let hints = RuntimeHints {
+            output_to_io: component_table.get("output_to_io").unwrap_or(false),
+            elevated: component_table.get("elevated").unwrap_or(false),
+            child_spawner: component_table.get("child_spawner").unwrap_or(false),
+        };
+
         Ok(Self {
             lua: Mutex::new(lua),
             id,
@@ -210,6 +219,7 @@ impl LuaComponent {
             emitter: None,
             child_context: None,
             sandbox,
+            hints,
         })
     }
 
@@ -1111,6 +1121,10 @@ impl Component for LuaComponent {
 
     fn subscriptions(&self) -> &[EventCategory] {
         &self.subscriptions
+    }
+
+    fn runtime_hints(&self) -> RuntimeHints {
+        self.hints.clone()
     }
 
     fn status(&self) -> Status {

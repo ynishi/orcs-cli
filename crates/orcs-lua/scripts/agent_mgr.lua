@@ -35,6 +35,9 @@ return {
     id = "agent_mgr",
     namespace = "builtin",
     subscriptions = {"UserInput"},
+    output_to_io = true,
+    elevated = true,
+    child_spawner = true,
 
     on_request = function(request)
         -- Extract user message from payload

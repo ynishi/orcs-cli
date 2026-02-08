@@ -248,6 +248,7 @@ return {
     id = "skill_manager",
     namespace = "skill",
     subscriptions = { "Extension" },
+    elevated = true,
 
     init = function()
         registry = SkillRegistry.new()

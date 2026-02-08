@@ -8,6 +8,8 @@ return {
     id = "subagent",
     namespace = "builtin",
     subscriptions = {"Echo"},
+    output_to_io = true,
+    elevated = true,
 
     on_request = function(request)
         -- Extract user message from payload

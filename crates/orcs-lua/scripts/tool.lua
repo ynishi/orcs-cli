@@ -36,6 +36,8 @@ return {
     id = "tool",
     namespace = "builtin",
     subscriptions = {"Echo"},
+    output_to_io = true,
+    elevated = true,
 
     on_request = function(request)
         local msg = request.payload

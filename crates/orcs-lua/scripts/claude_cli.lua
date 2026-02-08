@@ -8,6 +8,8 @@ return {
     id = "claude_cli",
     namespace = "builtin",
     subscriptions = {"UserInput"},
+    output_to_io = true,
+    elevated = true,
 
     on_request = function(request)
         -- Extract user message from payload
