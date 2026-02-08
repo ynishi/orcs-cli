@@ -22,7 +22,13 @@ serde_json = "1.0"
 # File tools
 regex = "1.11"
 glob = "0.3"
+globset = { workspace = true }
+walkdir = { workspace = true }
 tempfile = "3"
+
+# Parsing
+serde_yaml = { workspace = true }
+toml = { workspace = true }
 
 # Error handling
 thiserror = "2.0"

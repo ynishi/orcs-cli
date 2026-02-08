@@ -957,6 +957,40 @@ impl LuaComponent {
 
         lua.globals().set("orcs", orcs_table)?;
 
+        // orcs.require_lib(name) -> module table (embedded lib loader with caching)
+        {
+            let orcs_table: Table = lua.globals().get("orcs")?;
+            let require_lib_fn = lua.create_function(|lua, name: String| {
+                let cache_key = format!("_orcs_lib_{name}");
+                let globals = lua.globals();
+                if let Ok(val) = globals.get::<mlua::Value>(cache_key.as_str()) {
+                    if val != mlua::Value::Nil {
+                        return Ok(val);
+                    }
+                }
+                let source = crate::embedded::lib::get(&name).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!(
+                        "lib module not found: {name}. available: {:?}",
+                        crate::embedded::lib::list()
+                    ))
+                })?;
+                let value: mlua::Value = lua
+                    .load(source)
+                    .set_name(format!("lib/{name}"))
+                    .eval()
+                    .map_err(|e| {
+                        mlua::Error::RuntimeError(format!("lib/{name} load failed: {e}"))
+                    })?;
+                globals
+                    .set(cache_key.as_str(), value.clone())
+                    .map_err(|e| {
+                        mlua::Error::RuntimeError(format!("lib/{name} cache failed: {e}"))
+                    })?;
+                Ok(value)
+            })?;
+            orcs_table.set("require_lib", require_lib_fn)?;
+        }
+
         // Register native Rust tools (read, write, grep, glob)
         crate::tools::register_tool_functions(lua, sandbox)?;
 
@@ -1025,8 +1059,46 @@ impl LuaComponent {
         })?;
         orcs_table.set("board_recent", board_recent_fn)?;
 
+        // orcs.request(target, operation, payload, opts?) -> table
+        // Component-to-Component RPC via EventBus routing
+        let emitter_clone5 = Arc::clone(&emitter);
+        let request_fn =
+            lua.create_function(
+                move |lua,
+                      (target, operation, payload, opts): (
+                    String,
+                    String,
+                    LuaValue,
+                    Option<Table>,
+                )| {
+                    let json_payload: serde_json::Value = lua.from_value(payload)?;
+                    let timeout_ms = opts.and_then(|t| t.get::<u64>("timeout_ms").ok());
+
+                    let em = emitter_clone5.lock().map_err(|e| {
+                        mlua::Error::RuntimeError(format!("emitter lock poisoned: {e}"))
+                    })?;
+
+                    match em.request(&target, &operation, json_payload, timeout_ms) {
+                        Ok(value) => {
+                            let result = lua.create_table()?;
+                            result.set("success", true)?;
+                            let lua_data = lua.to_value(&value)?;
+                            result.set("data", lua_data)?;
+                            Ok(result)
+                        }
+                        Err(err) => {
+                            let result = lua.create_table()?;
+                            result.set("success", false)?;
+                            result.set("error", err)?;
+                            Ok(result)
+                        }
+                    }
+                },
+            )?;
+        orcs_table.set("request", request_fn)?;
+
         tracing::debug!(
-            "Registered orcs.output, orcs.emit_event, and orcs.board_recent functions with emitter"
+            "Registered orcs.output, orcs.emit_event, orcs.board_recent, and orcs.request functions with emitter"
         );
         Ok(())
     }

@@ -280,6 +280,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_component_channel_map(self.eventbus.shared_component_channel_map())
         .with_board(Arc::clone(&self.board))
         .with_request_channel();
 
@@ -336,6 +337,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_component_channel_map(self.eventbus.shared_component_channel_map())
         .with_board(Arc::clone(&self.board))
         .with_request_channel();
 
@@ -535,6 +537,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_component_channel_map(self.eventbus.shared_component_channel_map())
         .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
@@ -594,6 +597,7 @@ impl OrcsEngine {
         )
         .with_emitter(self.signal_tx.clone())
         .with_shared_handles(self.eventbus.shared_handles())
+        .with_component_channel_map(self.eventbus.shared_component_channel_map())
         .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)

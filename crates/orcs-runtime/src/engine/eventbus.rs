@@ -61,6 +61,12 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// Uses std::sync::RwLock for sync access in EventBus methods.
 pub type SharedChannelHandles = Arc<RwLock<HashMap<ChannelId, ChannelHandle>>>;
 
+/// Shared mapping from ComponentId to ChannelId for RPC routing.
+///
+/// Used by both EventBus and EventEmitter to resolve which ChannelRunner
+/// hosts a given Component, enabling `orcs.request()` from Lua.
+pub type SharedComponentChannelMap = Arc<RwLock<HashMap<ComponentId, ChannelId>>>;
+
 /// EventBus - routes messages between components and channels.
 ///
 /// The EventBus is responsible for:
@@ -92,11 +98,9 @@ pub struct EventBus {
     channel_handles: SharedChannelHandles,
     /// Maps ComponentId to ChannelId for routing RPC requests via ChannelHandle.
     ///
+    /// Shared with EventEmitter instances to enable `orcs.request()` from Lua.
     /// Populated by [`register_component_channel()`] when Engine spawns runners.
-    /// When `request()` is called, this mapping is checked first to route
-    /// via the ChannelHandle's request channel (instead of the standalone
-    /// ComponentHandle path).
-    component_channel_map: HashMap<ComponentId, ChannelId>,
+    component_channel_map: SharedComponentChannelMap,
 }
 
 impl EventBus {
@@ -110,7 +114,7 @@ impl EventBus {
             signal_tx,
             subscriptions: HashMap::new(),
             channel_handles: Arc::new(RwLock::new(HashMap::new())),
-            component_channel_map: HashMap::new(),
+            component_channel_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -121,6 +125,15 @@ impl EventBus {
     #[must_use]
     pub fn shared_handles(&self) -> SharedChannelHandles {
         Arc::clone(&self.channel_handles)
+    }
+
+    /// Returns a clone of the shared component-to-channel mapping.
+    ///
+    /// Used by EventEmitter to resolve ComponentId → ChannelId for
+    /// `orcs.request()` RPC routing.
+    #[must_use]
+    pub fn shared_component_channel_map(&self) -> SharedComponentChannelMap {
+        Arc::clone(&self.component_channel_map)
     }
 
     /// Register component with subscriptions.
@@ -212,7 +225,13 @@ impl EventBus {
         // request channel enabled, route directly via ChannelHandle.
         // The reply comes back through a oneshot in the RequestEnvelope,
         // bypassing pending_responses entirely.
-        if let Some(channel_id) = self.component_channel_map.get(target).copied() {
+        let resolved_channel_id = self
+            .component_channel_map
+            .read()
+            .expect("component_channel_map lock poisoned")
+            .get(target)
+            .copied();
+        if let Some(channel_id) = resolved_channel_id {
             let handle = {
                 let handles = self.channel_handles.read().expect("lock poisoned");
                 handles.get(&channel_id).cloned()
@@ -345,7 +364,10 @@ impl EventBus {
     /// * `component_id` - The Component's identifier
     /// * `channel_id` - The Channel hosting the Component
     pub fn register_component_channel(&mut self, component_id: ComponentId, channel_id: ChannelId) {
-        self.component_channel_map.insert(component_id, channel_id);
+        self.component_channel_map
+            .write()
+            .expect("component_channel_map lock poisoned")
+            .insert(component_id, channel_id);
     }
 
     /// Unregisters a channel handle.
@@ -355,7 +377,10 @@ impl EventBus {
         let mut handles = self.channel_handles.write().expect("lock poisoned");
         handles.remove(id);
         // Clean up component → channel mapping
-        self.component_channel_map.retain(|_, cid| cid != id);
+        self.component_channel_map
+            .write()
+            .expect("component_channel_map lock poisoned")
+            .retain(|_, cid| cid != id);
     }
 
     /// Injects a direct event into a specific channel (subscription filter bypassed).
@@ -1132,10 +1157,18 @@ mod tests {
         bus.register_component_channel(target.clone(), channel_id);
 
         // Verify mapping exists
-        assert!(bus.component_channel_map.contains_key(&target));
+        assert!(bus
+            .component_channel_map
+            .read()
+            .unwrap()
+            .contains_key(&target));
 
         // Unregister should clean up
         bus.unregister_channel(&channel_id);
-        assert!(!bus.component_channel_map.contains_key(&target));
+        assert!(!bus
+            .component_channel_map
+            .read()
+            .unwrap()
+            .contains_key(&target));
     }
 }

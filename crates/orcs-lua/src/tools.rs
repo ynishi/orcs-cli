@@ -23,7 +23,7 @@
 //! injected at registration time — no implicit `current_dir()` dependency.
 
 use crate::error::LuaError;
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaSerdeExt, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
 use std::path::Path;
 use std::sync::Arc;
@@ -305,6 +305,314 @@ pub(crate) fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Resu
 
 // ─── Lua Registration ───────────────────────────────────────────────────
 
+// ─── scan_dir ──────────────────────────────────────────────────────────
+
+/// Entry returned by `tool_scan_dir`.
+pub(crate) struct ScanEntry {
+    pub path: String,
+    pub relative: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u64,
+}
+
+/// Scans a directory with include/exclude glob patterns.
+pub(crate) fn tool_scan_dir(
+    path: &str,
+    recursive: bool,
+    exclude: &[String],
+    include: &[String],
+    max_depth: Option<usize>,
+    sandbox: &dyn SandboxPolicy,
+) -> Result<Vec<ScanEntry>, String> {
+    let base = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+
+    if !base.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+
+    let exclude_set = build_glob_set(exclude)?;
+    let include_set = if include.is_empty() {
+        None
+    } else {
+        Some(build_glob_set(include)?)
+    };
+
+    let mut walker = walkdir::WalkDir::new(&base);
+    if !recursive {
+        walker = walker.max_depth(1);
+    } else if let Some(depth) = max_depth {
+        walker = walker.max_depth(depth);
+    }
+
+    let mut entries = Vec::new();
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.path() == base {
+            continue;
+        }
+
+        let relative = entry
+            .path()
+            .strip_prefix(&base)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .to_string();
+
+        if exclude_set.is_match(&relative) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_dir();
+
+        if !is_dir {
+            if let Some(ref inc) = include_set {
+                if !inc.is_match(&relative) {
+                    continue;
+                }
+            }
+        }
+
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map_or(0, |m| m.len());
+        let modified = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+
+        entries.push(ScanEntry {
+            path: entry.path().to_string_lossy().to_string(),
+            relative,
+            is_dir,
+            size,
+            modified,
+        });
+    }
+
+    Ok(entries)
+}
+
+fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, String> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob =
+            globset::Glob::new(pattern).map_err(|e| format!("invalid glob '{pattern}': {e}"))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("glob set build error: {e}"))
+}
+
+// ─── parse_frontmatter ─────────────────────────────────────────────────
+
+/// Result of frontmatter parsing.
+pub(crate) struct FrontmatterResult {
+    pub frontmatter: Option<serde_json::Value>,
+    pub body: String,
+    pub format: Option<String>,
+}
+
+/// Parses frontmatter from string content.
+///
+/// Supports `---` (YAML) and `+++` (TOML) delimiters.
+pub(crate) fn tool_parse_frontmatter_str(content: &str) -> Result<FrontmatterResult, String> {
+    let trimmed = content.trim_start();
+
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        // YAML frontmatter: find closing "---" on its own line
+        if let Some(end_idx) = rest.find("\n---") {
+            let yaml_str = &rest[..end_idx];
+            let body_start = end_idx + 4; // skip "\n---"
+            let body = rest[body_start..].trim_start_matches('\n').to_string();
+
+            let value: serde_json::Value =
+                serde_yaml::from_str(yaml_str).map_err(|e| format!("YAML parse error: {e}"))?;
+
+            Ok(FrontmatterResult {
+                frontmatter: Some(value),
+                body,
+                format: Some("yaml".to_string()),
+            })
+        } else {
+            Ok(FrontmatterResult {
+                frontmatter: None,
+                body: content.to_string(),
+                format: None,
+            })
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("+++") {
+        // TOML frontmatter
+        if let Some(end_idx) = rest.find("\n+++") {
+            let toml_str = &rest[..end_idx];
+            let body_start = end_idx + 4;
+            let body = rest[body_start..].trim_start_matches('\n').to_string();
+
+            let toml_value: toml::Value = toml_str
+                .parse()
+                .map_err(|e| format!("TOML parse error: {e}"))?;
+            let json_value = toml_to_json(toml_value);
+
+            Ok(FrontmatterResult {
+                frontmatter: Some(json_value),
+                body,
+                format: Some("toml".to_string()),
+            })
+        } else {
+            Ok(FrontmatterResult {
+                frontmatter: None,
+                body: content.to_string(),
+                format: None,
+            })
+        }
+    } else {
+        Ok(FrontmatterResult {
+            frontmatter: None,
+            body: content.to_string(),
+            format: None,
+        })
+    }
+}
+
+/// Parses frontmatter from a file path.
+pub(crate) fn tool_parse_frontmatter(
+    path: &str,
+    sandbox: &dyn SandboxPolicy,
+) -> Result<FrontmatterResult, String> {
+    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let content =
+        std::fs::read_to_string(&canonical).map_err(|e| format!("read failed: {path} ({e})"))?;
+    tool_parse_frontmatter_str(&content)
+}
+
+// ─── parse_toml ────────────────────────────────────────────────────────
+
+/// Parses a TOML string into a JSON-compatible value.
+pub(crate) fn tool_parse_toml(content: &str) -> Result<serde_json::Value, String> {
+    let toml_value: toml::Value = content
+        .parse()
+        .map_err(|e| format!("TOML parse error: {e}"))?;
+    Ok(toml_to_json(toml_value))
+}
+
+fn toml_to_json(value: toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(s) => serde_json::Value::String(s),
+        toml::Value::Integer(i) => serde_json::json!(i),
+        toml::Value::Float(f) => serde_json::json!(f),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(b),
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(map) => {
+            let obj = map.into_iter().map(|(k, v)| (k, toml_to_json(v))).collect();
+            serde_json::Value::Object(obj)
+        }
+    }
+}
+
+// ─── glob_match ────────────────────────────────────────────────────────
+
+/// Result of glob matching.
+pub(crate) struct GlobMatchResult {
+    pub matched: Vec<String>,
+    pub unmatched: Vec<String>,
+}
+
+/// Matches paths against a set of glob patterns.
+pub(crate) fn tool_glob_match(
+    patterns: &[String],
+    paths: &[String],
+) -> Result<GlobMatchResult, String> {
+    let glob_set = build_glob_set(patterns)?;
+
+    let mut matched = Vec::new();
+    let mut unmatched = Vec::new();
+
+    for path in paths {
+        if glob_set.is_match(path) {
+            matched.push(path.clone());
+        } else {
+            unmatched.push(path.clone());
+        }
+    }
+
+    Ok(GlobMatchResult { matched, unmatched })
+}
+
+/// Evaluates Lua source in a sandboxed environment.
+///
+/// Creates a restricted environment that excludes dangerous globals
+/// (`os`, `io`, `debug`, `loadfile`, `dofile`, `require`). Only safe
+/// builtins (`table`, `string`, `math`, `pairs`, `ipairs`, `type`,
+/// `tostring`, `tonumber`, `select`, `unpack`, `error`, `pcall`, `xpcall`)
+/// are available.
+///
+/// Returns the value produced by the chunk (the last expression / `return`).
+pub(crate) fn tool_load_lua(
+    lua: &Lua,
+    content: &str,
+    source_name: &str,
+) -> Result<mlua::Value, String> {
+    // Build restricted environment
+    let env = lua
+        .create_table()
+        .map_err(|e| format!("env creation failed: {e}"))?;
+
+    let globals = lua.globals();
+
+    // Safe builtins to copy into sandbox
+    let safe_globals = [
+        "table",
+        "string",
+        "math",
+        "pairs",
+        "ipairs",
+        "next",
+        "type",
+        "tostring",
+        "tonumber",
+        "select",
+        "unpack",
+        "error",
+        "pcall",
+        "xpcall",
+        "rawget",
+        "rawset",
+        "rawequal",
+        "rawlen",
+        "setmetatable",
+        "getmetatable",
+    ];
+
+    for name in &safe_globals {
+        if let Ok(val) = globals.get::<mlua::Value>(*name) {
+            env.set(*name, val)
+                .map_err(|e| format!("env.{name}: {e}"))?;
+        }
+    }
+
+    // print → safe (just outputs to tracing)
+    let src = source_name.to_string();
+    let print_fn = lua
+        .create_function(move |_, args: mlua::MultiValue| {
+            let parts: Vec<String> = args.iter().map(|v| format!("{v:?}")).collect();
+            tracing::info!(source = %src, "[lua-sandbox] {}", parts.join("\t"));
+            Ok(())
+        })
+        .map_err(|e| format!("print fn: {e}"))?;
+    env.set("print", print_fn)
+        .map_err(|e| format!("env.print: {e}"))?;
+
+    // Load chunk with source name, set env
+    let chunk = lua.load(content).set_name(source_name);
+
+    chunk
+        .set_environment(env)
+        .eval::<mlua::Value>()
+        .map_err(|e| format!("{source_name}: {e}"))
+}
+
 /// Registers all tool functions in the Lua `orcs` table.
 ///
 /// The sandbox controls which paths are accessible. All file operations
@@ -449,11 +757,159 @@ pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Re
     })?;
     orcs_table.set("mv", mv_fn)?;
 
+    // orcs.scan_dir(config) -> table[]
+    let sb = Arc::clone(&sandbox);
+    let scan_dir_fn = lua.create_function(move |lua, config: Table| {
+        let path: String = config.get("path")?;
+        let recursive: bool = config.get("recursive").unwrap_or(true);
+        let max_depth: Option<usize> = config.get("max_depth").ok();
+
+        let exclude: Vec<String> = config
+            .get::<Table>("exclude")
+            .map(|t| {
+                t.sequence_values::<String>()
+                    .filter_map(|v| v.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let include: Vec<String> = config
+            .get::<Table>("include")
+            .map(|t| {
+                t.sequence_values::<String>()
+                    .filter_map(|v| v.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        match tool_scan_dir(&path, recursive, &exclude, &include, max_depth, sb.as_ref()) {
+            Ok(entries) => {
+                let result = lua.create_table()?;
+                for (i, entry) in entries.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("path", entry.path.as_str())?;
+                    t.set("relative", entry.relative.as_str())?;
+                    t.set("is_dir", entry.is_dir)?;
+                    t.set("size", entry.size)?;
+                    t.set("modified", entry.modified)?;
+                    result.set(i + 1, t)?;
+                }
+                Ok(result)
+            }
+            Err(e) => Err(mlua::Error::RuntimeError(e)),
+        }
+    })?;
+    orcs_table.set("scan_dir", scan_dir_fn)?;
+
+    // orcs.parse_frontmatter(path) -> { frontmatter, body, format }
+    let sb = Arc::clone(&sandbox);
+    let parse_fm_fn =
+        lua.create_function(move |lua, path: String| {
+            match tool_parse_frontmatter(&path, sb.as_ref()) {
+                Ok(result) => frontmatter_result_to_lua(lua, result),
+                Err(e) => {
+                    let t = lua.create_table()?;
+                    t.set("ok", false)?;
+                    t.set("error", e)?;
+                    Ok(t)
+                }
+            }
+        })?;
+    orcs_table.set("parse_frontmatter", parse_fm_fn)?;
+
+    // orcs.parse_frontmatter_str(content) -> { frontmatter, body, format }
+    let parse_fm_str_fn = lua.create_function(move |lua, content: String| {
+        match tool_parse_frontmatter_str(&content) {
+            Ok(result) => frontmatter_result_to_lua(lua, result),
+            Err(e) => {
+                let t = lua.create_table()?;
+                t.set("ok", false)?;
+                t.set("error", e)?;
+                Ok(t)
+            }
+        }
+    })?;
+    orcs_table.set("parse_frontmatter_str", parse_fm_str_fn)?;
+
+    // orcs.parse_toml(str) -> table
+    let parse_toml_fn =
+        lua.create_function(
+            move |lua, content: String| match tool_parse_toml(&content) {
+                Ok(value) => lua.to_value(&value).map_err(|e| {
+                    mlua::Error::RuntimeError(format!("TOML to Lua conversion failed: {e}"))
+                }),
+                Err(e) => Err(mlua::Error::RuntimeError(e)),
+            },
+        )?;
+    orcs_table.set("parse_toml", parse_toml_fn)?;
+
+    // orcs.glob_match(patterns, paths) -> { matched[], unmatched[] }
+    let glob_match_fn =
+        lua.create_function(move |lua, (patterns_tbl, paths_tbl): (Table, Table)| {
+            let patterns: Vec<String> = patterns_tbl
+                .sequence_values::<String>()
+                .filter_map(|v| v.ok())
+                .collect();
+            let paths: Vec<String> = paths_tbl
+                .sequence_values::<String>()
+                .filter_map(|v| v.ok())
+                .collect();
+
+            match tool_glob_match(&patterns, &paths) {
+                Ok(result) => {
+                    let t = lua.create_table()?;
+
+                    let matched = lua.create_table()?;
+                    for (i, m) in result.matched.iter().enumerate() {
+                        matched.set(i + 1, m.as_str())?;
+                    }
+                    t.set("matched", matched)?;
+
+                    let unmatched = lua.create_table()?;
+                    for (i, u) in result.unmatched.iter().enumerate() {
+                        unmatched.set(i + 1, u.as_str())?;
+                    }
+                    t.set("unmatched", unmatched)?;
+
+                    Ok(t)
+                }
+                Err(e) => Err(mlua::Error::RuntimeError(e)),
+            }
+        })?;
+    orcs_table.set("glob_match", glob_match_fn)?;
+
+    // orcs.load_lua(content, source_name?) -> value
+    let load_lua_fn = lua.create_function(
+        move |lua, (content, source_name): (String, Option<String>)| {
+            let name = source_name.as_deref().unwrap_or("(eval)");
+            tool_load_lua(lua, &content, name).map_err(mlua::Error::RuntimeError)
+        },
+    )?;
+    orcs_table.set("load_lua", load_lua_fn)?;
+
     tracing::debug!(
-        "Registered orcs tool functions: read, write, grep, glob, mkdir, remove, mv (sandbox_root={})",
+        "Registered orcs tool functions: read, write, grep, glob, mkdir, remove, mv, scan_dir, parse_frontmatter, parse_toml, glob_match, load_lua (sandbox_root={})",
         sandbox.root().display()
     );
     Ok(())
+}
+
+/// Converts a FrontmatterResult to a Lua table.
+fn frontmatter_result_to_lua(lua: &Lua, result: FrontmatterResult) -> Result<Table, mlua::Error> {
+    let t = lua.create_table()?;
+    match result.frontmatter {
+        Some(fm) => {
+            let lua_fm = lua.to_value(&fm)?;
+            t.set("frontmatter", lua_fm)?;
+        }
+        None => t.set("frontmatter", mlua::Value::Nil)?,
+    }
+    t.set("body", result.body)?;
+    match result.format {
+        Some(f) => t.set("format", f)?,
+        None => t.set("format", mlua::Value::Nil)?,
+    }
+    Ok(t)
 }
 
 #[cfg(test)]

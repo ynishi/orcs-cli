@@ -21,10 +21,12 @@
 use super::base::OutputSender;
 use super::Event;
 use crate::board::{BoardEntry, BoardEntryKind, SharedBoard};
-use crate::engine::SharedChannelHandles;
+use crate::engine::{SharedChannelHandles, SharedComponentChannelMap};
 use orcs_component::Emitter;
-use orcs_event::{EventCategory, Signal};
-use orcs_types::ComponentId;
+use orcs_event::{EventCategory, Request, Signal};
+use orcs_types::{ChannelId, ComponentId};
+use serde_json::Value;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// Event emitter for Components.
@@ -49,6 +51,10 @@ pub struct EventEmitter {
     source_id: ComponentId,
     /// Shared channel handles for broadcasting events to all channels.
     shared_handles: Option<SharedChannelHandles>,
+    /// Shared ComponentId → ChannelId mapping for RPC routing.
+    component_channel_map: Option<SharedComponentChannelMap>,
+    /// Channel ID of this emitter's owning ChannelRunner.
+    channel_id: Option<ChannelId>,
     /// Shared Board for auto-recording emitted events.
     board: Option<SharedBoard>,
 }
@@ -73,6 +79,8 @@ impl EventEmitter {
             signal_tx,
             source_id,
             shared_handles: None,
+            component_channel_map: None,
+            channel_id: None,
             board: None,
         }
     }
@@ -99,6 +107,21 @@ impl EventEmitter {
     #[must_use]
     pub(crate) fn with_shared_handles(mut self, handles: SharedChannelHandles) -> Self {
         self.shared_handles = Some(handles);
+        self
+    }
+
+    /// Sets the shared component-to-channel mapping for RPC routing.
+    ///
+    /// When set, `request()` can resolve target ComponentId to ChannelId
+    /// and send RPC requests via ChannelHandle.
+    #[must_use]
+    pub(crate) fn with_component_channel_map(
+        mut self,
+        map: SharedComponentChannelMap,
+        channel_id: ChannelId,
+    ) -> Self {
+        self.component_channel_map = Some(map);
+        self.channel_id = Some(channel_id);
         self
     }
 
@@ -343,6 +366,80 @@ impl Emitter for EventEmitter {
             },
             None => Vec::new(),
         }
+    }
+
+    fn request(
+        &self,
+        target: &str,
+        operation: &str,
+        payload: Value,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value, String> {
+        let map = self
+            .component_channel_map
+            .as_ref()
+            .ok_or("component_channel_map not configured")?;
+        let handles = self
+            .shared_handles
+            .as_ref()
+            .ok_or("shared_handles not configured")?;
+
+        let target_id = ComponentId::builtin(target);
+        let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
+
+        // Resolve ComponentId → ChannelId
+        let channel_id = {
+            let m = map.read().map_err(|e| format!("map lock poisoned: {e}"))?;
+            *m.get(&target_id)
+                .ok_or_else(|| format!("component not found: {target}"))?
+        };
+
+        // Get ChannelHandle
+        let handle = {
+            let h = handles
+                .read()
+                .map_err(|e| format!("handles lock poisoned: {e}"))?;
+            h.get(&channel_id)
+                .cloned()
+                .ok_or_else(|| format!("channel not found for: {target}"))?
+        };
+
+        if !handle.accepts_requests() {
+            return Err(format!("component {target} does not accept requests"));
+        }
+
+        // Build Request
+        let source_channel = self.channel_id.unwrap_or_else(ChannelId::new);
+        let req = Request::new(
+            EventCategory::Extension {
+                namespace: self.source_id.namespace.clone(),
+                kind: operation.to_string(),
+            },
+            operation,
+            self.source_id.clone(),
+            source_channel,
+            payload,
+        )
+        .with_target(target_id)
+        .with_timeout(timeout);
+
+        // block_in_place + block_on: safe from within a tokio task
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                handle
+                    .send_request(req, reply_tx)
+                    .await
+                    .map_err(|_| "request channel closed".to_string())?;
+
+                match tokio::time::timeout(Duration::from_millis(timeout), reply_rx).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err("response channel closed".into()),
+                    Err(_) => Err(format!("request timeout ({timeout}ms)")),
+                }
+            })
+        })
     }
 
     fn clone_box(&self) -> Box<dyn Emitter> {

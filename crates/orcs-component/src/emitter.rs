@@ -76,6 +76,36 @@ pub trait Emitter: Send + Sync + Debug {
         Vec::new()
     }
 
+    /// Sends a synchronous RPC request to another Component.
+    ///
+    /// Routes via EventBus to the target Component's `on_request` handler
+    /// and returns the response. Blocks the calling thread until response
+    /// is received or timeout expires.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Target Component name (e.g., "skill-manager")
+    /// * `operation` - Operation name (e.g., "list", "activate")
+    /// * `payload` - Request payload
+    /// * `timeout_ms` - Optional timeout override (default: 30s)
+    ///
+    /// # Returns
+    ///
+    /// Response value from the target Component, or error string.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns error (not supported without runtime wiring).
+    fn request(
+        &self,
+        _target: &str,
+        _operation: &str,
+        _payload: serde_json::Value,
+        _timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        Err("request not supported".into())
+    }
+
     /// Clones the emitter into a boxed trait object.
     ///
     /// This allows storing the emitter in the Component.

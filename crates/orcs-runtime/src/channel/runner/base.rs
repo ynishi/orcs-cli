@@ -866,6 +866,8 @@ pub struct ChannelRunnerBuilder {
     initial_snapshot: Option<ComponentSnapshot>,
     /// Enable request channel for Component-to-Component RPC.
     enable_request_channel: bool,
+    /// Shared ComponentId → ChannelId mapping for RPC routing via Emitter.
+    component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
 }
 
 impl ChannelRunnerBuilder {
@@ -896,6 +898,7 @@ impl ChannelRunnerBuilder {
             board: None,
             initial_snapshot: None,
             enable_request_channel: false,
+            component_channel_map: None,
         }
     }
 
@@ -1015,6 +1018,19 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the shared component-to-channel mapping for RPC routing.
+    ///
+    /// When set, the EventEmitter's `request()` can resolve target
+    /// ComponentId to ChannelId and route RPC via ChannelHandle.
+    #[must_use]
+    pub fn with_component_channel_map(
+        mut self,
+        map: crate::engine::SharedComponentChannelMap,
+    ) -> Self {
+        self.component_channel_map = Some(map);
+        self
+    }
+
     /// Sets the shared Board for auto-recording emitted events.
     ///
     /// When set, the EventEmitter will automatically append entries
@@ -1123,6 +1139,11 @@ impl ChannelRunnerBuilder {
                     "ChannelRunnerBuilder: enabled event broadcast for {}",
                     component_id.fqn()
                 );
+            }
+
+            // Enable RPC routing if component channel map is provided
+            if let Some(map) = self.component_channel_map.take() {
+                emitter = emitter.with_component_channel_map(map, self.id);
             }
 
             // Attach Board for auto-recording

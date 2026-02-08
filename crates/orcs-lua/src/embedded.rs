@@ -45,6 +45,46 @@ pub const TOOL: &str = include_str!("../scripts/tool.lua");
 /// executes them, and feeds results back.
 pub const CODE_AGENT: &str = include_str!("../scripts/code_agent.lua");
 
+/// Skill management component.
+///
+/// Manages Discovery / Registration / Activation of Agent Skills.
+pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager.lua");
+
+/// Embedded library modules (loaded via `orcs.require_lib`).
+pub mod lib {
+    /// Format adapter: converts skill formats to common model.
+    pub const FORMAT_ADAPTER: &str = include_str!("../scripts/lib/format_adapter.lua");
+    /// Skill registry: registration, search, freeze/reload.
+    pub const SKILL_REGISTRY: &str = include_str!("../scripts/lib/skill_registry.lua");
+    /// Skill loader: format detection and loading.
+    pub const SKILL_LOADER: &str = include_str!("../scripts/lib/skill_loader.lua");
+    /// Skill catalog: Progressive Disclosure (L1/L2/L3).
+    pub const SKILL_CATALOG: &str = include_str!("../scripts/lib/skill_catalog.lua");
+
+    /// Gets an embedded lib module by name.
+    #[must_use]
+    pub fn get(name: &str) -> Option<&'static str> {
+        match name {
+            "format_adapter" => Some(FORMAT_ADAPTER),
+            "skill_registry" => Some(SKILL_REGISTRY),
+            "skill_loader" => Some(SKILL_LOADER),
+            "skill_catalog" => Some(SKILL_CATALOG),
+            _ => None,
+        }
+    }
+
+    /// Lists all available lib module names.
+    #[must_use]
+    pub fn list() -> Vec<&'static str> {
+        vec![
+            "format_adapter",
+            "skill_registry",
+            "skill_loader",
+            "skill_catalog",
+        ]
+    }
+}
+
 /// Returns all embedded scripts as a map of name -> source.
 #[must_use]
 pub fn all() -> HashMap<&'static str, &'static str> {
@@ -57,6 +97,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("shell", SHELL);
     scripts.insert("tool", TOOL);
     scripts.insert("code_agent", CODE_AGENT);
+    scripts.insert("skill_manager", SKILL_MANAGER);
     scripts
 }
 
@@ -72,6 +113,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "shell" => Some(SHELL),
         "tool" => Some(TOOL),
         "code_agent" => Some(CODE_AGENT),
+        "skill_manager" => Some(SKILL_MANAGER),
         _ => None,
     }
 }
@@ -88,6 +130,7 @@ pub fn list() -> Vec<&'static str> {
         "shell",
         "tool",
         "code_agent",
+        "skill_manager",
     ]
 }
 
@@ -161,7 +204,7 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 8);
+        assert_eq!(scripts.len(), 9);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
@@ -170,6 +213,7 @@ mod tests {
         assert!(scripts.contains_key("shell"));
         assert!(scripts.contains_key("tool"));
         assert!(scripts.contains_key("code_agent"));
+        assert!(scripts.contains_key("skill_manager"));
     }
 
     #[test]
