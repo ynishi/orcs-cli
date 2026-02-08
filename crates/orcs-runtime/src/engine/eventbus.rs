@@ -95,6 +95,9 @@ pub struct EventBus {
     /// Shared channel handles for event injection and broadcast.
     ///
     /// This is shared with ClientRunner to enable UserInput broadcast.
+    // TODO: Replace expect("lock poisoned") with proper error handling.
+    //       All SharedChannelHandles/SharedComponentChannelMap usage should
+    //       migrate to parking_lot::RwLock (no poison) or match-based recovery.
     channel_handles: SharedChannelHandles,
     /// Maps ComponentId to ChannelId for routing RPC requests via ChannelHandle.
     ///

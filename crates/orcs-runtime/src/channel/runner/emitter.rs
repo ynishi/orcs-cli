@@ -50,6 +50,8 @@ pub struct EventEmitter {
     /// Component ID for event source.
     source_id: ComponentId,
     /// Shared channel handles for broadcasting events to all channels.
+    // TODO: Replace expect("lock poisoned") with proper error handling.
+    //       See also eventbus.rs and client.rs for same pattern.
     shared_handles: Option<SharedChannelHandles>,
     /// Shared ComponentId → ChannelId mapping for RPC routing.
     component_channel_map: Option<SharedComponentChannelMap>,
