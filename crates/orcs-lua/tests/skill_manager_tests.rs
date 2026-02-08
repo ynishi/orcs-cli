@@ -5,9 +5,11 @@ use orcs_event::SignalResponse;
 use orcs_lua::testing::LuaTestHarness;
 use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+/// Creates a unique temp dir and returns (sandbox, root_path).
+fn test_sandbox_with_root() -> (Arc<dyn SandboxPolicy>, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "orcs-skill-test-{}-{}",
         std::process::id(),
@@ -18,11 +20,22 @@ fn test_sandbox() -> Arc<dyn SandboxPolicy> {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let canon = dir.canonicalize().unwrap();
-    Arc::new(ProjectSandbox::new(&canon).expect("test sandbox"))
+    let sandbox = Arc::new(ProjectSandbox::new(&canon).expect("test sandbox"));
+    (sandbox, canon)
+}
+
+fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    test_sandbox_with_root().0
 }
 
 fn skill_harness() -> LuaTestHarness {
     LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, test_sandbox()).unwrap()
+}
+
+fn skill_harness_with_root() -> (LuaTestHarness, PathBuf) {
+    let (sandbox, root) = test_sandbox_with_root();
+    let harness = LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, sandbox).unwrap();
+    (harness, root)
 }
 
 fn ext_cat() -> EventCategory {
@@ -323,5 +336,203 @@ mod errors {
 
         let err = harness.request(ext_cat(), "get", json!({})).unwrap_err();
         assert!(err.to_string().contains("required"));
+    }
+}
+
+// =============================================================================
+// File I/O: Discover skills from real directories
+// =============================================================================
+
+mod file_io {
+    use super::*;
+    use std::fs;
+
+    /// Create an Agent Skills Standard skill (SKILL.md + YAML frontmatter)
+    fn create_agent_skill(root: &PathBuf, name: &str, description: &str) {
+        let skill_dir = root.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = format!(
+            "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n{description}\n"
+        );
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    /// Create a Lua DSL skill (skill.lua returning a table)
+    fn create_lua_skill(root: &PathBuf, name: &str, description: &str) {
+        let skill_dir = root.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = format!(
+            "return {{\n  name = \"{name}\",\n  description = \"{description}\",\n  body = \"# {name}\\n\\n{description}\",\n  tags = {{\"test\"}},\n  categories = {{\"execute\"}},\n}}\n"
+        );
+        fs::write(skill_dir.join("skill.lua"), content).unwrap();
+    }
+
+    #[test]
+    fn discover_agent_skills_from_directory() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        // Create sample skills in the sandbox
+        let skills_dir = root.join("skills");
+        create_agent_skill(&skills_dir, "deploy-prod", "Deploy to production");
+        create_agent_skill(&skills_dir, "code-review", "Review code changes");
+
+        // Discover
+        let result = harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": skills_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+
+        assert_eq!(result["discovered"], 2);
+        assert_eq!(result["registered"], 2);
+
+        // Verify via list
+        let list = harness.request(ext_cat(), "list", json!({})).unwrap();
+        assert!(list.is_array());
+        assert_eq!(list.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn discover_lua_dsl_skill() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skills_dir = root.join("skills");
+        create_lua_skill(&skills_dir, "my-tool", "A custom Lua tool");
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": skills_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+
+        assert_eq!(result["discovered"], 1);
+        assert_eq!(result["registered"], 1);
+
+        // Verify via get
+        let skill = harness
+            .request(ext_cat(), "get", json!({ "name": "my-tool" }))
+            .unwrap();
+        assert_eq!(skill["name"], "my-tool");
+        assert_eq!(skill["description"], "A custom Lua tool");
+        assert_eq!(skill["source"]["format"], "lua-dsl");
+    }
+
+    #[test]
+    fn discover_mixed_formats() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skills_dir = root.join("skills");
+        create_agent_skill(&skills_dir, "agent-skill", "An agent skill");
+        create_lua_skill(&skills_dir, "lua-skill", "A lua skill");
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": skills_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+
+        assert_eq!(result["discovered"], 2);
+        assert_eq!(result["registered"], 2);
+
+        // Verify both exist
+        let status = harness.request(ext_cat(), "status", json!({})).unwrap();
+        assert_eq!(status["total"], 2);
+    }
+
+    #[test]
+    fn discover_empty_directory() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let empty_dir = root.join("empty-skills");
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": empty_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+
+        assert_eq!(result["discovered"], 0);
+        assert_eq!(result["registered"], 0);
+    }
+
+    #[test]
+    fn discover_then_catalog() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skills_dir = root.join("skills");
+        create_agent_skill(&skills_dir, "deploy", "Deploy to production");
+        create_agent_skill(&skills_dir, "review", "Code review assistant");
+        create_lua_skill(&skills_dir, "lint", "Run linters");
+
+        // Discover
+        harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": skills_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+
+        // Catalog should include all discovered skills
+        let catalog = harness.request(ext_cat(), "catalog", json!({})).unwrap();
+        let text = catalog["catalog"].as_str().unwrap();
+
+        assert!(text.contains("deploy"), "catalog should contain 'deploy'");
+        assert!(text.contains("review"), "catalog should contain 'review'");
+        assert!(text.contains("lint"), "catalog should contain 'lint'");
+
+        let stats = &catalog["stats"];
+        assert_eq!(stats["total"], 3);
+        assert_eq!(stats["shown"], 3);
+    }
+
+    #[test]
+    fn detect_format_agent_skills() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skill_dir = root.join("my-skill");
+        create_agent_skill(&root, "my-skill", "test");
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "detect_format",
+                json!({ "path": skill_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+        assert_eq!(result["format"], "agent-skills");
+    }
+
+    #[test]
+    fn detect_format_lua_dsl() {
+        let (mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skill_dir = root.join("lua-skill");
+        create_lua_skill(&root, "lua-skill", "test");
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "detect_format",
+                json!({ "path": skill_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+        assert_eq!(result["format"], "lua-dsl");
     }
 }
