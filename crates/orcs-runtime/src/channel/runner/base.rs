@@ -51,6 +51,7 @@ use orcs_event::{EventCategory, Request, Signal};
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -192,7 +193,10 @@ pub struct RunnerResult {
     /// Channel ID this runner was bound to.
     pub channel_id: ChannelId,
     /// Fully qualified name of the bound Component.
-    pub component_fqn: String,
+    ///
+    /// `Cow::Borrowed` for static FQNs (e.g. ClientRunner),
+    /// `Cow::Owned` for dynamic FQNs (e.g. ChannelRunner components).
+    pub component_fqn: Cow<'static, str>,
     /// Snapshot captured during shutdown (None if component doesn't support snapshots).
     pub snapshot: Option<ComponentSnapshot>,
 }
@@ -543,7 +547,9 @@ impl ChannelRunner {
                     }
                 }
 
-                // RPC requests from other Components (higher priority than events)
+                // RPC requests from other Components (higher priority than events).
+                // When request_rx is None, recv_request() returns pending (never resolves),
+                // effectively disabling this branch in select!.
                 Some(envelope) = recv_request(&mut self.request_rx) => {
                     self.handle_rpc_request(envelope).await;
                 }
@@ -599,7 +605,7 @@ impl ChannelRunner {
 
         RunnerResult {
             channel_id: self.id,
-            component_fqn,
+            component_fqn: Cow::Owned(component_fqn),
             snapshot,
         }
     }
@@ -1046,6 +1052,44 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Configures auth (session/checker/grants) and IO output routing on a [`ChildContextImpl`].
+    ///
+    /// Extracted from `build()` to eliminate duplication between the child-spawner
+    /// branch and the auth-only branch.
+    fn configure_context(
+        &mut self,
+        mut ctx: ChildContextImpl,
+        io_output_tx: &Option<OutputSender>,
+        component_id: &str,
+    ) -> ChildContextImpl {
+        if let Some(session) = self.session.take() {
+            ctx = ctx.with_session_arc(session);
+            info!("ChannelRunnerBuilder: enabled session for {}", component_id);
+        }
+        if let Some(checker) = self.checker.take() {
+            ctx = ctx.with_checker(checker);
+            info!(
+                "ChannelRunnerBuilder: enabled permission checker for {}",
+                component_id
+            );
+        }
+        if let Some(grants) = self.grants.take() {
+            ctx = ctx.with_grants(grants);
+            info!(
+                "ChannelRunnerBuilder: enabled grant store for {}",
+                component_id
+            );
+        }
+        if let Some(io_tx) = io_output_tx.clone() {
+            ctx = ctx.with_io_output_channel(io_tx);
+            info!(
+                "ChannelRunnerBuilder: enabled IO output routing for {}",
+                component_id
+            );
+        }
+        ctx
+    }
+
     /// Builds the ChannelRunner and returns it with a ChannelHandle.
     #[must_use]
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
@@ -1141,34 +1185,8 @@ impl ChannelRunnerBuilder {
                 );
             }
 
-            // Add session, checker, and grants for permission checking
-            if let Some(session) = self.session.take() {
-                ctx = ctx.with_session_arc(session);
-                info!("ChannelRunnerBuilder: enabled session for {}", component_id);
-            }
-            if let Some(checker) = self.checker.take() {
-                ctx = ctx.with_checker(checker);
-                info!(
-                    "ChannelRunnerBuilder: enabled permission checker for {}",
-                    component_id
-                );
-            }
-            if let Some(grants) = self.grants.take() {
-                ctx = ctx.with_grants(grants);
-                info!(
-                    "ChannelRunnerBuilder: enabled grant store for {}",
-                    component_id
-                );
-            }
-
-            // Route Output events from ChildContext to IO channel
-            if let Some(io_tx) = io_output_tx.clone() {
-                ctx = ctx.with_io_output_channel(io_tx);
-                info!(
-                    "ChannelRunnerBuilder: enabled IO output routing for {}",
-                    component_id
-                );
-            }
+            // Add session, checker, grants, and IO output routing
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id);
 
             self.component.set_child_context(Box::new(ctx));
 
@@ -1182,33 +1200,7 @@ impl ChannelRunnerBuilder {
             let mut ctx =
                 ChildContextImpl::new(&component_id, dummy_output, Arc::clone(&dummy_arc));
 
-            if let Some(session) = self.session.take() {
-                ctx = ctx.with_session_arc(session);
-                info!("ChannelRunnerBuilder: enabled session for {}", component_id);
-            }
-            if let Some(checker) = self.checker.take() {
-                ctx = ctx.with_checker(checker);
-                info!(
-                    "ChannelRunnerBuilder: enabled permission checker for {}",
-                    component_id
-                );
-            }
-            if let Some(grants) = self.grants.take() {
-                ctx = ctx.with_grants(grants);
-                info!(
-                    "ChannelRunnerBuilder: enabled grant store for {}",
-                    component_id
-                );
-            }
-
-            // Route Output events from ChildContext to IO channel
-            if let Some(io_tx) = io_output_tx.clone() {
-                ctx = ctx.with_io_output_channel(io_tx);
-                info!(
-                    "ChannelRunnerBuilder: enabled IO output routing for {}",
-                    component_id
-                );
-            }
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id);
 
             self.component.set_child_context(Box::new(ctx));
             info!(

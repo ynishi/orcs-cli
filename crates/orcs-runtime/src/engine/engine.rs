@@ -44,7 +44,7 @@ use crate::session::{SessionAsset, SessionStore, StorageError};
 use crate::Principal;
 use orcs_component::{Component, ComponentSnapshot};
 use orcs_event::Signal;
-use orcs_types::ChannelId;
+use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -185,6 +185,25 @@ impl OrcsEngine {
         }
     }
 
+    /// Registers runner with EventBus, stores handle, and spawns the tokio task.
+    ///
+    /// Common finalization extracted from `spawn_runner*` methods.
+    fn finalize_runner(
+        &mut self,
+        channel_id: ChannelId,
+        component_id: &ComponentId,
+        runner: ChannelRunner,
+        handle: ChannelHandle,
+    ) -> ChannelHandle {
+        self.eventbus.register_channel(handle.clone());
+        self.eventbus
+            .register_component_channel(component_id.clone(), channel_id);
+        self.channel_handles.insert(channel_id, handle.clone());
+        let runner_task = tokio::spawn(runner.run());
+        self.runner_tasks.insert(channel_id, runner_task);
+        handle
+    }
+
     /// Spawn a channel runner for a channel with a bound Component.
     ///
     /// Returns the channel handle for event injection.
@@ -210,18 +229,7 @@ impl OrcsEngine {
         .with_request_channel()
         .build();
 
-        // Register handle with EventBus for event injection + RPC routing
-        self.eventbus.register_channel(handle.clone());
-        self.eventbus
-            .register_component_channel(component_id, channel_id);
-
-        // Store handle
-        self.channel_handles.insert(channel_id, handle.clone());
-
-        // Spawn runner task
-        let runner_task = tokio::spawn(runner.run());
-        self.runner_tasks.insert(channel_id, runner_task);
-
+        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!("Spawned runner for channel {}", channel_id);
         handle
     }
@@ -282,18 +290,7 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection + RPC routing
-        self.eventbus.register_channel(handle.clone());
-        self.eventbus
-            .register_component_channel(component_id.clone(), channel_id);
-
-        // Store handle
-        self.channel_handles.insert(channel_id, handle.clone());
-
-        // Spawn runner task
-        let runner_task = tokio::spawn(runner.run());
-        self.runner_tasks.insert(channel_id, runner_task);
-
+        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
             "Spawned runner with emitter for channel {} (component={})",
             channel_id,
@@ -355,18 +352,7 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection + RPC routing
-        self.eventbus.register_channel(handle.clone());
-        self.eventbus
-            .register_component_channel(component_id.clone(), channel_id);
-
-        // Store handle
-        self.channel_handles.insert(channel_id, handle.clone());
-
-        // Spawn runner task
-        let runner_task = tokio::spawn(runner.run());
-        self.runner_tasks.insert(channel_id, runner_task);
-
+        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
             "Spawned runner (full) for channel {} (component={}, child_spawner={})",
             channel_id,
@@ -555,18 +541,7 @@ impl OrcsEngine {
         .with_request_channel()
         .build();
 
-        // Register handle with EventBus for event injection + RPC routing
-        self.eventbus.register_channel(handle.clone());
-        self.eventbus
-            .register_component_channel(component_id.clone(), channel_id);
-
-        // Store handle
-        self.channel_handles.insert(channel_id, handle.clone());
-
-        // Spawn runner task
-        let runner_task = tokio::spawn(runner.run());
-        self.runner_tasks.insert(channel_id, runner_task);
-
+        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
             "Spawned runner (with auth) for channel {} (component={})",
             channel_id,
@@ -638,18 +613,7 @@ impl OrcsEngine {
 
         let (runner, handle) = builder.build();
 
-        // Register handle with EventBus for event injection + RPC routing
-        self.eventbus.register_channel(handle.clone());
-        self.eventbus
-            .register_component_channel(component_id.clone(), channel_id);
-
-        // Store handle
-        self.channel_handles.insert(channel_id, handle.clone());
-
-        // Spawn runner task
-        let runner_task = tokio::spawn(runner.run());
-        self.runner_tasks.insert(channel_id, runner_task);
-
+        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
             "Spawned runner (full+auth) for channel {} (component={}, child_spawner={})",
             channel_id,
@@ -801,36 +765,46 @@ impl OrcsEngine {
     ///    so WorldManager must stay alive until runners complete).
     /// 4. Unregister channel handles and clean up.
     async fn shutdown_parallel(&mut self) {
-        // 1. Await runner tasks with timeout.
-        //    Runners have already received Veto and should be winding down.
-        //    We use tokio::select! so the JoinHandle remains available for
-        //    abort if the timeout fires (dropping a JoinHandle only detaches
-        //    the task — it does NOT cancel it).
+        // 1. Await all runner tasks in parallel with per-runner timeout.
+        //    Each runner is wrapped in a tokio task that applies the timeout
+        //    and aborts on expiry. All wrappers run concurrently, so total
+        //    wall time is bounded by RUNNER_SHUTDOWN_TIMEOUT (not N × timeout).
         let tasks: Vec<_> = self.runner_tasks.drain().collect();
+        let mut wrapper_handles = Vec::with_capacity(tasks.len());
+
         for (id, mut task) in tasks {
-            tokio::select! {
-                result = &mut task => {
-                    match result {
-                        Ok(result) => {
-                            debug!(
-                                channel = %id,
-                                component = %result.component_fqn,
-                                has_snapshot = result.snapshot.is_some(),
-                                "runner completed gracefully"
-                            );
-                            if let Some(snapshot) = result.snapshot {
-                                self.collected_snapshots
-                                    .insert(result.component_fqn, snapshot);
+            wrapper_handles.push(tokio::spawn(async move {
+                tokio::select! {
+                    result = &mut task => {
+                        match result {
+                            Ok(runner_result) => Some((id, runner_result)),
+                            Err(e) => {
+                                warn!(channel = %id, error = %e, "runner task panicked");
+                                None
                             }
                         }
-                        Err(e) => {
-                            warn!(channel = %id, error = %e, "runner task panicked");
-                        }
+                    }
+                    _ = tokio::time::sleep(RUNNER_SHUTDOWN_TIMEOUT) => {
+                        warn!(channel = %id, "runner task timed out, aborting");
+                        task.abort();
+                        None
                     }
                 }
-                _ = tokio::time::sleep(RUNNER_SHUTDOWN_TIMEOUT) => {
-                    warn!(channel = %id, "runner task timed out, aborting");
-                    task.abort();
+            }));
+        }
+
+        // 2. Collect snapshots from completed runners.
+        for handle in wrapper_handles {
+            if let Ok(Some((id, result))) = handle.await {
+                debug!(
+                    channel = %id,
+                    component = %result.component_fqn,
+                    has_snapshot = result.snapshot.is_some(),
+                    "runner completed gracefully"
+                );
+                if let Some(snapshot) = result.snapshot {
+                    self.collected_snapshots
+                        .insert(result.component_fqn.into_owned(), snapshot);
                 }
             }
         }
@@ -840,13 +814,13 @@ impl OrcsEngine {
             self.collected_snapshots.len()
         );
 
-        // 2. Shutdown WorldManager (after runners complete)
+        // 3. Shutdown WorldManager (after runners complete)
         let _ = self.world_tx.send(WorldCommand::Shutdown).await;
         if let Some(task) = self.manager_task.take() {
             let _ = task.await;
         }
 
-        // 3. Unregister channel handles
+        // 4. Unregister channel handles
         for id in self.channel_handles.keys() {
             self.eventbus.unregister_channel(id);
         }

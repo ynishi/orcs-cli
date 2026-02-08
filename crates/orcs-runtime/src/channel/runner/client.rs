@@ -342,7 +342,7 @@ impl ClientRunner {
 
         RunnerResult {
             channel_id: self.id,
-            component_fqn: CLIENT_RUNNER_FQN.to_string(),
+            component_fqn: std::borrow::Cow::Borrowed(CLIENT_RUNNER_FQN),
             snapshot: None,
         }
     }
@@ -395,6 +395,9 @@ impl ClientRunner {
         };
 
         // Broadcast to all channels
+        // TODO: Replace expect("lock poisoned") with proper error handling.
+        //       All SharedChannelHandles usage (here + eventbus.rs) should migrate
+        //       to parking_lot::RwLock (no poison) or match-based recovery.
         let handles = self.channel_handles.read().expect("lock poisoned");
         let mut delivered = 0;
         for (channel_id, handle) in handles.iter() {
