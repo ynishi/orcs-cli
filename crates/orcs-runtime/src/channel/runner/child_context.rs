@@ -64,6 +64,8 @@ pub struct ChildContextImpl {
     shared_handles: Option<SharedChannelHandles>,
     /// Shared FQN → ChannelId mapping for RPC target resolution.
     component_channel_map: Option<SharedComponentChannelMap>,
+    /// Channel ID of the owning ChannelRunner (for RPC source_channel).
+    channel_id: Option<ChannelId>,
 }
 
 /// Trait for loading Lua children from config.
@@ -107,6 +109,7 @@ impl ChildContextImpl {
             signal_tx: None,
             shared_handles: None,
             component_channel_map: None,
+            channel_id: None,
         }
     }
 
@@ -295,15 +298,20 @@ impl ChildContextImpl {
         self
     }
 
-    /// Enables RPC support by providing shared handles and component map.
+    /// Enables RPC support by providing shared handles, component map, and channel ID.
+    ///
+    /// `channel_id` identifies the owning ChannelRunner and is used as the
+    /// `source_channel` field in outgoing RPC requests.
     #[must_use]
     pub fn with_rpc_support(
         mut self,
         shared_handles: SharedChannelHandles,
         component_channel_map: SharedComponentChannelMap,
+        channel_id: ChannelId,
     ) -> Self {
         self.shared_handles = Some(shared_handles);
         self.component_channel_map = Some(component_channel_map);
+        self.channel_id = Some(channel_id);
         self
     }
 
@@ -424,8 +432,10 @@ impl ChildContextImpl {
         if let Some(g) = &self.grants {
             ctx = ctx.with_grants(Arc::clone(g));
         }
-        if let (Some(h), Some(m)) = (&self.shared_handles, &self.component_channel_map) {
-            ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m));
+        if let (Some(h), Some(m), Some(ch)) =
+            (&self.shared_handles, &self.component_channel_map, self.channel_id)
+        {
+            ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m), ch);
         }
         Box::new(ctx)
     }
@@ -632,65 +642,22 @@ impl ChildContext for ChildContextImpl {
             .ok_or("shared_handles not configured for RPC")?;
 
         let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
-
-        // Resolve FQN → ChannelId
-        let channel_id = {
-            let m = map.read().map_err(|e| format!("map lock poisoned: {e}"))?;
-            *m.get(target_fqn)
-                .ok_or_else(|| format!("component not found: {target_fqn}"))?
-        };
-
-        // Get ChannelHandle
-        let handle = {
-            let h = handles
-                .read()
-                .map_err(|e| format!("handles lock poisoned: {e}"))?;
-            h.get(&channel_id)
-                .cloned()
-                .ok_or_else(|| format!("channel not found for: {target_fqn}"))?
-        };
-
-        if !handle.accepts_requests() {
-            return Err(format!("component {target_fqn} does not accept requests"));
-        }
-
-        // Build Request
-        let target_id = match target_fqn.split_once("::") {
-            Some((ns, name)) => ComponentId::new(ns, name),
-            None => ComponentId::new("unknown", target_fqn),
-        };
         let source_id = ComponentId::child(&self.parent_id);
-        let source_channel = ChannelId::new();
-        let req = orcs_event::Request::new(
-            EventCategory::Extension {
-                namespace: source_id.namespace.clone(),
-                kind: operation.to_string(),
-            },
-            operation,
-            source_id,
-            source_channel,
-            payload,
-        )
-        .with_target(target_id)
-        .with_timeout(timeout);
+        let source_channel = self.channel_id.unwrap_or_else(ChannelId::new);
 
         tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                handle
-                    .send_request(req, reply_tx)
-                    .await
-                    .map_err(|_| "request channel closed".to_string())?;
-
-                match tokio::time::timeout(std::time::Duration::from_millis(timeout), reply_rx)
-                    .await
-                {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err("response channel closed".into()),
-                    Err(_) => Err(format!("request timeout ({timeout}ms)")),
-                }
-            })
+            tokio::runtime::Handle::current().block_on(super::rpc::resolve_and_send_rpc(
+                super::rpc::RpcParams {
+                    component_channel_map: map,
+                    shared_handles: handles,
+                    target_fqn,
+                    operation,
+                    source_id,
+                    source_channel,
+                    payload,
+                    timeout_ms: timeout,
+                },
+            ))
         })
     }
 

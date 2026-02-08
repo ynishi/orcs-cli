@@ -23,10 +23,9 @@ use super::Event;
 use crate::board::{BoardEntry, BoardEntryKind, SharedBoard};
 use crate::engine::{SharedChannelHandles, SharedComponentChannelMap};
 use orcs_component::Emitter;
-use orcs_event::{EventCategory, Request, Signal};
+use orcs_event::{EventCategory, Signal};
 use orcs_types::{ChannelId, ComponentId};
 use serde_json::Value;
-use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// Event emitter for Components.
@@ -387,63 +386,22 @@ impl Emitter for EventEmitter {
             .ok_or("shared_handles not configured")?;
 
         let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
-
-        // Resolve FQN → ChannelId (target is FQN like "skill::skill_manager")
-        let channel_id = {
-            let m = map.read().map_err(|e| format!("map lock poisoned: {e}"))?;
-            *m.get(target)
-                .ok_or_else(|| format!("component not found: {target}"))?
-        };
-
-        // Get ChannelHandle
-        let handle = {
-            let h = handles
-                .read()
-                .map_err(|e| format!("handles lock poisoned: {e}"))?;
-            h.get(&channel_id)
-                .cloned()
-                .ok_or_else(|| format!("channel not found for: {target}"))?
-        };
-
-        if !handle.accepts_requests() {
-            return Err(format!("component {target} does not accept requests"));
-        }
-
-        // Build Request — parse FQN for target ComponentId (informational)
-        let target_id = match target.split_once("::") {
-            Some((ns, name)) => ComponentId::new(ns, name),
-            None => ComponentId::new("unknown", target),
-        };
         let source_channel = self.channel_id.unwrap_or_else(ChannelId::new);
-        let req = Request::new(
-            EventCategory::Extension {
-                namespace: self.source_id.namespace.clone(),
-                kind: operation.to_string(),
-            },
-            operation,
-            self.source_id.clone(),
-            source_channel,
-            payload,
-        )
-        .with_target(target_id)
-        .with_timeout(timeout);
 
-        // block_in_place + block_on: safe from within a tokio task
+        // block_in_place + block_on: safe from within a tokio multi-threaded runtime
         tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                handle
-                    .send_request(req, reply_tx)
-                    .await
-                    .map_err(|_| "request channel closed".to_string())?;
-
-                match tokio::time::timeout(Duration::from_millis(timeout), reply_rx).await {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err("response channel closed".into()),
-                    Err(_) => Err(format!("request timeout ({timeout}ms)")),
-                }
-            })
+            tokio::runtime::Handle::current().block_on(super::rpc::resolve_and_send_rpc(
+                super::rpc::RpcParams {
+                    component_channel_map: map,
+                    shared_handles: handles,
+                    target_fqn: target,
+                    operation,
+                    source_id: self.source_id.clone(),
+                    source_channel,
+                    payload,
+                    timeout_ms: timeout,
+                },
+            ))
         })
     }
 

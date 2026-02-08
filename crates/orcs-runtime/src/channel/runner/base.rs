@@ -468,11 +468,11 @@ impl ChannelRunner {
         Some(Box::new(ctx))
     }
 
-    /// Injects RPC support (shared handles + channel map) into a ChildContextImpl
-    /// if the runner was built with RPC resources.
+    /// Injects RPC support (shared handles + channel map + channel ID)
+    /// into a ChildContextImpl if the runner was built with RPC resources.
     fn inject_rpc(&self, ctx: ChildContextImpl) -> ChildContextImpl {
         if let (Some(handles), Some(map)) = (&self.shared_handles, &self.component_channel_map) {
-            ctx.with_rpc_support(handles.clone(), map.clone())
+            ctx.with_rpc_support(handles.clone(), map.clone(), self.id)
         } else {
             ctx
         }
@@ -1097,6 +1097,7 @@ impl ChannelRunnerBuilder {
         component_id: &str,
         rpc_handles: &Option<SharedChannelHandles>,
         rpc_map: &Option<crate::engine::SharedComponentChannelMap>,
+        channel_id: ChannelId,
     ) -> ChildContextImpl {
         if let Some(session) = self.session.take() {
             ctx = ctx.with_session_arc(session);
@@ -1124,7 +1125,7 @@ impl ChannelRunnerBuilder {
             );
         }
         if let (Some(handles), Some(map)) = (rpc_handles.clone(), rpc_map.clone()) {
-            ctx = ctx.with_rpc_support(handles, map);
+            ctx = ctx.with_rpc_support(handles, map, channel_id);
         }
         ctx
     }
@@ -1234,7 +1235,7 @@ impl ChannelRunnerBuilder {
             }
 
             // Add session, checker, grants, and IO output routing
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map);
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map, self.id);
 
             self.component.set_child_context(Box::new(ctx));
 
@@ -1248,7 +1249,7 @@ impl ChannelRunnerBuilder {
             let mut ctx =
                 ChildContextImpl::new(&component_id, dummy_output, Arc::clone(&dummy_arc));
 
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map);
+            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map, self.id);
 
             self.component.set_child_context(Box::new(ctx));
             info!(
