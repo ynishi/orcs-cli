@@ -1052,8 +1052,8 @@ impl Component for LuaComponent {
     fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
         self.status = Status::Running;
 
-        let lua = self.lua.lock().map_err(|_| {
-            tracing::error!("Lua mutex poisoned");
+        let lua = self.lua.lock().map_err(|e| {
+            tracing::error!(error = %e, "Lua mutex poisoned");
             ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
         })?;
 
