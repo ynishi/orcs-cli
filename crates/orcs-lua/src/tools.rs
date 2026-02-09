@@ -920,17 +920,19 @@ mod tests {
     use std::path::PathBuf;
 
     /// Creates a ProjectSandbox backed by a temp dir.
-    fn test_sandbox() -> (PathBuf, Arc<dyn SandboxPolicy>) {
-        let dir = tempdir();
-        let sandbox = ProjectSandbox::new(&dir).unwrap();
-        (dir, Arc::new(sandbox))
+    /// Returns (TempDir, PathBuf, Sandbox). TempDir must be held alive for the test duration.
+    fn test_sandbox() -> (tempfile::TempDir, PathBuf, Arc<dyn SandboxPolicy>) {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().canonicalize().unwrap();
+        let sandbox = ProjectSandbox::new(&root).unwrap();
+        (td, root, Arc::new(sandbox))
     }
 
     // ─── tool_read ──────────────────────────────────────────────────
 
     #[test]
     fn read_existing_file() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("test.txt");
         fs::write(&file, "hello world").unwrap();
 
@@ -941,14 +943,14 @@ mod tests {
 
     #[test]
     fn read_nonexistent_file() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_read("nonexistent.txt", sandbox.as_ref());
         assert!(result.is_err());
     }
 
     #[test]
     fn read_directory_fails() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("subdir");
         fs::create_dir_all(&sub).unwrap();
 
@@ -959,7 +961,7 @@ mod tests {
 
     #[test]
     fn read_outside_root_rejected() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_read("/etc/hosts", sandbox.as_ref());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("access denied"));
@@ -969,7 +971,7 @@ mod tests {
 
     #[test]
     fn write_new_file() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("new.txt");
 
         let bytes = tool_write(file.to_str().unwrap(), "new content", sandbox.as_ref()).unwrap();
@@ -979,7 +981,7 @@ mod tests {
 
     #[test]
     fn write_overwrites_existing() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("existing.txt");
         fs::write(&file, "old").unwrap();
 
@@ -989,7 +991,7 @@ mod tests {
 
     #[test]
     fn write_creates_parent_dirs() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("sub/dir/file.txt");
 
         tool_write(file.to_str().unwrap(), "nested", sandbox.as_ref()).unwrap();
@@ -998,7 +1000,7 @@ mod tests {
 
     #[test]
     fn write_atomic_no_temp_leftover() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("atomic.txt");
 
         tool_write(file.to_str().unwrap(), "content", sandbox.as_ref()).unwrap();
@@ -1010,7 +1012,7 @@ mod tests {
 
     #[test]
     fn write_outside_root_rejected() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_write("/etc/evil.txt", "bad", sandbox.as_ref());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("access denied"));
@@ -1020,7 +1022,7 @@ mod tests {
 
     #[test]
     fn grep_finds_matches() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("search.txt");
         fs::write(&file, "line one\nline two\nthird line").unwrap();
 
@@ -1032,7 +1034,7 @@ mod tests {
 
     #[test]
     fn grep_regex_pattern() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("regex.txt");
         fs::write(&file, "foo123\nbar456\nfoo789").unwrap();
 
@@ -1042,7 +1044,7 @@ mod tests {
 
     #[test]
     fn grep_no_matches() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("empty.txt");
         fs::write(&file, "nothing here").unwrap();
 
@@ -1052,7 +1054,7 @@ mod tests {
 
     #[test]
     fn grep_invalid_regex() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("test.txt");
         fs::write(&file, "content").unwrap();
 
@@ -1063,7 +1065,7 @@ mod tests {
 
     #[test]
     fn grep_directory_recursive() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
@@ -1076,7 +1078,7 @@ mod tests {
 
     #[test]
     fn grep_outside_root_rejected() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_grep("pattern", "/etc", sandbox.as_ref());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("access denied"));
@@ -1086,7 +1088,7 @@ mod tests {
 
     #[test]
     fn glob_finds_files() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("a.txt"), "").unwrap();
         fs::write(root.join("b.txt"), "").unwrap();
         fs::write(root.join("c.rs"), "").unwrap();
@@ -1097,7 +1099,7 @@ mod tests {
 
     #[test]
     fn glob_recursive() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
         fs::write(root.join("top.rs"), "").unwrap();
@@ -1109,21 +1111,21 @@ mod tests {
 
     #[test]
     fn glob_no_matches() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let files = tool_glob("*.xyz", Some(root.to_str().unwrap()), sandbox.as_ref()).unwrap();
         assert!(files.is_empty());
     }
 
     #[test]
     fn glob_invalid_pattern() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let result = tool_glob("[invalid", Some(root.to_str().unwrap()), sandbox.as_ref());
         assert!(result.is_err());
     }
 
     #[test]
     fn glob_outside_root_rejected() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_glob("*", Some("/etc"), sandbox.as_ref());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("access denied"));
@@ -1131,7 +1133,7 @@ mod tests {
 
     #[test]
     fn glob_rejects_dotdot_in_pattern() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let result = tool_glob("../../**/*", None, sandbox.as_ref());
         assert!(result.is_err());
         assert!(
@@ -1144,7 +1146,7 @@ mod tests {
 
     #[test]
     fn grep_respects_depth_limit() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
 
         // Create a directory deeper than MAX_GREP_DEPTH
         let mut deep = root.clone();
@@ -1166,7 +1168,7 @@ mod tests {
 
     #[test]
     fn register_tools_in_lua() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
         let orcs = lua.create_table().unwrap();
         lua.globals().set("orcs", orcs).unwrap();
@@ -1182,7 +1184,7 @@ mod tests {
 
     #[test]
     fn lua_read_file() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("lua_read.txt");
         fs::write(&file, "lua content").unwrap();
 
@@ -1203,7 +1205,7 @@ mod tests {
 
     #[test]
     fn lua_write_file() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("lua_write.txt");
 
         let lua = Lua::new();
@@ -1222,7 +1224,7 @@ mod tests {
 
     #[test]
     fn lua_grep_file() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let file = root.join("lua_grep.txt");
         fs::write(&file, "alpha\nbeta\nalpha_two").unwrap();
 
@@ -1242,7 +1244,7 @@ mod tests {
 
     #[test]
     fn lua_glob_files() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("a.lua"), "").unwrap();
         fs::write(root.join("b.lua"), "").unwrap();
 
@@ -1262,7 +1264,7 @@ mod tests {
 
     #[test]
     fn lua_read_nonexistent_returns_error() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
         let orcs = lua.create_table().unwrap();
         lua.globals().set("orcs", orcs).unwrap();
@@ -1278,7 +1280,7 @@ mod tests {
 
     #[test]
     fn lua_read_outside_sandbox_returns_error() {
-        let (_root, sandbox) = test_sandbox();
+        let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
         let orcs = lua.create_table().unwrap();
         lua.globals().set("orcs", orcs).unwrap();
@@ -1305,7 +1307,7 @@ mod tests {
 
         #[test]
         fn glob_skips_symlink_outside_sandbox() {
-            let (root, sandbox) = test_sandbox();
+            let (_td, root, sandbox) = test_sandbox();
             let outside = tempfile::tempdir().unwrap();
             let outside_canon = outside.path().canonicalize().unwrap();
             fs::write(outside_canon.join("leaked.txt"), "secret").unwrap();
@@ -1321,7 +1323,7 @@ mod tests {
 
         #[test]
         fn grep_dir_skips_symlink_outside_sandbox() {
-            let (root, sandbox) = test_sandbox();
+            let (_td, root, sandbox) = test_sandbox();
             let outside = tempfile::tempdir().unwrap();
             let outside_canon = outside.path().canonicalize().unwrap();
             fs::write(outside_canon.join("secret.txt"), "password123").unwrap();
@@ -1335,7 +1337,7 @@ mod tests {
 
         #[test]
         fn write_via_symlink_escape_rejected() {
-            let (root, sandbox) = test_sandbox();
+            let (_td, root, sandbox) = test_sandbox();
             let outside = tempfile::tempdir().unwrap();
             let outside_canon = outside.path().canonicalize().unwrap();
             symlink(&outside_canon, root.join("escape")).unwrap();
@@ -1353,7 +1355,7 @@ mod tests {
 
         #[test]
         fn read_via_symlink_escape_rejected() {
-            let (root, sandbox) = test_sandbox();
+            let (_td, root, sandbox) = test_sandbox();
             let outside = tempfile::tempdir().unwrap();
             let outside_canon = outside.path().canonicalize().unwrap();
             fs::write(outside_canon.join("secret.txt"), "secret").unwrap();
@@ -1371,19 +1373,4 @@ mod tests {
     }
 
     // ─── Test Helpers ───────────────────────────────────────────────
-
-    /// Creates a temp dir for unit tests.
-    /// Canonicalized to resolve symlinks (e.g. /tmp -> /private/tmp on macOS).
-    fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-tools-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
-    }
 }
