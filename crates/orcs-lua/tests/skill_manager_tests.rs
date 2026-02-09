@@ -7,35 +7,32 @@ use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 
-/// Creates a unique temp dir and returns (sandbox, root_path).
-fn test_sandbox_with_root() -> (Arc<dyn SandboxPolicy>, PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
-        "orcs-skill-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let canon = dir.canonicalize().unwrap();
-    let sandbox = Arc::new(ProjectSandbox::new(&canon).expect("test sandbox"));
-    (sandbox, canon)
+/// Creates a unique temp dir and returns (TempDir guard, sandbox, root_path).
+/// TempDir must be held alive for the test duration (auto-deleted on Drop).
+fn test_sandbox_with_root() -> (TempDir, Arc<dyn SandboxPolicy>, PathBuf) {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().canonicalize().unwrap();
+    let sandbox = Arc::new(ProjectSandbox::new(&root).expect("test sandbox"));
+    (td, sandbox, root)
 }
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
-    test_sandbox_with_root().0
+fn test_sandbox() -> (TempDir, Arc<dyn SandboxPolicy>) {
+    let (td, sandbox, _root) = test_sandbox_with_root();
+    (td, sandbox)
 }
 
-fn skill_harness() -> LuaTestHarness {
-    LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, test_sandbox()).unwrap()
-}
-
-fn skill_harness_with_root() -> (LuaTestHarness, PathBuf) {
-    let (sandbox, root) = test_sandbox_with_root();
+fn skill_harness() -> (TempDir, LuaTestHarness) {
+    let (td, sandbox) = test_sandbox();
     let harness = LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, sandbox).unwrap();
-    (harness, root)
+    (td, harness)
+}
+
+fn skill_harness_with_root() -> (TempDir, LuaTestHarness, PathBuf) {
+    let (td, sandbox, root) = test_sandbox_with_root();
+    let harness = LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, sandbox).unwrap();
+    (td, harness, root)
 }
 
 fn ext_cat() -> EventCategory {
@@ -74,13 +71,13 @@ mod lifecycle {
 
     #[test]
     fn load_skill_manager_component() {
-        let harness = skill_harness();
+        let (_td, harness) = skill_harness();
         assert_eq!(harness.id().name, "skill_manager");
     }
 
     #[test]
     fn init_and_shutdown() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         // After a request completes, status returns to Idle
         // init itself does not change status to Running permanently
@@ -89,7 +86,7 @@ mod lifecycle {
 
     #[test]
     fn veto_aborts() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         let response = harness.veto();
         assert_eq!(response, SignalResponse::Abort);
@@ -105,7 +102,7 @@ mod status {
 
     #[test]
     fn status_returns_initial_state() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         // on_request returns { success = true, data = { total, frozen, active, formats } }
@@ -127,7 +124,7 @@ mod registry {
 
     #[test]
     fn register_and_list() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         // Register returns { success = true, data = { count = 1 } }
@@ -144,7 +141,7 @@ mod registry {
 
     #[test]
     fn register_duplicate_fails() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         register_sample(&mut harness);
@@ -171,7 +168,7 @@ mod registry {
 
     #[test]
     fn get_skill() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         register_sample(&mut harness);
 
@@ -184,7 +181,7 @@ mod registry {
 
     #[test]
     fn get_nonexistent_returns_error() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
@@ -195,7 +192,7 @@ mod registry {
 
     #[test]
     fn unregister_skill() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         register_sample(&mut harness);
 
@@ -211,7 +208,7 @@ mod registry {
 
     #[test]
     fn search_by_name() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         harness
@@ -256,6 +253,143 @@ mod registry {
         assert_eq!(result.as_array().unwrap().len(), 1);
         assert_eq!(result[0]["name"], "deploy-prod");
     }
+
+    #[test]
+    fn select_relevant_skills() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        // Register 3 skills with different topics
+        for (name, desc, tags) in [
+            ("deploy-prod", "Deploy to production", vec!["deploy", "ci"]),
+            (
+                "code-review",
+                "Review code changes",
+                vec!["review", "quality"],
+            ),
+            (
+                "deploy-staging",
+                "Deploy to staging environment",
+                vec!["deploy", "staging"],
+            ),
+        ] {
+            harness
+                .request(
+                    ext_cat(),
+                    "register",
+                    json!({
+                        "skill": {
+                            "name": name,
+                            "description": desc,
+                            "source": { "format": "agent-skills", "path": format!("/tmp/{name}") },
+                            "frontmatter": {},
+                            "metadata": { "tags": tags, "categories": [] },
+                            "state": "discovered"
+                        }
+                    }),
+                )
+                .unwrap();
+        }
+
+        // Select with "deploy" query should return deploy skills, not code-review
+        let result = harness
+            .request(
+                ext_cat(),
+                "select",
+                json!({ "query": "deploy", "limit": 5 }),
+            )
+            .unwrap();
+        assert!(result.is_array());
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // Both should be deploy-related
+        let names: Vec<&str> = arr.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"deploy-prod"));
+        assert!(names.contains(&"deploy-staging"));
+    }
+
+    #[test]
+    fn select_respects_limit() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        // Register 5 skills all matching "tool"
+        for i in 0..5 {
+            harness
+                .request(
+                    ext_cat(),
+                    "register",
+                    json!({
+                        "skill": {
+                            "name": format!("tool-{i}"),
+                            "description": format!("Tool number {i}"),
+                            "source": { "format": "agent-skills", "path": format!("/tmp/t{i}") },
+                            "frontmatter": {},
+                            "metadata": { "tags": ["tool"], "categories": [] },
+                            "state": "discovered"
+                        }
+                    }),
+                )
+                .unwrap();
+        }
+
+        // Select with limit=2
+        let result = harness
+            .request(ext_cat(), "select", json!({ "query": "tool", "limit": 2 }))
+            .unwrap();
+        assert!(result.is_array());
+        assert_eq!(result.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn select_empty_query_returns_first_n() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        for i in 0..3 {
+            harness
+                .request(
+                    ext_cat(),
+                    "register",
+                    json!({
+                        "skill": {
+                            "name": format!("skill-{i}"),
+                            "description": format!("Skill {i}"),
+                            "source": { "format": "agent-skills", "path": format!("/tmp/s{i}") },
+                            "frontmatter": {},
+                            "metadata": { "tags": [], "categories": [] },
+                            "state": "discovered"
+                        }
+                    }),
+                )
+                .unwrap();
+        }
+
+        // Empty query returns first N
+        let result = harness
+            .request(ext_cat(), "select", json!({ "query": "", "limit": 2 }))
+            .unwrap();
+        assert!(result.is_array());
+        assert_eq!(result.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn select_no_match_returns_empty() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+        register_sample(&mut harness);
+
+        let result = harness
+            .request(ext_cat(), "select", json!({ "query": "zzz_nomatch_zzz" }))
+            .unwrap();
+        // Empty Lua table {} → JSON object {} (not array [])
+        let is_empty = match &result {
+            serde_json::Value::Array(a) => a.is_empty(),
+            serde_json::Value::Object(o) => o.is_empty(),
+            _ => false,
+        };
+        assert!(is_empty, "expected empty result, got: {result}");
+    }
 }
 
 // =============================================================================
@@ -288,7 +422,7 @@ mod catalog {
 
     #[test]
     fn render_catalog_empty() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let result = harness.request(ext_cat(), "catalog", json!({})).unwrap();
@@ -299,7 +433,7 @@ mod catalog {
 
     #[test]
     fn render_catalog_with_skills() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         register_n_skills(&mut harness, 3);
 
@@ -320,7 +454,7 @@ mod errors {
 
     #[test]
     fn unknown_operation_returns_error() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
@@ -331,7 +465,7 @@ mod errors {
 
     #[test]
     fn missing_required_name() {
-        let mut harness = skill_harness();
+        let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness.request(ext_cat(), "get", json!({})).unwrap_err();
@@ -369,7 +503,7 @@ mod file_io {
 
     #[test]
     fn discover_agent_skills_from_directory() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         // Create sample skills in the sandbox
@@ -397,7 +531,7 @@ mod file_io {
 
     #[test]
     fn discover_lua_dsl_skill() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let skills_dir = root.join("skills");
@@ -425,7 +559,7 @@ mod file_io {
 
     #[test]
     fn discover_mixed_formats() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let skills_dir = root.join("skills");
@@ -450,7 +584,7 @@ mod file_io {
 
     #[test]
     fn discover_empty_directory() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let empty_dir = root.join("empty-skills");
@@ -470,7 +604,7 @@ mod file_io {
 
     #[test]
     fn discover_then_catalog() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let skills_dir = root.join("skills");
@@ -502,7 +636,7 @@ mod file_io {
 
     #[test]
     fn detect_format_agent_skills() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let skill_dir = root.join("my-skill");
@@ -520,7 +654,7 @@ mod file_io {
 
     #[test]
     fn detect_format_lua_dsl() {
-        let (mut harness, root) = skill_harness_with_root();
+        let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
         let skill_dir = root.join("lua-skill");
@@ -534,5 +668,95 @@ mod file_io {
             )
             .unwrap();
         assert_eq!(result["format"], "lua-dsl");
+    }
+
+    /// End-to-end: discover multiple topic skills, then select by query.
+    /// Verifies "rust" query returns rust-dev as top result.
+    #[test]
+    fn discover_then_select_by_topic() {
+        let (_td, mut harness, root) = skill_harness_with_root();
+        let _ = harness.init();
+
+        let skills_dir = root.join("skills");
+
+        // Create topic-specific skills with tags
+        for (name, desc, tags) in [
+            (
+                "rust-dev",
+                "Rust development with cargo and borrow checker",
+                vec!["rust", "cargo"],
+            ),
+            (
+                "python-dev",
+                "Python development with pip and venv",
+                vec!["python", "pip"],
+            ),
+            (
+                "deploy-ops",
+                "Deployment and CI/CD pipelines",
+                vec!["deploy", "docker"],
+            ),
+            (
+                "git-workflow",
+                "Git branching and PR workflows",
+                vec!["git", "branch"],
+            ),
+        ] {
+            let skill_dir = skills_dir.join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            let content = format!(
+                "---\nname: {name}\ndescription: {desc}\ntags:\n{tags_yaml}\ncategories:\n  - dev\n---\n\n# {name}\n\n{desc}\n",
+                tags_yaml = tags.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n"),
+            );
+            std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        }
+
+        // Discover all
+        let disc = harness
+            .request(
+                ext_cat(),
+                "discover",
+                json!({ "path": skills_dir.to_str().unwrap() }),
+            )
+            .unwrap();
+        assert_eq!(disc["discovered"], 4);
+        assert_eq!(disc["registered"], 4);
+
+        // Select with "rust" → rust-dev should be top
+        let result = harness
+            .request(ext_cat(), "select", json!({ "query": "rust", "limit": 3 }))
+            .unwrap();
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().unwrap();
+        assert!(!arr.is_empty(), "select should return at least 1 skill");
+        assert_eq!(arr[0]["name"], "rust-dev", "rust-dev should be top result");
+
+        // Select with "python" → python-dev should be top
+        let result = harness
+            .request(
+                ext_cat(),
+                "select",
+                json!({ "query": "python", "limit": 3 }),
+            )
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(
+            arr[0]["name"], "python-dev",
+            "python-dev should be top result"
+        );
+
+        // Select with "deploy docker" → deploy-ops should be top
+        let result = harness
+            .request(
+                ext_cat(),
+                "select",
+                json!({ "query": "deploy docker", "limit": 3 }),
+            )
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(
+            arr[0]["name"], "deploy-ops",
+            "deploy-ops should be top result"
+        );
     }
 }

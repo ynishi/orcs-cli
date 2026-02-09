@@ -136,6 +136,14 @@ local function handle_discover(payload)
     }
 end
 
+-- Select top-N relevant skills for a query
+local function handle_select(payload)
+    local query = payload and payload.query or ""
+    local limit = payload and payload.limit or 5
+    local entries = registry:select(query, limit)
+    return { success = true, data = entries, count = #entries }
+end
+
 -- Render catalog string (within budget)
 local function handle_catalog(payload)
     local text, stats = catalog:render_catalog(payload)
@@ -223,6 +231,8 @@ local handlers = {
     search     = handle_search,
     register   = handle_register,
     unregister = handle_unregister,
+    -- Selection
+    select     = handle_select,
     -- Activation / Disclosure
     activate   = handle_activate,
     deactivate = handle_deactivate,

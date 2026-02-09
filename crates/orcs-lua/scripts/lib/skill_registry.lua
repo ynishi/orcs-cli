@@ -118,6 +118,78 @@ function SkillRegistry:unregister(name)
     return true
 end
 
+-- Select top-N skills relevant to a query, scored by match quality.
+-- Returns catalog entries sorted by score (descending), limited to `limit`.
+function SkillRegistry:select(query, limit)
+    limit = limit or 5
+    if not query or query == "" then
+        -- No query: return first N skills
+        local entries = self:list()
+        local result = {}
+        for i = 1, math.min(limit, #entries) do
+            result[i] = entries[i]
+        end
+        return result
+    end
+
+    -- Tokenize query into lowercase words
+    local words = {}
+    for w in query:lower():gmatch("%w+") do
+        words[#words + 1] = w
+    end
+
+    -- Score each skill
+    local scored = {}
+    for _, name in ipairs(self.load_order) do
+        local skill = self.skills[name]
+        if skill then
+            local score = 0
+            local sname = skill.name:lower()
+            local sdesc = (skill.description or ""):lower()
+            local meta = skill.metadata or {}
+            local tags_str = table.concat(meta.tags or {}, " "):lower()
+            local cats_str = table.concat(meta.categories or {}, " "):lower()
+
+            for _, w in ipairs(words) do
+                -- Name exact match: highest weight
+                if sname == w then
+                    score = score + 10
+                elseif sname:find(w, 1, true) then
+                    score = score + 5
+                end
+                -- Description match
+                if sdesc:find(w, 1, true) then
+                    score = score + 3
+                end
+                -- Tags match
+                if tags_str:find(w, 1, true) then
+                    score = score + 2
+                end
+                -- Categories match
+                if cats_str:find(w, 1, true) then
+                    score = score + 1
+                end
+            end
+
+            if score > 0 then
+                scored[#scored + 1] = { entry = to_catalog_entry(skill), score = score }
+            end
+        end
+    end
+
+    -- Sort by score descending
+    table.sort(scored, function(a, b) return a.score > b.score end)
+
+    -- Return top-N
+    local result = {}
+    for i = 1, math.min(limit, #scored) do
+        local item = scored[i].entry
+        item.score = scored[i].score
+        result[i] = item
+    end
+    return result
+end
+
 -- Skill count
 function SkillRegistry:count()
     return #self.load_order

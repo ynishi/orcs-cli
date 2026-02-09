@@ -16,13 +16,26 @@ return {
     run = function(input)
         local message = input.message or ""
 
-        -- 1. Fetch skill catalog for context enrichment
+        -- 1. Select relevant skills for this message
         local skill_context = ""
-        local catalog_resp = orcs.request("skill::skill_manager", "catalog", {})
-        if catalog_resp and catalog_resp.success and catalog_resp.data then
-            local catalog = catalog_resp.data.catalog
-            if catalog and catalog ~= "" then
-                skill_context = "\n\n## Available Skills\n" .. catalog
+        local skill_count = 0
+        local select_resp = orcs.request("skill::skill_manager", "select", {
+            query = message,
+            limit = 5,
+        })
+        if select_resp and select_resp.success and select_resp.data then
+            local skills = select_resp.data
+            if type(skills) == "table" and #skills > 0 then
+                skill_count = #skills
+                local lines = { "\n\n## Relevant Skills" }
+                for _, s in ipairs(skills) do
+                    local line = "- **" .. (s.name or "?") .. "**"
+                    if s.description then
+                        line = line .. ": " .. s.description
+                    end
+                    lines[#lines + 1] = line
+                end
+                skill_context = table.concat(lines, "\n")
             end
         end
 
@@ -30,9 +43,9 @@ return {
         local prompt = message
         if skill_context ~= "" then
             prompt = message .. skill_context
-            orcs.log("debug", "llm-worker: skill_context attached (" .. #skill_context .. " chars)")
+            orcs.log("debug", "llm-worker: selected " .. skill_count .. " skills (" .. #skill_context .. " chars)")
         else
-            orcs.log("debug", "llm-worker: no skill_context")
+            orcs.log("debug", "llm-worker: no relevant skills")
         end
 
         -- 3. Call Claude Code CLI (headless)
