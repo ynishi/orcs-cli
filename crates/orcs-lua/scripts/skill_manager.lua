@@ -270,8 +270,24 @@ return {
             end
         end
 
+        -- Auto-activate all discovered skills (L2)
+        local all_skills = registry:list()
+        local activated = 0
+        for _, entry in ipairs(all_skills) do
+            local ok, err = catalog:activate(entry.name)
+            if ok then
+                activated = activated + 1
+            else
+                orcs.log("warn", string.format(
+                    "SkillManager: failed to activate '%s': %s",
+                    entry.name, err or "unknown"
+                ))
+            end
+        end
+
         orcs.log("info", string.format(
-            "SkillManager initialized (skills: %d)", total_discovered
+            "SkillManager initialized (skills: %d, active: %d)",
+            total_discovered, activated
         ))
     end,
 
