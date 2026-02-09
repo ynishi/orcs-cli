@@ -1,39 +1,55 @@
 -- agent_mgr.lua
--- Agent Manager component that spawns and manages child agents.
+-- Agent Manager component: routes UserInput to specialized workers.
 --
--- Usage: Spawns a child agent on init and delegates UserInput to children.
+-- Architecture:
+--   agent_mgr (Router)
+--     ├── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
+--     └── skill-worker  — skill queries via RPC to skill_manager
 
--- Child worker script (embedded)
--- Note: Workers use `run` function (not `on_request`) because they are Children, not Components.
-local child_script = [[
+-- === Worker Scripts ===
+
+-- LLM Worker: fetches skill catalog for context, then calls Claude Code CLI.
+local llm_worker_script = [[
 return {
-    id = "worker",
+    id = "llm-worker",
 
     run = function(input)
         local message = input.message or ""
 
-        -- Query skill_manager via RPC
-        local skill_resp = orcs.request("skill::skill_manager", "status", {})
-        local skill_info = ""
-        if skill_resp and skill_resp.success and skill_resp.data then
-            local d = skill_resp.data
-            skill_info = string.format(
-                " [skills: total=%s, active=%s]",
-                tostring(d.total or "?"), tostring(d.active or "?")
-            )
-        elseif skill_resp and skill_resp.error then
-            skill_info = " [skill error: " .. skill_resp.error .. "]"
-        else
-            skill_info = " [skill: no response]"
+        -- 1. Fetch skill catalog for context enrichment
+        local skill_context = ""
+        local catalog_resp = orcs.request("skill::skill_manager", "catalog", {})
+        if catalog_resp and catalog_resp.success and catalog_resp.data then
+            local catalog = catalog_resp.data.catalog
+            if catalog and catalog ~= "" then
+                skill_context = "\n\n## Available Skills\n" .. catalog
+            end
         end
 
-        return {
-            success = true,
-            data = {
-                response = "Processed: " .. tostring(message) .. skill_info,
-                source = "worker"
+        -- 2. Build prompt with context
+        local prompt = message
+        if skill_context ~= "" then
+            prompt = message .. skill_context
+        end
+
+        -- 3. Call Claude Code CLI (headless)
+        local llm_resp = orcs.llm(prompt)
+        if llm_resp and llm_resp.ok then
+            return {
+                success = true,
+                data = {
+                    response = llm_resp.content,
+                    source = "llm-worker",
+                },
             }
-        }
+        else
+            local err = (llm_resp and llm_resp.error) or "llm call failed"
+            return {
+                success = false,
+                error = err,
+                data = { source = "llm-worker" },
+            }
+        end
     end,
 
     on_signal = function(signal)
@@ -45,7 +61,44 @@ return {
 }
 ]]
 
-local worker_handle = nil
+-- Skill Worker: lightweight skill queries via RPC.
+local skill_worker_script = [[
+return {
+    id = "skill-worker",
+
+    run = function(input)
+        local operation = input.operation or "status"
+        local payload = input.payload or {}
+
+        local resp = orcs.request("skill::skill_manager", operation, payload)
+        if resp and resp.success then
+            return {
+                success = true,
+                data = {
+                    result = resp.data,
+                    source = "skill-worker",
+                },
+            }
+        else
+            local err = (resp and resp.error) or "skill request failed"
+            return {
+                success = false,
+                error = err,
+                data = { source = "skill-worker" },
+            }
+        end
+    end,
+
+    on_signal = function(signal)
+        if signal.kind == "Veto" then
+            return "Abort"
+        end
+        return "Handled"
+    end,
+}
+]]
+
+-- === Component Definition ===
 
 return {
     id = "agent_mgr",
@@ -56,7 +109,6 @@ return {
     child_spawner = true,
 
     on_request = function(request)
-        -- Extract user message from payload
         local message = request.payload
         if type(message) == "table" then
             message = message.message or message.content or ""
@@ -67,34 +119,24 @@ return {
 
         orcs.log("info", "AgentMgr received: " .. message:sub(1, 50))
 
-        -- Check if worker is spawned
-        local child_count = orcs.child_count()
-        if child_count > 0 then
-            -- Delegate to worker
-            local result = orcs.send_to_child("worker-1", { message = message })
-            if result.ok then
-                local response = result.result and result.result.response or "no response"
-                orcs.output("[AgentMgr] Worker response: " .. tostring(response))
-                return {
-                    success = true,
-                    data = {
-                        message = message,
-                        worker_response = response
-                    }
-                }
-            else
-                orcs.output("[AgentMgr] Worker error: " .. (result.error or "unknown"))
-                return { success = false, error = result.error }
-            end
-        else
-            orcs.output("[AgentMgr] No workers available, message: " .. message)
+        -- Route to llm-worker (default)
+        local result = orcs.send_to_child("llm-worker", { message = message })
+        if result.ok then
+            local data = result.result or {}
+            local response = data.response or "no response"
+            orcs.output(response)
             return {
                 success = true,
                 data = {
                     message = message,
-                    workers = 0
-                }
+                    response = response,
+                    source = data.source,
+                },
             }
+        else
+            local err = result.error or "unknown"
+            orcs.output("[AgentMgr] Error: " .. err, "error")
+            return { success = false, error = err }
         end
     end,
 
@@ -106,27 +148,35 @@ return {
     end,
 
     init = function()
-        orcs.log("info", "agent_mgr component initializing...")
+        orcs.log("info", "agent_mgr initializing...")
 
-        -- Try to spawn a child worker
-        local result = orcs.spawn_child({
-            id = "worker-1",
-            script = child_script
+        -- Spawn LLM worker (default handler)
+        local llm = orcs.spawn_child({
+            id = "llm-worker",
+            script = llm_worker_script,
         })
-
-        if result.ok then
-            worker_handle = result
-            orcs.log("info", "agent_mgr spawned worker: " .. result.id)
-            orcs.output("[AgentMgr] Worker spawned: " .. result.id)
+        if llm.ok then
+            orcs.log("info", "spawned llm-worker")
         else
-            orcs.log("warn", "agent_mgr failed to spawn worker: " .. (result.error or "unknown"))
-            orcs.output("[AgentMgr] Failed to spawn worker: " .. (result.error or "unknown"))
+            orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
         end
 
-        orcs.log("info", "agent_mgr component initialized")
+        -- Spawn skill worker (internal service)
+        local skill = orcs.spawn_child({
+            id = "skill-worker",
+            script = skill_worker_script,
+        })
+        if skill.ok then
+            orcs.log("info", "spawned skill-worker")
+        else
+            orcs.log("error", "failed to spawn skill-worker: " .. (skill.error or ""))
+        end
+
+        orcs.output("[AgentMgr] Ready (workers: llm, skill)")
+        orcs.log("info", "agent_mgr initialized")
     end,
 
     shutdown = function()
-        orcs.log("info", "agent_mgr component shutdown")
+        orcs.log("info", "agent_mgr shutdown")
     end,
 }

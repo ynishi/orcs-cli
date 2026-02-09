@@ -588,6 +588,55 @@ fn register_context_functions(
     })?;
     orcs_table.set("exec", exec_fn)?;
 
+    // orcs.llm(prompt) -> { ok, content?, error? }
+    // Capability-checked override: requires Capability::LLM.
+    let llm_sandbox_root = sandbox.root().to_path_buf();
+    let llm_fn = lua.create_function(move |lua, prompt: String| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+        let result = lua.create_table()?;
+        if !ctx.has_capability(orcs_component::Capability::LLM) {
+            result.set("ok", false)?;
+            result.set("error", "permission denied: Capability::LLM not granted")?;
+            return Ok(result);
+        }
+        drop(ctx);
+
+        let output = std::process::Command::new("claude")
+            .arg("-p")
+            .arg(&prompt)
+            .current_dir(&llm_sandbox_root)
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let content = String::from_utf8_lossy(&out.stdout).to_string();
+                result.set("ok", true)?;
+                result.set("content", content)?;
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                result.set("ok", false)?;
+                result.set("error", if stderr.is_empty() { stdout } else { stderr })?;
+            }
+            Err(e) => {
+                result.set("ok", false)?;
+                result.set("error", format!("failed to spawn claude: {e}"))?;
+            }
+        }
+
+        Ok(result)
+    })?;
+    orcs_table.set("llm", llm_fn)?;
+
     // orcs.spawn_child(config) -> { ok, id, error }
     // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
     let spawn_child_fn = lua.create_function(|lua, config: Table| {
