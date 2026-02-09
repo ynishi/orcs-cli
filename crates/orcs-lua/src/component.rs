@@ -124,8 +124,42 @@ impl LuaComponent {
         let script = std::fs::read_to_string(path)
             .map_err(|_| LuaError::ScriptNotFound(path.display().to_string()))?;
 
-        let mut component = Self::from_script(&script, sandbox)?;
+        let script_dir = path.parent().map(|p| p.to_path_buf());
+        let mut component = Self::from_script_inner(&script, sandbox, script_dir.as_deref())?;
         component.script_path = Some(path.display().to_string());
+        Ok(component)
+    }
+
+    /// Creates a new LuaComponent from a directory containing `init.lua`.
+    ///
+    /// The directory is added to Lua's `package.path`, enabling standard
+    /// `require()` for co-located modules (e.g. `require("lib.my_module")`).
+    ///
+    /// # Directory Structure
+    ///
+    /// ```text
+    /// components/my_component/
+    ///   init.lua              -- entry point (must return component table)
+    ///   lib/
+    ///     helper.lua          -- require("lib.helper")
+    ///   vendor/
+    ///     lua_solver/init.lua -- require("vendor.lua_solver")
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `init.lua` not found or script is invalid.
+    pub fn from_dir<P: AsRef<Path>>(
+        dir: P,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
+        let dir = dir.as_ref();
+        let init_path = dir.join("init.lua");
+        let script = std::fs::read_to_string(&init_path)
+            .map_err(|_| LuaError::ScriptNotFound(init_path.display().to_string()))?;
+
+        let mut component = Self::from_script_inner(&script, sandbox, Some(dir))?;
+        component.script_path = Some(init_path.display().to_string());
         Ok(component)
     }
 
@@ -140,10 +174,70 @@ impl LuaComponent {
     ///
     /// Returns error if script is invalid.
     pub fn from_script(script: &str, sandbox: Arc<dyn SandboxPolicy>) -> Result<Self, LuaError> {
+        Self::from_script_inner(script, sandbox, None)
+    }
+
+    /// Internal: creates a LuaComponent with optional `package.path` setup.
+    ///
+    /// When `script_dir` is provided, the directory is prepended to Lua's
+    /// `package.path` so that `require()` resolves co-located modules.
+    ///
+    /// # TODO
+    ///
+    /// - Sandbox integration: validate that `script_dir` and resolved require
+    ///   paths are within allowed boundaries (sandbox root, `~/.orcs/libs/`, etc.)
+    /// - Support `package.cpath = ""` to disable C module loading
+    /// - Consider custom `package.searchers` for full sandbox-aware require
+    fn from_script_inner(
+        script: &str,
+        sandbox: Arc<dyn SandboxPolicy>,
+        script_dir: Option<&Path>,
+    ) -> Result<Self, LuaError> {
         let lua = Lua::new();
 
-        // Register orcs helper functions
+        // Save package/require BEFORE sandbox_lua_globals() removes them.
+        // We restore a restricted version after sandboxing when script_dir is set.
+        let saved_package: Option<Table> = if script_dir.is_some() {
+            lua.globals().get("package").ok()
+        } else {
+            None
+        };
+        let saved_require: Option<mlua::Function> = if script_dir.is_some() {
+            lua.globals().get("require").ok()
+        } else {
+            None
+        };
+
+        // Register orcs helper functions (this calls sandbox_lua_globals
+        // which sets require=nil, package=nil for safety).
         Self::register_orcs_functions(&lua, Arc::clone(&sandbox))?;
+
+        // Restore require() with restricted package.path for directory-based components.
+        // Only the component's own directory is searchable — no system paths, no C modules.
+        //
+        // TODO: Sandbox integration
+        // - Validate script_dir is within allowed boundaries
+        // - Support additional lib paths (e.g. ~/.orcs/libs/, vendor/)
+        // - Consider custom package.searchers for sandbox-aware file reads
+        if let (Some(dir), Some(package), Some(require_fn)) =
+            (script_dir, saved_package, saved_require)
+        {
+            let dir_str = dir.display();
+            let restricted_path = format!("{dir_str}/?.lua;{dir_str}/?/init.lua");
+            package
+                .set("path", restricted_path)
+                .map_err(|e| LuaError::InvalidScript(format!("set package.path: {e}")))?;
+            package
+                .set("cpath", "")
+                .map_err(|e| LuaError::InvalidScript(format!("set package.cpath: {e}")))?;
+
+            lua.globals()
+                .set("package", package)
+                .map_err(|e| LuaError::InvalidScript(format!("restore package: {e}")))?;
+            lua.globals()
+                .set("require", require_fn)
+                .map_err(|e| LuaError::InvalidScript(format!("restore require: {e}")))?;
+        }
 
         // Execute script and get the returned table
         let component_table: Table = lua

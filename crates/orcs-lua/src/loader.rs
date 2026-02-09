@@ -174,8 +174,12 @@ impl ScriptLoader {
     /// Loads a script by name.
     ///
     /// Search order:
-    /// 1. Each search path: `{path}/{name}.lua`
-    /// 2. Embedded script (if enabled)
+    /// 1. Each search path: `{path}/{name}.lua` (single file)
+    /// 2. Each search path: `{path}/{name}/init.lua` (directory with co-located modules)
+    /// 3. Embedded script (if enabled)
+    ///
+    /// Directory-based loading sets up `package.path` so that standard
+    /// `require()` resolves co-located modules within the component directory.
     ///
     /// # Errors
     ///
@@ -183,9 +187,16 @@ impl ScriptLoader {
     pub fn load(&self, name: &str) -> Result<LuaComponent, LuaError> {
         // Search filesystem paths first
         for path in &self.search_paths {
-            let file_path = path.join(format!("{}.lua", name));
+            // 1. Single file: {path}/{name}.lua
+            let file_path = path.join(format!("{name}.lua"));
             if file_path.exists() {
                 return LuaComponent::from_file(&file_path, Arc::clone(&self.sandbox));
+            }
+
+            // 2. Directory: {path}/{name}/init.lua
+            let dir_path = path.join(name);
+            if dir_path.join("init.lua").exists() {
+                return LuaComponent::from_dir(&dir_path, Arc::clone(&self.sandbox));
             }
         }
 
@@ -200,11 +211,16 @@ impl ScriptLoader {
         let mut searched = self
             .search_paths
             .iter()
-            .map(|p| p.join(format!("{}.lua", name)).display().to_string())
+            .flat_map(|p| {
+                [
+                    p.join(format!("{name}.lua")).display().to_string(),
+                    p.join(name).join("init.lua").display().to_string(),
+                ]
+            })
             .collect::<Vec<_>>();
 
         if self.use_embedded_fallback {
-            searched.push(format!("embedded:{}", name));
+            searched.push(format!("embedded:{name}"));
         }
 
         Err(LuaError::ScriptNotFound(format!(
@@ -222,14 +238,18 @@ impl ScriptLoader {
         use std::collections::HashSet;
         let mut names: HashSet<String> = HashSet::new();
 
-        // Collect from search paths
+        // Collect from search paths (single files + directories with init.lua)
         for dir in &self.search_paths {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "lua") {
+                    if path.is_file() && path.extension().is_some_and(|ext| ext == "lua") {
                         if let Some(stem) = path.file_stem() {
                             names.insert(stem.to_string_lossy().into_owned());
+                        }
+                    } else if path.is_dir() && path.join("init.lua").exists() {
+                        if let Some(name) = path.file_name() {
+                            names.insert(name.to_string_lossy().into_owned());
                         }
                     }
                 }
@@ -537,5 +557,101 @@ mod tests {
         };
         let display_str = format!("{}", warn);
         assert!(display_str.contains("/test/script.lua"));
+    }
+
+    // === Directory-based loading tests ===
+
+    #[test]
+    fn from_dir_loads_init_lua() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"return {
+                id = "dir-component",
+                namespace = "test",
+                subscriptions = {"Echo"},
+                on_request = function(r) return {success=true, data={}} end,
+                on_signal = function(s) return "Handled" end,
+            }"#,
+        )
+        .unwrap();
+
+        let sb = test_sandbox();
+        let component = LuaComponent::from_dir(dir.path(), sb).unwrap();
+        assert_eq!(component.id().name, "dir-component");
+    }
+
+    #[test]
+    fn from_dir_require_colocated_module() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create lib/helper.lua
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::write(
+            dir.path().join("lib").join("helper.lua"),
+            r#"local M = {}
+            function M.greet() return "hello from helper" end
+            return M"#,
+        )
+        .unwrap();
+
+        // Create init.lua that uses require
+        std::fs::write(
+            dir.path().join("init.lua"),
+            r#"local helper = require("lib.helper")
+            return {
+                id = "require-test",
+                namespace = "test",
+                subscriptions = {"Echo"},
+                on_request = function(r) return {success=true, data={msg=helper.greet()}} end,
+                on_signal = function(s) return "Handled" end,
+            }"#,
+        )
+        .unwrap();
+
+        let sb = test_sandbox();
+        let component = LuaComponent::from_dir(dir.path(), sb).unwrap();
+        assert_eq!(component.id().name, "require-test");
+    }
+
+    #[test]
+    fn loader_finds_directory_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("my_comp");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(
+            comp_dir.join("init.lua"),
+            r#"return {
+                id = "my_comp",
+                namespace = "test",
+                subscriptions = {"Echo"},
+                on_request = function(r) return {success=true, data={}} end,
+                on_signal = function(s) return "Handled" end,
+            }"#,
+        )
+        .unwrap();
+
+        let sb = test_sandbox();
+        let loader = ScriptLoader::new(sb)
+            .with_path(dir.path())
+            .without_embedded_fallback();
+        let component = loader.load("my_comp").unwrap();
+        assert_eq!(component.id().name, "my_comp");
+    }
+
+    #[test]
+    fn list_available_includes_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("dir_comp");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(comp_dir.join("init.lua"), "return {}").unwrap();
+
+        let sb = test_sandbox();
+        let loader = ScriptLoader::new(sb)
+            .with_path(dir.path())
+            .without_embedded_fallback();
+        let names = loader.list_available();
+        assert!(names.contains(&"dir_comp".to_string()));
     }
 }
