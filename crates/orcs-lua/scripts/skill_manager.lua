@@ -253,7 +253,28 @@ return {
     init = function()
         registry = SkillRegistry.new()
         catalog = SkillCatalog.new(registry)
-        orcs.log("info", "SkillManager initialized")
+
+        -- Auto-discover skills from well-known paths
+        local discover_paths = {
+            orcs.pwd .. "/.orcs/skills",
+        }
+        local total_discovered = 0
+        for _, path in ipairs(discover_paths) do
+            local result = handle_discover({ path = path })
+            if result.success and result.data then
+                local n = result.data.registered or 0
+                total_discovered = total_discovered + n
+                if n > 0 then
+                    orcs.log("info", string.format(
+                        "SkillManager: discovered %d skills from %s", n, path
+                    ))
+                end
+            end
+        end
+
+        orcs.log("info", string.format(
+            "SkillManager initialized (skills: %d)", total_discovered
+        ))
     end,
 
     shutdown = function()
