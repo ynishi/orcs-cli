@@ -1,14 +1,12 @@
 -- skill_manager.lua
 -- SkillManagementComponent: Discovery / Registration / Activation / Execution
 -- of Agent Skills (Composable Prompt-Level Plugins).
---
--- Uses lib modules loaded via orcs.require_lib().
 
 -- Load library modules
-local FormatAdapter = orcs.require_lib("format_adapter")
-local SkillRegistry = orcs.require_lib("skill_registry")
-local SkillLoader   = orcs.require_lib("skill_loader")
-local SkillCatalog  = orcs.require_lib("skill_catalog")
+local FormatAdapter = require("format_adapter")
+local SkillRegistry = require("skill_registry")
+local SkillLoader   = require("skill_loader")
+local SkillCatalog  = require("skill_catalog")
 
 -- Module-level state (initialized in init())
 local registry = nil

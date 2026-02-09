@@ -3,6 +3,7 @@
 //! Wraps a Lua script to implement the Component trait.
 
 use crate::error::LuaError;
+use crate::lua_env::LuaEnv;
 use crate::types::{
     lua_to_json, parse_event_category, parse_signal_response, serde_json_to_lua, LuaRequest,
     LuaResponse, LuaSignal,
@@ -177,66 +178,43 @@ impl LuaComponent {
         Self::from_script_inner(script, sandbox, None)
     }
 
-    /// Internal: creates a LuaComponent with optional `package.path` setup.
+    /// Internal: creates a LuaComponent with optional search path setup.
     ///
-    /// When `script_dir` is provided, the directory is prepended to Lua's
-    /// `package.path` so that `require()` resolves co-located modules.
-    ///
-    /// # TODO
-    ///
-    /// - Sandbox integration: validate that `script_dir` and resolved require
-    ///   paths are within allowed boundaries (sandbox root, `~/.orcs/libs/`, etc.)
-    /// - Support `package.cpath = ""` to disable C module loading
-    /// - Consider custom `package.searchers` for full sandbox-aware require
+    /// When `script_dir` is provided, it is added to `LuaEnv`'s search paths
+    /// so that `require()` resolves co-located modules with sandbox validation.
     fn from_script_inner(
         script: &str,
         sandbox: Arc<dyn SandboxPolicy>,
         script_dir: Option<&Path>,
     ) -> Result<Self, LuaError> {
-        let lua = Lua::new();
+        // Build LuaEnv with sandbox and optional script directory as search path.
+        let mut lua_env = LuaEnv::new(Arc::clone(&sandbox));
+        if let Some(dir) = script_dir {
+            lua_env = lua_env.with_search_path(dir);
+        }
 
-        // Save package/require BEFORE sandbox_lua_globals() removes them.
-        // We restore a restricted version after sandboxing when script_dir is set.
-        let saved_package: Option<Table> = if script_dir.is_some() {
-            lua.globals().get("package").ok()
-        } else {
-            None
-        };
-        let saved_require: Option<mlua::Function> = if script_dir.is_some() {
-            lua.globals().get("require").ok()
-        } else {
-            None
-        };
+        // Create configured Lua VM (orcs.*, tools, sandboxed require).
+        let lua = lua_env.create_lua()?;
 
-        // Register orcs helper functions (this calls sandbox_lua_globals
-        // which sets require=nil, package=nil for safety).
-        Self::register_orcs_functions(&lua, Arc::clone(&sandbox))?;
-
-        // Restore require() with restricted package.path for directory-based components.
-        // Only the component's own directory is searchable — no system paths, no C modules.
-        //
-        // TODO: Sandbox integration
-        // - Validate script_dir is within allowed boundaries
-        // - Support additional lib paths (e.g. ~/.orcs/libs/, vendor/)
-        // - Consider custom package.searchers for sandbox-aware file reads
-        if let (Some(dir), Some(package), Some(require_fn)) =
-            (script_dir, saved_package, saved_require)
+        // Register Component-specific output placeholders.
+        // These are overridden by real emitter functions via set_emitter().
         {
-            let dir_str = dir.display();
-            let restricted_path = format!("{dir_str}/?.lua;{dir_str}/?/init.lua");
-            package
-                .set("path", restricted_path)
-                .map_err(|e| LuaError::InvalidScript(format!("set package.path: {e}")))?;
-            package
-                .set("cpath", "")
-                .map_err(|e| LuaError::InvalidScript(format!("set package.cpath: {e}")))?;
+            let orcs_table: Table = lua.globals().get("orcs")?;
+            let output_noop = lua.create_function(|_, msg: String| {
+                tracing::debug!("[lua] orcs.output called without emitter: {}", msg);
+                Ok(())
+            })?;
+            orcs_table.set("output", output_noop)?;
 
-            lua.globals()
-                .set("package", package)
-                .map_err(|e| LuaError::InvalidScript(format!("restore package: {e}")))?;
-            lua.globals()
-                .set("require", require_fn)
-                .map_err(|e| LuaError::InvalidScript(format!("restore require: {e}")))?;
+            let output_level_noop =
+                lua.create_function(|_, (msg, _level): (String, String)| {
+                    tracing::debug!(
+                        "[lua] orcs.output_with_level called without emitter: {}",
+                        msg
+                    );
+                    Ok(())
+                })?;
+            orcs_table.set("output_with_level", output_level_noop)?;
         }
 
         // Execute script and get the returned table
@@ -996,111 +974,6 @@ impl LuaComponent {
         }
 
         tracing::debug!("Overrode file tools with capability-gated versions");
-        Ok(())
-    }
-
-    /// Registers orcs helper functions in Lua.
-    ///
-    /// Available functions:
-    /// - `orcs.exec(cmd)` - Execute shell command and return output
-    /// - `orcs.log(level, msg)` - Log a message at specified level
-    ///
-    /// Note: `orcs.output(msg)` is registered separately via `set_emitter()`.
-    fn register_orcs_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Result<(), LuaError> {
-        let orcs_table = lua.create_table()?;
-
-        // orcs.exec(cmd) -> {ok=false, ...}
-        // Deny by default: exec requires ChildContext with permission checking.
-        // Overridden by permission-checked version in register_child_context_functions.
-        let exec_fn = lua.create_function(|lua, _cmd: String| {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("stdout", "")?;
-            result.set(
-                "stderr",
-                "exec denied: no execution context (ChildContext required)",
-            )?;
-            result.set("code", -1)?;
-            Ok(result)
-        })?;
-        orcs_table.set("exec", exec_fn)?;
-
-        // orcs.log(level, msg)
-        let log_fn = lua.create_function(|_, (level, msg): (String, String)| {
-            match level.to_lowercase().as_str() {
-                "debug" => tracing::debug!("[lua] {}", msg),
-                "info" => tracing::info!("[lua] {}", msg),
-                "warn" => tracing::warn!("[lua] {}", msg),
-                "error" => tracing::error!("[lua] {}", msg),
-                _ => tracing::info!("[lua] {}", msg),
-            }
-            Ok(())
-        })?;
-        orcs_table.set("log", log_fn)?;
-
-        // orcs.output - placeholder (registered with emitter later)
-        // This allows scripts to check for the function even without emitter
-        let output_noop_fn = lua.create_function(|_, msg: String| {
-            tracing::debug!("[lua] orcs.output called without emitter: {}", msg);
-            Ok(())
-        })?;
-        orcs_table.set("output", output_noop_fn)?;
-
-        // orcs.output_with_level - placeholder
-        let output_level_noop_fn = lua.create_function(|_, (msg, _level): (String, String)| {
-            tracing::debug!(
-                "[lua] orcs.output_with_level called without emitter: {}",
-                msg
-            );
-            Ok(())
-        })?;
-        orcs_table.set("output_with_level", output_level_noop_fn)?;
-
-        // orcs.pwd - sandbox root as string
-        orcs_table.set("pwd", sandbox.root().display().to_string())?;
-
-        lua.globals().set("orcs", orcs_table)?;
-
-        // orcs.require_lib(name) -> module table (embedded lib loader with caching)
-        {
-            let orcs_table: Table = lua.globals().get("orcs")?;
-            let require_lib_fn = lua.create_function(|lua, name: String| {
-                let cache_key = format!("_orcs_lib_{name}");
-                let globals = lua.globals();
-                if let Ok(val) = globals.get::<mlua::Value>(cache_key.as_str()) {
-                    if val != mlua::Value::Nil {
-                        return Ok(val);
-                    }
-                }
-                let source = crate::embedded::lib::get(&name).ok_or_else(|| {
-                    mlua::Error::RuntimeError(format!(
-                        "lib module not found: {name}. available: {:?}",
-                        crate::embedded::lib::list()
-                    ))
-                })?;
-                let value: mlua::Value = lua
-                    .load(source)
-                    .set_name(format!("lib/{name}"))
-                    .eval()
-                    .map_err(|e| {
-                        mlua::Error::RuntimeError(format!("lib/{name} load failed: {e}"))
-                    })?;
-                globals
-                    .set(cache_key.as_str(), value.clone())
-                    .map_err(|e| {
-                        mlua::Error::RuntimeError(format!("lib/{name} cache failed: {e}"))
-                    })?;
-                Ok(value)
-            })?;
-            orcs_table.set("require_lib", require_lib_fn)?;
-        }
-
-        // Register native Rust tools (read, write, grep, glob)
-        crate::tools::register_tool_functions(lua, sandbox)?;
-
-        // Disable dangerous Lua stdlib functions (io.*, os.execute, loadfile, dofile)
-        crate::orcs_helpers::sandbox_lua_globals(lua)?;
-
         Ok(())
     }
 

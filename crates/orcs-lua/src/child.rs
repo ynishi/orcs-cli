@@ -130,8 +130,12 @@ impl LuaChild {
             ))))
         })?;
 
-        // Register base orcs functions (log, exec, read, write, grep, glob)
-        register_base_orcs_functions(&lua_guard, Arc::clone(&sandbox))?;
+        // Register base orcs functions only if not already set up.
+        // If the parent VM was configured via LuaEnv, calling register_base_orcs_functions
+        // again would destroy the custom require() via sandbox_lua_globals().
+        if !is_orcs_initialized(&lua_guard) {
+            register_base_orcs_functions(&lua_guard, Arc::clone(&sandbox))?;
+        }
 
         // Extract id
         let id: String = table
@@ -243,8 +247,10 @@ impl LuaChild {
             ))))
         })?;
 
-        // Register base orcs functions (log, exec, read, write, grep, glob)
-        register_base_orcs_functions(&lua_guard, Arc::clone(&sandbox))?;
+        // Register base orcs functions only if not already set up.
+        if !is_orcs_initialized(&lua_guard) {
+            register_base_orcs_functions(&lua_guard, Arc::clone(&sandbox))?;
+        }
 
         // Create a simple on_signal function that returns "Ignored"
         let on_signal_fn = lua_guard.create_function(|_, _: mlua::Value| Ok("Ignored"))?;
@@ -470,6 +476,18 @@ impl RunnableChild for LuaChild {
             }
         }
     }
+}
+
+/// Checks if the Lua VM already has orcs functions registered.
+///
+/// Returns `true` if the `orcs` table exists and has `log` registered.
+/// This prevents double-initialization which would destroy custom `require()`
+/// set up by [`LuaEnv`](crate::LuaEnv).
+fn is_orcs_initialized(lua: &Lua) -> bool {
+    lua.globals()
+        .get::<Table>("orcs")
+        .and_then(|t| t.get::<Function>("log"))
+        .is_ok()
 }
 
 /// Wrapper to store ChildContext in Lua's app_data.

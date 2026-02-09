@@ -50,7 +50,7 @@ pub const CODE_AGENT: &str = include_str!("../scripts/code_agent.lua");
 /// Manages Discovery / Registration / Activation of Agent Skills.
 pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager.lua");
 
-/// Embedded library modules (loaded via `orcs.require_lib`).
+/// Embedded library modules (loaded via `require()` or legacy `orcs.require_lib`).
 pub mod lib {
     /// Format adapter: converts skill formats to common model.
     pub const FORMAT_ADAPTER: &str = include_str!("../scripts/lib/format_adapter.lua");
