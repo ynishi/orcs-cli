@@ -93,6 +93,7 @@
 //! let component = loader.load("echo")?;
 //! ```
 
+pub(crate) mod cap_tools;
 mod child;
 mod component;
 pub mod embedded;
