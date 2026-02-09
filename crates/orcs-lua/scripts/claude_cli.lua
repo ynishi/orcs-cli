@@ -7,7 +7,7 @@
 return {
     id = "claude_cli",
     namespace = "builtin",
-    subscriptions = {"UserInput"},
+    subscriptions = {},
     output_to_io = true,
     elevated = true,
 

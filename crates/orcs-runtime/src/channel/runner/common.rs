@@ -156,7 +156,7 @@ pub async fn send_abort(world_tx: &mpsc::Sender<WorldCommand>, id: ChannelId, re
     };
 
     if world_tx.send(cmd).await.is_err() {
-        warn!(
+        debug!(
             "Runner {}: failed to send abort command (reason: {})",
             id, reason
         );
