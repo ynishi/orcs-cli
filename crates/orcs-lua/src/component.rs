@@ -406,6 +406,11 @@ impl Component for LuaComponent {
         fields(component = %self.id.fqn(), operation = %request.operation)
     )]
     fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
+        if self.status == Status::Aborted {
+            return Err(ComponentError::ExecutionFailed(
+                "component is aborted".to_string(),
+            ));
+        }
         self.status = Status::Running;
 
         let lua = self.lua.lock().map_err(|e| {

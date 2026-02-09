@@ -101,6 +101,7 @@ mod error;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;
+pub mod scenario;
 pub mod testing;
 pub mod tool_registry;
 pub mod tools;
