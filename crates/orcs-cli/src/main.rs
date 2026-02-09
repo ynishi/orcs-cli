@@ -110,11 +110,11 @@ impl ConfigResolver for CliConfigResolver {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Setup logging based on CLI args
+    // Setup logging: --debug flag > RUST_LOG env > default "info"
     let filter = if args.debug {
         EnvFilter::new("debug")
     } else {
-        EnvFilter::new("info")
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
     fmt().with_env_filter(filter).with_target(false).init();

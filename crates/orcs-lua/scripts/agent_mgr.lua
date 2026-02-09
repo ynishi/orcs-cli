@@ -30,6 +30,9 @@ return {
         local prompt = message
         if skill_context ~= "" then
             prompt = message .. skill_context
+            orcs.log("debug", "llm-worker: skill_context attached (" .. #skill_context .. " chars)")
+        else
+            orcs.log("debug", "llm-worker: no skill_context")
         end
 
         -- 3. Call Claude Code CLI (headless)
