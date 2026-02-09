@@ -67,9 +67,7 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
     };
 
     if !handle.accepts_requests() {
-        return Err(format!(
-            "component {target_fqn} does not accept requests"
-        ));
+        return Err(format!("component {target_fqn} does not accept requests"));
     }
 
     // Parse FQN into ComponentId for the Request target field

@@ -1235,7 +1235,14 @@ impl ChannelRunnerBuilder {
             }
 
             // Add session, checker, grants, and IO output routing
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map, self.id);
+            ctx = self.configure_context(
+                ctx,
+                &io_output_tx,
+                &component_id,
+                &rpc_handles,
+                &rpc_map,
+                self.id,
+            );
 
             self.component.set_child_context(Box::new(ctx));
 
@@ -1249,7 +1256,14 @@ impl ChannelRunnerBuilder {
             let mut ctx =
                 ChildContextImpl::new(&component_id, dummy_output, Arc::clone(&dummy_arc));
 
-            ctx = self.configure_context(ctx, &io_output_tx, &component_id, &rpc_handles, &rpc_map, self.id);
+            ctx = self.configure_context(
+                ctx,
+                &io_output_tx,
+                &component_id,
+                &rpc_handles,
+                &rpc_map,
+                self.id,
+            );
 
             self.component.set_child_context(Box::new(ctx));
             info!(

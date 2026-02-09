@@ -160,10 +160,12 @@ impl LuaEnv {
             .map_err(|e| LuaError::InvalidScript(format!("set package.cpath: {e}")))?;
 
         // Preserve existing package.loaded (or create fresh).
-        let loaded: Table = package.get("loaded").unwrap_or_else(|_| {
-            lua.create_table()
-                .expect("create package.loaded should not fail")
-        });
+        let loaded: Table = match package.get("loaded") {
+            Ok(t) => t,
+            Err(_) => lua
+                .create_table()
+                .map_err(|e| LuaError::InvalidScript(format!("create package.loaded: {e}")))?,
+        };
         package
             .set("loaded", loaded)
             .map_err(|e| LuaError::InvalidScript(format!("set package.loaded: {e}")))?;

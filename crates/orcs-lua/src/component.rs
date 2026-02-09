@@ -206,14 +206,13 @@ impl LuaComponent {
             })?;
             orcs_table.set("output", output_noop)?;
 
-            let output_level_noop =
-                lua.create_function(|_, (msg, _level): (String, String)| {
-                    tracing::debug!(
-                        "[lua] orcs.output_with_level called without emitter: {}",
-                        msg
-                    );
-                    Ok(())
-                })?;
+            let output_level_noop = lua.create_function(|_, (msg, _level): (String, String)| {
+                tracing::debug!(
+                    "[lua] orcs.output_with_level called without emitter: {}",
+                    msg
+                );
+                Ok(())
+            })?;
             orcs_table.set("output_with_level", output_level_noop)?;
         }
 

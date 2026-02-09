@@ -432,9 +432,11 @@ impl ChildContextImpl {
         if let Some(g) = &self.grants {
             ctx = ctx.with_grants(Arc::clone(g));
         }
-        if let (Some(h), Some(m), Some(ch)) =
-            (&self.shared_handles, &self.component_channel_map, self.channel_id)
-        {
+        if let (Some(h), Some(m), Some(ch)) = (
+            &self.shared_handles,
+            &self.component_channel_map,
+            self.channel_id,
+        ) {
             ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m), ch);
         }
         Box::new(ctx)
