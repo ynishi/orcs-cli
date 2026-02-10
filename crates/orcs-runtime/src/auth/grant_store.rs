@@ -69,6 +69,23 @@ impl DefaultGrantStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Restores grants from a previously saved list.
+    ///
+    /// Typically used to restore session state:
+    /// ```ignore
+    /// let grants = old_store.list_grants();
+    /// // ... serialize grants to SessionAsset, persist, reload ...
+    /// let new_store = DefaultGrantStore::new();
+    /// new_store.restore_grants(&grants);
+    /// ```
+    ///
+    /// Existing grants are preserved (additive merge).
+    pub fn restore_grants(&self, grants: &[CommandGrant]) {
+        for grant in grants {
+            self.grant(grant.clone());
+        }
+    }
 }
 
 impl GrantPolicy for DefaultGrantStore {
@@ -156,6 +173,24 @@ impl GrantPolicy for DefaultGrantStore {
         let persistent = self.persistent.read().map(|s| s.len()).unwrap_or(0);
         let one_time = self.one_time.read().map(|s| s.len()).unwrap_or(0);
         persistent.saturating_add(one_time)
+    }
+
+    fn list_grants(&self) -> Vec<CommandGrant> {
+        let mut grants = Vec::new();
+
+        if let Ok(set) = self.persistent.read() {
+            grants.extend(set.iter().map(|p| CommandGrant::persistent(p.as_str())));
+        } else {
+            tracing::error!("grant_store: persistent lock poisoned on list_grants");
+        }
+
+        if let Ok(set) = self.one_time.read() {
+            grants.extend(set.iter().map(|p| CommandGrant::one_time(p.as_str())));
+        } else {
+            tracing::error!("grant_store: one_time lock poisoned on list_grants");
+        }
+
+        grants
     }
 }
 
@@ -270,6 +305,106 @@ mod tests {
         let store = DefaultGrantStore::new();
         store.revoke("nonexistent"); // Should not panic
         assert_eq!(store.grant_count(), 0);
+    }
+
+    #[test]
+    fn list_grants_empty() {
+        let store = DefaultGrantStore::new();
+        assert!(store.list_grants().is_empty());
+    }
+
+    #[test]
+    fn list_grants_persistent_only() {
+        let store = DefaultGrantStore::new();
+        store.grant(CommandGrant::persistent("ls"));
+        store.grant(CommandGrant::persistent("cargo"));
+
+        let grants = store.list_grants();
+        assert_eq!(grants.len(), 2);
+        assert!(grants.iter().all(|g| g.kind == GrantKind::Persistent));
+
+        let patterns: HashSet<_> = grants.iter().map(|g| g.pattern.as_str()).collect();
+        assert!(patterns.contains("ls"));
+        assert!(patterns.contains("cargo"));
+    }
+
+    #[test]
+    fn list_grants_mixed() {
+        let store = DefaultGrantStore::new();
+        store.grant(CommandGrant::persistent("ls"));
+        store.grant(CommandGrant::one_time("rm -rf"));
+
+        let grants = store.list_grants();
+        assert_eq!(grants.len(), 2);
+
+        let persistent: Vec<_> = grants
+            .iter()
+            .filter(|g| g.kind == GrantKind::Persistent)
+            .collect();
+        let one_time: Vec<_> = grants
+            .iter()
+            .filter(|g| g.kind == GrantKind::OneTime)
+            .collect();
+        assert_eq!(persistent.len(), 1);
+        assert_eq!(one_time.len(), 1);
+        assert_eq!(persistent[0].pattern, "ls");
+        assert_eq!(one_time[0].pattern, "rm -rf");
+    }
+
+    #[test]
+    fn list_grants_roundtrip() {
+        let store = DefaultGrantStore::new();
+        store.grant(CommandGrant::persistent("ls"));
+        store.grant(CommandGrant::persistent("cargo"));
+        store.grant(CommandGrant::one_time("rm -rf"));
+
+        let grants = store.list_grants();
+
+        // Restore into a new store via restore_grants
+        let store2 = DefaultGrantStore::new();
+        store2.restore_grants(&grants);
+
+        assert_eq!(store2.grant_count(), 3);
+        assert!(store2.is_granted("ls -la"));
+        assert!(store2.is_granted("cargo test"));
+        assert!(store2.is_granted("rm -rf ./temp")); // consumes one-time
+        assert!(!store2.is_granted("rm -rf ./temp")); // gone
+    }
+
+    #[test]
+    fn restore_grants_additive() {
+        let store = DefaultGrantStore::new();
+        store.grant(CommandGrant::persistent("ls"));
+
+        let additional = vec![
+            CommandGrant::persistent("cargo"),
+            CommandGrant::one_time("git push"),
+        ];
+        store.restore_grants(&additional);
+
+        assert_eq!(store.grant_count(), 3);
+        assert!(store.is_granted("ls -la"));
+        assert!(store.is_granted("cargo test"));
+        assert!(store.is_granted("git push origin main"));
+    }
+
+    #[test]
+    fn restore_grants_serde_roundtrip() {
+        let store = DefaultGrantStore::new();
+        store.grant(CommandGrant::persistent("ls"));
+        store.grant(CommandGrant::persistent("cargo"));
+        store.grant(CommandGrant::one_time("rm -rf"));
+
+        let grants = store.list_grants();
+        let json = serde_json::to_string(&grants).expect("serialize grants");
+        let restored: Vec<CommandGrant> = serde_json::from_str(&json).expect("deserialize grants");
+
+        let store2 = DefaultGrantStore::new();
+        store2.restore_grants(&restored);
+
+        assert_eq!(store2.grant_count(), 3);
+        assert!(store2.is_granted("ls -la"));
+        assert!(store2.is_granted("cargo test"));
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //! - **ComponentSnapshots**: Saved component states for resume
 
 use chrono::{DateTime, Utc};
+use orcs_auth::CommandGrant;
 use orcs_component::ComponentSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,6 +68,14 @@ pub struct SessionAsset {
     #[serde(default)]
     pub component_snapshots: HashMap<String, ComponentSnapshot>,
 
+    /// Granted command patterns (restored on session resume).
+    ///
+    /// These are the commands that were approved via HIL during previous
+    /// sessions. On resume, they are restored into the [`GrantPolicy`]
+    /// so the user doesn't need to re-approve the same commands.
+    #[serde(default)]
+    pub granted_commands: Vec<CommandGrant>,
+
     /// Arbitrary metadata.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -86,6 +95,7 @@ impl SessionAsset {
             project_context: ProjectContext::default(),
             skill_configs: HashMap::new(),
             component_snapshots: HashMap::new(),
+            granted_commands: Vec::new(),
             metadata: HashMap::new(),
         }
     }
@@ -149,6 +159,29 @@ impl SessionAsset {
     #[must_use]
     pub fn snapshot_count(&self) -> usize {
         self.component_snapshots.len()
+    }
+
+    // === Grant persistence ===
+
+    /// Saves granted commands (replaces existing).
+    ///
+    /// Call this before persisting the session to capture the current
+    /// grant state from a [`GrantPolicy`].
+    pub fn save_grants(&mut self, grants: Vec<CommandGrant>) {
+        self.granted_commands = grants;
+        self.touch();
+    }
+
+    /// Returns the saved granted commands.
+    #[must_use]
+    pub fn granted_commands(&self) -> &[CommandGrant] {
+        &self.granted_commands
+    }
+
+    /// Returns the number of saved grants.
+    #[must_use]
+    pub fn grant_count(&self) -> usize {
+        self.granted_commands.len()
     }
 
     /// Returns the creation time as a DateTime.
@@ -743,5 +776,81 @@ mod tests {
         let checksum2 = asset.checksum();
 
         assert_ne!(checksum1, checksum2);
+    }
+
+    // === Grant persistence tests ===
+
+    #[test]
+    fn grants_default_empty() {
+        let asset = SessionAsset::new();
+        assert!(asset.granted_commands().is_empty());
+        assert_eq!(asset.grant_count(), 0);
+    }
+
+    #[test]
+    fn save_and_get_grants() {
+        use orcs_auth::CommandGrant;
+
+        let mut asset = SessionAsset::new();
+        let grants = vec![
+            CommandGrant::persistent("ls"),
+            CommandGrant::persistent("cargo"),
+        ];
+        asset.save_grants(grants);
+
+        assert_eq!(asset.grant_count(), 2);
+        assert_eq!(asset.granted_commands()[0].pattern, "ls");
+        assert_eq!(asset.granted_commands()[1].pattern, "cargo");
+    }
+
+    #[test]
+    fn grants_json_roundtrip() {
+        use orcs_auth::{CommandGrant, GrantKind};
+
+        let mut asset = SessionAsset::new();
+        asset.save_grants(vec![
+            CommandGrant::persistent("ls"),
+            CommandGrant::one_time("rm -rf"),
+        ]);
+
+        let json = asset.to_json().unwrap();
+        let restored = SessionAsset::from_json(&json).unwrap();
+
+        assert_eq!(restored.grant_count(), 2);
+        assert_eq!(restored.granted_commands()[0].pattern, "ls");
+        assert_eq!(restored.granted_commands()[0].kind, GrantKind::Persistent);
+        assert_eq!(restored.granted_commands()[1].pattern, "rm -rf");
+        assert_eq!(restored.granted_commands()[1].kind, GrantKind::OneTime);
+    }
+
+    #[test]
+    fn grants_backward_compat_missing_field() {
+        // Simulate loading a session saved before granted_commands was added
+        let json = r#"{
+            "id": "test-id",
+            "version": 1,
+            "created_at_ms": 0,
+            "updated_at_ms": 0,
+            "history": { "turns": [], "compacted": [], "max_turns": 1000 },
+            "preferences": {
+                "coding_style": { "preferred_languages": [] },
+                "communication": {},
+                "frequent_tools": [],
+                "custom": {}
+            },
+            "project_context": {
+                "technologies": [],
+                "key_files": [],
+                "architecture_notes": [],
+                "learned_facts": [],
+                "persistent_contexts": []
+            },
+            "skill_configs": {},
+            "component_snapshots": {},
+            "metadata": {}
+        }"#;
+
+        let asset = SessionAsset::from_json(json).unwrap();
+        assert!(asset.granted_commands().is_empty());
     }
 }

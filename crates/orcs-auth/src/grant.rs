@@ -128,6 +128,17 @@ pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
 
     /// Returns the number of active grants.
     fn grant_count(&self) -> usize;
+
+    /// Returns all currently active grants.
+    ///
+    /// Used for snapshot/persistence — callers can serialize the returned
+    /// grants and later restore them via [`grant`](Self::grant).
+    ///
+    /// # Notes
+    ///
+    /// - OneTime grants are included (they haven't been consumed yet)
+    /// - The order of returned grants is unspecified
+    fn list_grants(&self) -> Vec<CommandGrant>;
 }
 
 #[cfg(test)]
