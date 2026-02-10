@@ -143,8 +143,11 @@ pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
 
     /// Returns all currently active grants.
     ///
-    /// Used for snapshot/persistence — callers can serialize the returned
-    /// grants and later restore them via [`grant`](Self::grant).
+    /// This is a **trait-level operation** (not an impl-specific convenience).
+    /// Any `GrantPolicy` implementation — whether backed by local memory,
+    /// a remote store, or a database — must be able to enumerate its grants
+    /// so that callers (e.g., session persistence) can work through
+    /// `dyn GrantPolicy` without knowing the concrete type (OCP).
     ///
     /// # Errors
     ///
