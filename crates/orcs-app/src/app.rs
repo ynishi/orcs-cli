@@ -71,6 +71,7 @@ use orcs_lua::{LuaChild, ScriptLoader};
 use orcs_runtime::auth::{DefaultGrantStore, DefaultPolicy, GrantPolicy, PermissionChecker};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
 use orcs_runtime::LuaChildLoader;
+use orcs_runtime::session::SessionStore;
 use orcs_runtime::{
     ChannelConfig, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
     InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session, SessionAsset,
@@ -237,19 +238,24 @@ impl OrcsApp {
 
     /// Saves the current session to storage.
     ///
-    /// Collects component snapshots and persists the session.
+    /// Transfers component snapshots from the engine into the session
+    /// asset, then persists to the store.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::Storage`] if saving fails.
     pub async fn save_session(&mut self) -> Result<(), AppError> {
-        self.engine
-            .save_session(&self.store, &mut self.session)
-            .await?;
+        for (fqn, snapshot) in self.engine.collected_snapshots() {
+            self.session
+                .component_snapshots
+                .insert(fqn.clone(), snapshot.clone());
+        }
+        self.session.touch();
+        self.store.save(&self.session).await?;
         Ok(())
     }
 
-    /// Loads a session from storage and restores component state.
+    /// Loads a session from storage.
     ///
     /// # Arguments
     ///
@@ -259,7 +265,7 @@ impl OrcsApp {
     ///
     /// Returns [`AppError::Storage`] if loading fails.
     pub async fn load_session(&mut self, session_id: &str) -> Result<(), AppError> {
-        self.session = self.engine.load_session(&self.store, session_id).await?;
+        self.session = self.store.load(session_id).await?;
         Ok(())
     }
 
@@ -825,7 +831,7 @@ impl OrcsAppBuilder {
         let (session, is_resumed, restored_count) =
             if let Some(session_id) = &self.resume_session_id {
                 tracing::info!("Resuming session: {}", session_id);
-                let asset = engine.load_session(&store, session_id).await?;
+                let asset = store.load(session_id).await?;
                 let count = asset.component_snapshots.len();
                 (asset, true, count)
             } else {

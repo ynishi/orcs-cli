@@ -5,7 +5,7 @@
 //! - Spawns and manages ChannelRunners (parallel execution)
 //! - Dispatches Signals to all Runners via broadcast
 //! - Coordinates World (Channel hierarchy) management
-//! - Provides session persistence via graceful shutdown snapshots
+//! - Collects component snapshots during graceful shutdown
 //!
 //! # Architecture
 //!
@@ -40,7 +40,6 @@ use crate::channel::{
     OutputSender, RunnerResult, World, WorldCommand, WorldCommandSender, WorldManager,
 };
 use crate::io::IOPort;
-use crate::session::{SessionAsset, SessionStore, StorageError};
 use crate::Principal;
 use orcs_component::{Component, ComponentSnapshot};
 use orcs_event::Signal;
@@ -847,71 +846,6 @@ impl OrcsEngine {
         &self.collected_snapshots
     }
 
-    /// Saves the current session state to a store.
-    ///
-    /// Uses snapshots collected during graceful shutdown (populated by
-    /// `shutdown_parallel()`). Must be called after `run()` completes.
-    ///
-    /// # Arguments
-    ///
-    /// * `store` - The session store to save to
-    /// * `asset` - The session asset to update and save
-    ///
-    /// # Errors
-    ///
-    /// Returns `StorageError` if saving fails.
-    pub async fn save_session<S: SessionStore>(
-        &self,
-        store: &S,
-        asset: &mut SessionAsset,
-    ) -> Result<(), StorageError> {
-        // Write collected snapshots into asset
-        for (fqn, snapshot) in &self.collected_snapshots {
-            asset
-                .component_snapshots
-                .insert(fqn.clone(), snapshot.clone());
-        }
-        asset.touch();
-
-        // Save to store
-        store.save(asset).await?;
-
-        info!(
-            "Session saved: {} ({} snapshots)",
-            asset.id,
-            self.collected_snapshots.len()
-        );
-        Ok(())
-    }
-
-    /// Loads a session asset from a store.
-    ///
-    /// Returns the loaded asset containing component snapshots. The caller
-    /// is responsible for passing these snapshots to
-    /// [`ChannelRunnerBuilder::with_initial_snapshot()`] when spawning runners.
-    ///
-    /// # Arguments
-    ///
-    /// * `store` - The session store to load from
-    /// * `session_id` - The session ID to load
-    ///
-    /// # Errors
-    ///
-    /// Returns `StorageError` if loading fails.
-    pub async fn load_session<S: SessionStore>(
-        &self,
-        store: &S,
-        session_id: &str,
-    ) -> Result<SessionAsset, StorageError> {
-        let asset = store.load(session_id).await?;
-
-        info!(
-            "Session loaded: {} ({} snapshots available)",
-            session_id,
-            asset.component_snapshots.len()
-        );
-        Ok(asset)
-    }
 }
 
 #[cfg(test)]
@@ -1170,8 +1104,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_session_after_graceful_shutdown() {
-        use crate::session::LocalFileStore;
+    async fn snapshots_persist_via_store_after_graceful_shutdown() {
+        use crate::session::{LocalFileStore, SessionAsset, SessionStore};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().expect("create temp dir");
@@ -1193,31 +1127,22 @@ mod tests {
 
         engine.run().await;
 
-        // Save session (uses collected snapshots from shutdown)
+        // App-layer responsibility: transfer snapshots → asset → store
         let mut asset = SessionAsset::new();
         let session_id = asset.id.clone();
-        engine
-            .save_session(&store, &mut asset)
-            .await
-            .expect("save session");
+        for (fqn, snapshot) in engine.collected_snapshots() {
+            asset.component_snapshots.insert(fqn.clone(), snapshot.clone());
+        }
+        asset.touch();
+        store.save(&asset).await.expect("save session");
 
         // Verify snapshot was saved
         assert!(asset.get_snapshot("builtin::snap").is_some());
 
-        // Load session from a new engine
-        let (world2, io2) = test_world();
-        let engine2 = OrcsEngine::new(world2, io2);
-
-        let loaded = engine2
-            .load_session(&store, &session_id)
-            .await
-            .expect("load session");
-
+        // Load session directly from store (no engine involvement)
+        let loaded = store.load(&session_id).await.expect("load session");
         assert_eq!(loaded.id, session_id);
         assert!(loaded.get_snapshot("builtin::snap").is_some());
-
-        // Cleanup
-        let _ = engine2.world_tx().send(WorldCommand::Shutdown).await;
     }
 
     // === spawn_channel_with_auth Tests ===
