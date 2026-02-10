@@ -128,12 +128,12 @@ function SkillCatalog:load_resources(name, resource_type)
     if not skill then return nil, "skill not found: " .. name end
 
     local resource_dir = (skill.source.path or "") .. "/" .. resource_type
-    local files = orcs.scan_dir({
+    local ok, files = pcall(orcs.scan_dir, {
         path = resource_dir,
         recursive = false,
     })
 
-    if not files or #files == 0 then
+    if not ok or not files or #files == 0 then
         return nil, "no resources found in: " .. resource_type
     end
 

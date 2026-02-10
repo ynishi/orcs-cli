@@ -18,14 +18,14 @@ end
 function SkillLoader.load_dir(path, opts, format_adapter)
     opts = opts or {}
 
-    local entries = orcs.scan_dir({
+    local ok, entries = pcall(orcs.scan_dir, {
         path = path,
         recursive = true,
         exclude = opts.exclude or { ".git", "node_modules", ".DS_Store" },
         include = opts.include,
         max_depth = opts.max_depth or 3,
     })
-    if not entries or #entries == 0 then
+    if not ok or not entries or #entries == 0 then
         return {}, {}
     end
 

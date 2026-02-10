@@ -47,13 +47,34 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
         timeout_ms,
     } = params;
 
-    // Resolve FQN → ChannelId
+    // Resolve FQN → ChannelId (with short-name fallback)
     let channel_id = {
         let m = component_channel_map
             .read()
             .map_err(|e| format!("map lock poisoned: {e}"))?;
-        *m.get(target_fqn)
-            .ok_or_else(|| format!("component not found: {target_fqn}"))?
+        if let Some(&id) = m.get(target_fqn) {
+            id
+        } else if !target_fqn.contains("::") {
+            // Short-name fallback: find key ending with "::<target>"
+            let suffix = format!("::{target_fqn}");
+            let matches: Vec<_> = m
+                .iter()
+                .filter(|(k, _)| k.ends_with(&suffix))
+                .collect();
+            match matches.len() {
+                0 => return Err(format!("component not found: {target_fqn}")),
+                1 => *matches[0].1,
+                _ => {
+                    let names: Vec<&str> = matches.iter().map(|(k, _)| k.as_str()).collect();
+                    return Err(format!(
+                        "ambiguous component name '{target_fqn}', matches: {}",
+                        names.join(", ")
+                    ));
+                }
+            }
+        } else {
+            return Err(format!("component not found: {target_fqn}"));
+        }
     };
 
     // Get ChannelHandle

@@ -223,6 +223,51 @@ local function handle_status(_payload)
     }
 end
 
+-- Apply profile settings (activate/deactivate skills)
+local function handle_profile_apply(payload)
+    if not payload or not payload.settings then
+        return { success = false, error = "payload.settings is required" }
+    end
+    local settings = payload.settings
+    local results = { activated = {}, deactivated = {} }
+
+    if settings.activate then
+        for _, name in ipairs(settings.activate) do
+            local ok, err = catalog:activate(name)
+            if ok then
+                table.insert(results.activated, name)
+            else
+                orcs.log("warn", string.format(
+                    "SkillManager: profile_apply activate '%s' failed: %s",
+                    name, err or "unknown"
+                ))
+            end
+        end
+    end
+
+    if settings.deactivate then
+        for _, name in ipairs(settings.deactivate) do
+            local ok, err = catalog:deactivate(name)
+            if ok then
+                table.insert(results.deactivated, name)
+            else
+                orcs.log("warn", string.format(
+                    "SkillManager: profile_apply deactivate '%s' failed: %s",
+                    name, err or "unknown"
+                ))
+            end
+        end
+    end
+
+    orcs.log("info", string.format(
+        "SkillManager: profile '%s' applied (activated: %d, deactivated: %d)",
+        payload.profile or "?",
+        #results.activated, #results.deactivated
+    ))
+
+    return { success = true, data = results }
+end
+
 -- === Handler dispatch table ===
 local handlers = {
     -- Registry
@@ -249,6 +294,8 @@ local handlers = {
     detect_format = handle_detect_format,
     -- Meta
     status     = handle_status,
+    -- Profile integration
+    profile_apply = handle_profile_apply,
 }
 
 -- === Component Definition ===
