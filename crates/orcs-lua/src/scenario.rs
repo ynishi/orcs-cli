@@ -771,6 +771,7 @@ fn format_lua_value(value: &Value, lua: &Lua) -> String {
 /// Panics with a detailed report if any scenario failed.
 pub fn assert_all_pass(result: &ScenarioFileResult) {
     if !result.all_passed() {
+        // orcs-lint: allow(no-panic) reason="test assertion helper — panic is intentional"
         panic!("\n{}\n", result.report());
     }
 }
