@@ -6,6 +6,8 @@ members = [
     "crates/orcs-event",
     "crates/orcs-auth",
     "crates/orcs-component",
+    # Hook Layer (between SDK and Runtime)
+    "crates/orcs-hook",
     # Runtime Layer (internal)
     "crates/orcs-runtime",
     # Plugin Layer
@@ -28,6 +30,8 @@ orcs-types = { path = "crates/orcs-types" }
 orcs-event = { path = "crates/orcs-event" }
 orcs-auth = { path = "crates/orcs-auth" }
 orcs-component = { path = "crates/orcs-component" }
+# Hook Layer
+orcs-hook = { path = "crates/orcs-hook" }
 # Runtime Layer
 orcs-runtime = { path = "crates/orcs-runtime" }
 # Plugin Layer
