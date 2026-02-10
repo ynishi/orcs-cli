@@ -391,6 +391,14 @@ pub trait Component: Send + Sync {
     ///
     /// Override this method to enable session restoration for your component.
     ///
+    /// # Contract
+    ///
+    /// Implementations **must be idempotent**: calling `restore()` multiple
+    /// times with the same snapshot must produce the same result as calling
+    /// it once. This is a trait-level guarantee that all implementations
+    /// must uphold regardless of internal data structure (e.g., use
+    /// insert/replace, not append).
+    ///
     /// # Default
     ///
     /// Returns `NotSupported` - component does not support snapshots.

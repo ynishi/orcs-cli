@@ -123,7 +123,11 @@ pub trait PermissionChecker: PermissionPolicy {
         grants: &dyn GrantPolicy,
         cmd: &str,
     ) -> CommandCheckResult {
-        if self.can_execute_command(session, cmd) || grants.is_granted(cmd) {
+        let granted = grants.is_granted(cmd).unwrap_or_else(|e| {
+            tracing::error!("grant check failed in default check_command: {e}");
+            false
+        });
+        if self.can_execute_command(session, cmd) || granted {
             CommandCheckResult::Allowed
         } else {
             CommandCheckResult::Denied("permission denied".to_string())
@@ -288,7 +292,11 @@ impl PermissionChecker for DefaultPolicy {
         }
 
         // Step 1: Check dynamic grants (previously approved via HIL)
-        if grants.is_granted(cmd) {
+        let granted = grants.is_granted(cmd).unwrap_or_else(|e| {
+            tracing::error!("grant check failed: {e}");
+            false
+        });
+        if granted {
             tracing::debug!(
                 principal = ?session.principal(),
                 cmd = cmd,
@@ -505,7 +513,9 @@ mod tests {
         let session = standard_session();
         let grants = DefaultGrantStore::new();
 
-        grants.grant(CommandGrant::persistent("rm -rf"));
+        grants
+            .grant(CommandGrant::persistent("rm -rf"))
+            .expect("grant persistent for check_command test");
 
         let result = policy.check_command(&session, &grants, "rm -rf ./temp");
         assert!(result.is_allowed());

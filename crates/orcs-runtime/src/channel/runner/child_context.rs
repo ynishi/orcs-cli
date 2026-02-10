@@ -541,7 +541,9 @@ impl ChildContextImpl {
     /// Called by both the inherent and trait `grant_command()` methods.
     fn grant_command_inner(&self, pattern: &str) {
         if let Some(grants) = &self.grants {
-            grants.grant(CommandGrant::persistent(pattern));
+            if let Err(e) = grants.grant(CommandGrant::persistent(pattern)) {
+                tracing::error!("grant_command failed: {e}");
+            }
         }
 
         // -- AuthOnGrant hook (event) --

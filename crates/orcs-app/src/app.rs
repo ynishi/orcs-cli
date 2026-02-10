@@ -157,6 +157,12 @@ pub struct OrcsApp {
     is_resumed: bool,
     /// Number of components restored (if resumed).
     restored_count: usize,
+    /// Shared grant store for elevated components.
+    ///
+    /// Retained so that `save_session` can snapshot grants and
+    /// `resume` can restore them. Concrete type allows direct
+    /// `restore_grants` call without downcasting.
+    shared_grants: Arc<DefaultGrantStore>,
     /// Component name → ChannelId routing table.
     ///
     /// Used by `@component message` syntax for targeted delivery.
@@ -245,10 +251,21 @@ impl OrcsApp {
     ///
     /// Returns [`AppError::Storage`] if saving fails.
     pub async fn save_session(&mut self) -> Result<(), AppError> {
+        // Save component snapshots
         for (fqn, snapshot) in self.engine.collected_snapshots() {
             self.session
                 .component_snapshots
                 .insert(fqn.clone(), snapshot.clone());
+        }
+        // Save grant state
+        match self.shared_grants.list_grants() {
+            Ok(grants) => {
+                tracing::debug!("Saving {} grant(s) to session", grants.len());
+                self.session.save_grants(grants);
+            }
+            Err(e) => {
+                tracing::error!("Failed to list grants for session save: {e}");
+            }
         }
         self.session.touch();
         self.store.save(&self.session).await?;
@@ -781,7 +798,8 @@ impl OrcsAppBuilder {
         let non_elevated_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
         let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
         // Elevated components share grants; non-elevated get their own store.
-        let shared_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+        // Concrete type so save_session/resume can call restore_grants directly.
+        let shared_grants = Arc::new(DefaultGrantStore::new());
         tracing::info!(
             "Auth context created: principal={:?}, elevated={}",
             elevated_session.principal(),
@@ -809,7 +827,7 @@ impl OrcsAppBuilder {
                 Arc::clone(&non_elevated_session)
             };
             let grants: Arc<dyn GrantPolicy> = if hints.elevated {
-                Arc::clone(&shared_grants)
+                Arc::clone(&shared_grants) as Arc<dyn GrantPolicy>
             } else {
                 Arc::new(DefaultGrantStore::new())
             };
@@ -855,6 +873,20 @@ impl OrcsAppBuilder {
                 tracing::info!("Resuming session: {}", session_id);
                 let asset = store.load(session_id).await?;
                 let count = asset.component_snapshots.len();
+
+                // Restore grants from previous session
+                let saved_grants = asset.granted_commands();
+                if !saved_grants.is_empty() {
+                    match shared_grants.restore_grants(saved_grants) {
+                        Ok(()) => {
+                            tracing::info!("Restored {} grant(s) from session", saved_grants.len());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to restore grants: {e}");
+                        }
+                    }
+                }
+
                 (asset, true, count)
             } else {
                 (SessionAsset::new(), false, 0)
@@ -882,6 +914,7 @@ impl OrcsAppBuilder {
             session,
             is_resumed,
             restored_count,
+            shared_grants,
             component_routes,
         })
     }

@@ -31,6 +31,18 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error returned by grant operations that access internal state.
+#[derive(Debug, Error)]
+pub enum GrantError {
+    /// Internal lock was poisoned (a thread panicked while holding it).
+    #[error("grant store lock poisoned: {context}")]
+    LockPoisoned {
+        /// Which lock was poisoned.
+        context: String,
+    },
+}
 
 /// A dynamic permission grant for a command pattern.
 ///
@@ -102,7 +114,7 @@ pub enum GrantKind {
 /// use orcs_auth::{GrantPolicy, CommandGrant};
 ///
 /// fn check_with_grants(grants: &dyn GrantPolicy, cmd: &str) -> bool {
-///     grants.is_granted(cmd)
+///     grants.is_granted(cmd).unwrap_or(false)
 /// }
 /// ```
 pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
@@ -110,24 +122,58 @@ pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
     ///
     /// After granting, commands matching this pattern will be allowed
     /// by [`is_granted`](Self::is_granted).
-    fn grant(&self, grant: CommandGrant);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn grant(&self, grant: CommandGrant) -> Result<(), GrantError>;
 
     /// Revokes a previously granted pattern.
     ///
     /// The pattern must match exactly (not prefix match).
-    fn revoke(&self, pattern: &str);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn revoke(&self, pattern: &str) -> Result<(), GrantError>;
 
     /// Checks if a command is allowed by any granted pattern.
     ///
     /// Uses **prefix matching**: returns `true` if the command starts
     /// with any granted pattern. One-time grants are consumed on match.
-    fn is_granted(&self, command: &str) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn is_granted(&self, command: &str) -> Result<bool, GrantError>;
 
     /// Clears all grants.
-    fn clear(&self);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn clear(&self) -> Result<(), GrantError>;
 
     /// Returns the number of active grants.
     fn grant_count(&self) -> usize;
+
+    /// Returns all currently active grants.
+    ///
+    /// This is a **trait-level operation** (not an impl-specific convenience).
+    /// Any `GrantPolicy` implementation — whether backed by local memory,
+    /// a remote store, or a database — must be able to enumerate its grants
+    /// so that callers (e.g., session persistence) can work through
+    /// `dyn GrantPolicy` without knowing the concrete type (OCP).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    ///
+    /// # Notes
+    ///
+    /// - OneTime grants are included (they haven't been consumed yet)
+    /// - The order of returned grants is unspecified
+    fn list_grants(&self) -> Result<Vec<CommandGrant>, GrantError>;
 }
 
 #[cfg(test)]

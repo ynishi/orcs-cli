@@ -41,7 +41,9 @@
 //! assert!(hil.is_pending(&id));
 //! ```
 
-use orcs_component::{Component, ComponentError, EventCategory, Status};
+use orcs_component::{
+    Component, ComponentError, ComponentSnapshot, EventCategory, SnapshotError, Status,
+};
 use orcs_event::{Request, Signal, SignalKind, SignalResponse};
 use orcs_types::ComponentId;
 use serde::{Deserialize, Serialize};
@@ -220,6 +222,18 @@ impl HilComponent {
         self.pending.len()
     }
 
+    /// Returns a resolved request by ID.
+    #[must_use]
+    pub fn get_resolved(&self, id: &str) -> Option<&(ApprovalRequest, ApprovalResult)> {
+        self.resolved.get(id)
+    }
+
+    /// Returns the number of resolved requests.
+    #[must_use]
+    pub fn resolved_count(&self) -> usize {
+        self.resolved.len()
+    }
+
     /// Resolves an approval request.
     ///
     /// Returns `Ok(result)` if the request was found and resolved,
@@ -357,6 +371,60 @@ impl Component for HilComponent {
             );
         }
     }
+
+    fn snapshot(&self) -> Result<ComponentSnapshot, SnapshotError> {
+        let state = HilSnapshot::from_component(self);
+        ComponentSnapshot::from_state(self.id.fqn(), &state)
+    }
+
+    fn restore(&mut self, snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {
+        snapshot.validate(&self.id.fqn())?;
+        let state: HilSnapshot = snapshot.to_state()?;
+        state.apply_to(self);
+        Ok(())
+    }
+}
+
+/// Serializable snapshot of HilComponent state.
+///
+/// Only `resolved` entries are persisted (audit trail).
+/// `pending` entries are transient and not meaningful across sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HilSnapshot {
+    /// Resolved approval records (request + result pairs).
+    resolved: Vec<ResolvedRecord>,
+}
+
+/// A single resolved approval record for serialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResolvedRecord {
+    id: String,
+    request: ApprovalRequest,
+    result: ApprovalResult,
+}
+
+impl HilSnapshot {
+    fn from_component(hil: &HilComponent) -> Self {
+        let resolved = hil
+            .resolved
+            .iter()
+            .map(|(id, (req, result))| ResolvedRecord {
+                id: id.clone(),
+                request: req.clone(),
+                result: result.clone(),
+            })
+            .collect();
+        Self { resolved }
+    }
+
+    fn apply_to(&self, hil: &mut HilComponent) {
+        for record in &self.resolved {
+            hil.resolved.insert(
+                record.id.clone(),
+                (record.request.clone(), record.result.clone()),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -401,9 +469,10 @@ mod tests {
         );
         hil.submit(req);
 
-        let result = hil.resolve("req-123", ApprovalResult::Approved);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_approved());
+        let result = hil
+            .resolve("req-123", ApprovalResult::Approved)
+            .expect("resolve approve");
+        assert!(result.is_approved());
         assert!(!hil.is_pending("req-123"));
     }
 
@@ -420,8 +489,8 @@ mod tests {
                 reason: Some("Too dangerous".into()),
             },
         );
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_rejected());
+        let result = result.expect("resolve reject");
+        assert!(result.is_rejected());
     }
 
     #[test]
@@ -511,8 +580,7 @@ mod tests {
         let req = Request::new(EventCategory::Hil, "submit", source, channel, payload);
         let result = hil.on_request(&req);
 
-        assert!(result.is_ok());
-        let response = result.unwrap();
+        let response = result.expect("submit request");
         assert_eq!(response["status"], "pending");
         assert!(hil.is_pending("custom-id"));
     }
@@ -543,11 +611,10 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let result = hil.on_request(&req);
-        assert!(result.is_ok());
-
-        let response = result.unwrap();
-        let pending = response["pending"].as_array().unwrap();
+        let response = hil.on_request(&req).expect("list request");
+        let pending = response["pending"]
+            .as_array()
+            .expect("pending should be array");
         assert_eq!(pending.len(), 2);
     }
 
@@ -571,9 +638,8 @@ mod tests {
             serde_json::json!({ "approval_id": "check-me" }),
         );
 
-        let result = hil.on_request(&req);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap()["status"], "pending");
+        let response = hil.on_request(&req).expect("status request");
+        assert_eq!(response["status"], "pending");
     }
 
     #[test]
@@ -594,7 +660,7 @@ mod tests {
         assert!(!hil.is_pending("req-mod"));
 
         // Check resolved result
-        let (_, result) = hil.resolved.get("req-mod").unwrap();
+        let (_, result) = hil.get_resolved("req-mod").expect("resolved req-mod");
         assert!(result.is_modified());
         assert!(result.is_approved()); // Modified counts as approved
         assert_eq!(result.modified_payload(), Some(&modified_payload));
@@ -632,5 +698,125 @@ mod tests {
         assert!(!modified.is_rejected());
         assert!(modified.is_modified());
         assert!(modified.modified_payload().is_some());
+    }
+
+    // === Snapshot tests ===
+
+    #[test]
+    fn hil_snapshot_empty() {
+        let hil = HilComponent::new();
+        let snapshot = hil.snapshot().expect("snapshot empty hil");
+
+        assert_eq!(snapshot.component_fqn, hil.id().fqn());
+        assert!(!snapshot.is_empty());
+
+        let state: HilSnapshot = snapshot.to_state().expect("deserialize snapshot");
+        assert!(state.resolved.is_empty());
+    }
+
+    #[test]
+    fn hil_snapshot_with_resolved() {
+        let mut hil = HilComponent::new();
+
+        // Submit and resolve some requests
+        hil.submit(ApprovalRequest::with_id(
+            "req-1",
+            "write",
+            "Write file",
+            serde_json::json!({}),
+        ));
+        hil.resolve("req-1", ApprovalResult::Approved)
+            .expect("resolve req-1");
+
+        hil.submit(ApprovalRequest::with_id(
+            "req-2",
+            "bash",
+            "Run command",
+            serde_json::json!({}),
+        ));
+        hil.resolve(
+            "req-2",
+            ApprovalResult::Rejected {
+                reason: Some("dangerous".into()),
+            },
+        )
+        .expect("resolve req-2");
+
+        let snapshot = hil.snapshot().expect("snapshot with resolved");
+        let state: HilSnapshot = snapshot.to_state().expect("deserialize snapshot");
+        assert_eq!(state.resolved.len(), 2);
+    }
+
+    #[test]
+    fn hil_snapshot_roundtrip() {
+        let mut hil = HilComponent::new();
+
+        hil.submit(ApprovalRequest::with_id(
+            "req-1",
+            "write",
+            "Write file",
+            serde_json::json!({}),
+        ));
+        hil.resolve("req-1", ApprovalResult::Approved)
+            .expect("resolve req-1");
+
+        hil.submit(ApprovalRequest::with_id(
+            "req-2",
+            "bash",
+            "Run command",
+            serde_json::json!({}),
+        ));
+        hil.resolve(
+            "req-2",
+            ApprovalResult::Rejected {
+                reason: Some("nope".into()),
+            },
+        )
+        .expect("resolve req-2");
+
+        let snapshot = hil.snapshot().expect("snapshot for roundtrip");
+
+        // Restore into a fresh HilComponent
+        let mut hil2 = HilComponent::new();
+        assert_eq!(hil2.resolved_count(), 0);
+
+        hil2.restore(&snapshot).expect("restore snapshot");
+
+        assert_eq!(hil2.resolved_count(), 2);
+        let (_, result1) = hil2.get_resolved("req-1").expect("get restored req-1");
+        assert!(result1.is_approved());
+        let (_, result2) = hil2.get_resolved("req-2").expect("get restored req-2");
+        assert!(result2.is_rejected());
+    }
+
+    #[test]
+    fn hil_snapshot_pending_not_included() {
+        let mut hil = HilComponent::new();
+
+        // Submit but don't resolve
+        hil.submit(ApprovalRequest::with_id(
+            "pending-1",
+            "write",
+            "Write file",
+            serde_json::json!({}),
+        ));
+        assert!(hil.has_pending());
+
+        let snapshot = hil.snapshot().expect("snapshot with pending");
+        let state: HilSnapshot = snapshot.to_state().expect("deserialize snapshot");
+
+        // Pending should NOT be in snapshot
+        assert!(state.resolved.is_empty());
+    }
+
+    #[test]
+    fn hil_snapshot_fqn_mismatch() {
+        let hil = HilComponent::new();
+        let mut snapshot = hil.snapshot().expect("snapshot for mismatch test");
+        snapshot.component_fqn = "wrong::component".to_string();
+
+        let mut hil2 = HilComponent::new();
+        let err = hil2.restore(&snapshot);
+        assert!(err.is_err());
     }
 }
