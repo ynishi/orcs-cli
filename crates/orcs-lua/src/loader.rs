@@ -381,9 +381,7 @@ mod tests {
 
     #[test]
     fn load_not_found_shows_searched_paths() {
-        let loader = ScriptLoader::new(test_sandbox())
-            .with_path("/nonexistent/path")
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).with_path("/nonexistent/path");
         let result = loader.load("missing");
         let Err(err) = result else {
             panic!("expected error");
@@ -410,9 +408,7 @@ mod tests {
 
     #[test]
     fn load_all_from_crate_scripts_dir() {
-        let loader = ScriptLoader::new(test_sandbox())
-            .with_path(ScriptLoader::crate_scripts_dir())
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
         let result = loader.load_all();
 
         // Should load at least echo.lua
@@ -426,9 +422,7 @@ mod tests {
 
     #[test]
     fn load_all_empty_for_nonexistent_dir() {
-        let loader = ScriptLoader::new(test_sandbox())
-            .with_path("/nonexistent/path")
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).with_path("/nonexistent/path");
         let result = loader.load_all();
 
         // Nonexistent dirs are skipped, not errors
@@ -542,9 +536,7 @@ mod tests {
 
     #[test]
     fn load_skill_manager_as_directory_component() {
-        let loader = ScriptLoader::new(test_sandbox())
-            .with_path(ScriptLoader::crate_scripts_dir())
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
 
         let component = loader
             .load("skill_manager")
@@ -555,9 +547,7 @@ mod tests {
 
     #[test]
     fn list_available_includes_skill_manager_directory() {
-        let loader = ScriptLoader::new(test_sandbox())
-            .with_path(ScriptLoader::crate_scripts_dir())
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
         let names = loader.list_available();
         assert!(
             names.contains(&"skill_manager".to_string()),
@@ -605,9 +595,7 @@ mod tests {
         std::fs::write(comp_dir.join("init.lua"), "return {}").expect("write init.lua");
 
         let sb = test_sandbox();
-        let loader = ScriptLoader::new(sb)
-            .with_path(dir.path())
-            .without_embedded_fallback();
+        let loader = ScriptLoader::new(sb).with_path(dir.path());
         let names = loader.list_available();
         assert!(names.contains(&"dir_comp".to_string()));
     }
