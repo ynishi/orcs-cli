@@ -26,6 +26,7 @@ impl NoUnwrap {
             violations: Vec::new(),
             in_test_context: ctx.is_test,
             in_allowed_context: false,
+            in_main_fn: false,
         };
         visitor.visit_file(ast);
         visitor.violations
@@ -38,6 +39,7 @@ struct Visitor<'a> {
     violations: Vec<Violation>,
     in_test_context: bool,
     in_allowed_context: bool,
+    in_main_fn: bool,
 }
 
 impl<'ast> Visit<'ast> for Visitor<'_> {
@@ -57,6 +59,7 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let prev_test = self.in_test_context;
         let prev_allow = self.in_allowed_context;
+        let prev_main = self.in_main_fn;
 
         if has_test_attr(&node.attrs) {
             self.in_test_context = true;
@@ -64,11 +67,16 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
         if has_allow_attr(&node.attrs, &["clippy::unwrap_used", "clippy::expect_used"]) {
             self.in_allowed_context = true;
         }
+        // fn main() in build scripts / binaries: allow .expect()
+        if node.sig.ident == "main" {
+            self.in_main_fn = true;
+        }
 
         syn::visit::visit_item_fn(self, node);
 
         self.in_test_context = prev_test;
         self.in_allowed_context = prev_allow;
+        self.in_main_fn = prev_main;
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
@@ -94,6 +102,12 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
 
         // テストコンテキストでは expect() は許可、unwrap() のみ禁止
         if self.in_test_context && is_expect {
+            syn::visit::visit_expr_method_call(self, node);
+            return;
+        }
+
+        // fn main() (build.rs / binary entry) では expect() は許可
+        if self.in_main_fn && is_expect {
             syn::visit::visit_expr_method_call(self, node);
             return;
         }
@@ -257,5 +271,30 @@ mod tests {
         let v = check_code("#[tokio::test]\nasync fn test_async() { Some(1).unwrap(); }");
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("test code"));
+    }
+
+    // --- fn main(): expect() 許可, unwrap() 禁止 ---
+
+    #[test]
+    fn main_fn_expect_allowed() {
+        let v = check_code("fn main() { Some(1).expect(\"required\"); }");
+        assert!(v.is_empty(), "expect() in fn main() should be allowed");
+    }
+
+    #[test]
+    fn main_fn_unwrap_forbidden() {
+        let v = check_code("fn main() { Some(1).unwrap(); }");
+        assert_eq!(
+            v.len(),
+            1,
+            "unwrap() in fn main() should still be forbidden"
+        );
+        assert!(v[0].message.contains("production"));
+    }
+
+    #[test]
+    fn non_main_fn_expect_forbidden() {
+        let v = check_code("fn setup() { Some(1).expect(\"msg\"); }");
+        assert_eq!(v.len(), 1, "expect() in non-main fn should be forbidden");
     }
 }

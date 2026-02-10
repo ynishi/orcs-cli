@@ -75,12 +75,6 @@ impl LuaEnv {
         self
     }
 
-    /// No-op retained for API compatibility (embedded fallback has been removed).
-    #[must_use]
-    pub fn without_embedded(self) -> Self {
-        self
-    }
-
     /// Returns configured search paths.
     #[must_use]
     pub fn search_paths(&self) -> &[PathBuf] {
@@ -388,9 +382,9 @@ mod tests {
 
     #[test]
     fn require_filesystem_module() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create temp dir");
         let lib_dir = dir.path().join("lib");
-        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::create_dir_all(&lib_dir).expect("create lib dir");
         std::fs::write(
             lib_dir.join("helper.lua"),
             r#"
@@ -399,12 +393,10 @@ mod tests {
             return M
             "#,
         )
-        .unwrap();
+        .expect("write helper.lua");
 
         let sandbox = Arc::new(ProjectSandbox::new(dir.path()).expect("sandbox for tempdir"));
-        let env = LuaEnv::new(sandbox)
-            .with_search_path(dir.path())
-            .without_embedded();
+        let env = LuaEnv::new(sandbox).with_search_path(dir.path());
 
         let lua = env.create_lua().expect("create_lua");
 
@@ -422,15 +414,14 @@ mod tests {
 
     #[test]
     fn require_filesystem_init_lua() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create temp dir");
         let mod_dir = dir.path().join("mymod");
-        std::fs::create_dir_all(&mod_dir).unwrap();
-        std::fs::write(mod_dir.join("init.lua"), r#"return { name = "mymod" }"#).unwrap();
+        std::fs::create_dir_all(&mod_dir).expect("create mymod dir");
+        std::fs::write(mod_dir.join("init.lua"), r#"return { name = "mymod" }"#)
+            .expect("write init.lua");
 
         let sandbox = Arc::new(ProjectSandbox::new(dir.path()).expect("sandbox"));
-        let env = LuaEnv::new(sandbox)
-            .with_search_path(dir.path())
-            .without_embedded();
+        let env = LuaEnv::new(sandbox).with_search_path(dir.path());
 
         let lua = env.create_lua().expect("create_lua");
 
@@ -448,7 +439,7 @@ mod tests {
 
     #[test]
     fn require_filesystem_is_cached() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create temp dir");
         std::fs::write(
             dir.path().join("counter.lua"),
             r#"
@@ -456,12 +447,10 @@ mod tests {
             return { count = _counter }
             "#,
         )
-        .unwrap();
+        .expect("write counter.lua");
 
         let sandbox = Arc::new(ProjectSandbox::new(dir.path()).expect("sandbox"));
-        let env = LuaEnv::new(sandbox)
-            .with_search_path(dir.path())
-            .without_embedded();
+        let env = LuaEnv::new(sandbox).with_search_path(dir.path());
 
         let lua = env.create_lua().expect("create_lua");
 
@@ -484,26 +473,25 @@ mod tests {
 
     #[test]
     fn search_path_priority_first_wins() {
-        let dir1 = tempfile::tempdir().unwrap();
-        let dir2 = tempfile::tempdir().unwrap();
+        let dir1 = tempfile::tempdir().expect("create temp dir 1");
+        let dir2 = tempfile::tempdir().expect("create temp dir 2");
 
         std::fs::write(
             dir1.path().join("shared.lua"),
             r#"return { source = "dir1" }"#,
         )
-        .unwrap();
+        .expect("write shared.lua to dir1");
         std::fs::write(
             dir2.path().join("shared.lua"),
             r#"return { source = "dir2" }"#,
         )
-        .unwrap();
+        .expect("write shared.lua to dir2");
 
         // dir1 has higher priority (added first)
         let sandbox = Arc::new(ProjectSandbox::new(dir1.path()).expect("sandbox"));
         let env = LuaEnv::new(sandbox)
             .with_search_path(dir1.path())
-            .with_search_path(dir2.path())
-            .without_embedded();
+            .with_search_path(dir2.path());
 
         let lua = env.create_lua().expect("create_lua");
 
@@ -549,11 +537,9 @@ mod tests {
 
     #[test]
     fn require_error_lists_searched_paths() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create temp dir");
         let sandbox = Arc::new(ProjectSandbox::new(dir.path()).expect("sandbox"));
-        let env = LuaEnv::new(sandbox)
-            .with_search_path(dir.path())
-            .without_embedded();
+        let env = LuaEnv::new(sandbox).with_search_path(dir.path());
 
         let lua = env.create_lua().expect("create_lua");
 
