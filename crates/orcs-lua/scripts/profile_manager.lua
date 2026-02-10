@@ -266,6 +266,108 @@ local function handle_reload(_payload)
     }
 end
 
+--- Format a profile list response for display.
+local function format_list(resp)
+    if not resp.success then
+        return "[profile] Error: " .. (resp.error or "unknown")
+    end
+    local lines = { "[profile] Available profiles:" }
+    if resp.data and #resp.data > 0 then
+        for _, entry in ipairs(resp.data) do
+            local marker = (resp.active == entry.name) and " *" or "  "
+            local desc = entry.description ~= "" and (" - " .. entry.description) or ""
+            table.insert(lines, string.format("%s %s%s", marker, entry.name, desc))
+        end
+    else
+        table.insert(lines, "  (none)")
+    end
+    return table.concat(lines, "\n")
+end
+
+--- Format a current-profile response for display.
+local function format_current(resp)
+    if not resp.success then
+        return "[profile] Error: " .. (resp.error or "unknown")
+    end
+    if resp.data and resp.data.active then
+        return string.format("[profile] Active: %s", resp.data.name)
+    end
+    return "[profile] No active profile"
+end
+
+--- Format a use-profile response for display.
+local function format_use(resp)
+    if not resp.success then
+        return "[profile] Error: " .. (resp.error or "unknown")
+    end
+    local d = resp.data or {}
+    local parts = { string.format("[profile] Switched to '%s'", d.name or "?") }
+    if d.component_results then
+        for _, r in ipairs(d.component_results) do
+            table.insert(parts, string.format("  @%s: %s", r.target, r.status))
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
+--- Handle free-text input from @profile_manager routing.
+--- Parses "op [arg]" and dispatches to the matching handler.
+local function handle_input(payload)
+    local msg = payload
+    if type(msg) == "table" then
+        msg = msg.message or ""
+    end
+    if type(msg) ~= "string" or msg == "" then
+        orcs.output("[profile] Usage: list | current | use <name> | get <name> | reload")
+        return { success = true }
+    end
+
+    local op, arg = msg:match("^(%S+)%s*(.*)")
+    if not op then
+        orcs.output("[profile] Unknown command: " .. msg)
+        return { success = false, error = "unknown command: " .. msg }
+    end
+
+    -- Dispatch table (input excluded to avoid loop)
+    local dispatch = {
+        list    = handle_list,
+        current = handle_current,
+        ["use"] = handle_use,
+        get     = handle_get,
+        reload  = handle_reload,
+    }
+
+    local formatters = {
+        list    = format_list,
+        current = format_current,
+        ["use"] = format_use,
+    }
+
+    local target = dispatch[op]
+    if target then
+        local cmd_payload = {}
+        if arg and arg ~= "" then
+            cmd_payload.name = arg:match("^%s*(.-)%s*$") -- trim
+        end
+        local resp = target(cmd_payload)
+
+        -- Display formatted output
+        local formatter = formatters[op]
+        if formatter then
+            orcs.output(formatter(resp))
+        elseif resp.success then
+            orcs.output("[profile] OK: " .. orcs.json_encode(resp.data or {}))
+        else
+            orcs.output("[profile] Error: " .. (resp.error or "unknown"))
+        end
+
+        return resp
+    end
+
+    orcs.output("[profile] Unknown operation: " .. op)
+    return { success = false, error = "unknown operation: " .. op }
+end
+
 -- === Handler dispatch table ===
 local handlers = {
     list    = handle_list,
@@ -273,6 +375,7 @@ local handlers = {
     use     = handle_use,
     get     = handle_get,
     reload  = handle_reload,
+    input   = handle_input,
 }
 
 -- === Component Definition ===
@@ -281,6 +384,7 @@ return {
     namespace = "profile",
     subscriptions = { "Extension" },
     elevated = true,
+    output_to_io = true,
 
     init = function()
         -- Auto-discover available profiles
