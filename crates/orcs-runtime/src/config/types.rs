@@ -44,6 +44,9 @@ pub struct OrcsConfig {
     /// Script configuration.
     pub scripts: ScriptsConfig,
 
+    /// Component loading configuration.
+    pub components: ComponentsConfig,
+
     /// Hooks configuration.
     pub hooks: HooksConfig,
 }
@@ -90,6 +93,7 @@ impl OrcsConfig {
         self.paths.merge(&other.paths);
         self.ui.merge(&other.ui);
         self.scripts.merge(&other.scripts);
+        self.components.merge(&other.components);
         self.hooks.merge(&other.hooks);
     }
 }
@@ -294,6 +298,84 @@ impl ScriptsConfig {
         // auto_load: true overrides false
         if other.auto_load {
             self.auto_load = true;
+        }
+    }
+}
+
+/// Component loading configuration.
+///
+/// Controls which components are loaded at startup and where to find them.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [components]
+/// load = ["agent_mgr", "skill_manager", "profile_manager", "shell", "tool"]
+/// paths = ["~/.orcs/components"]
+/// builtins_dir = "~/.orcs/builtins"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ComponentsConfig {
+    /// Component names to load at startup.
+    ///
+    /// Each name is resolved via `ScriptLoader` from `paths` (user-first)
+    /// then from the versioned builtins directory.
+    pub load: Vec<String>,
+
+    /// User component search directories (priority order, searched first).
+    ///
+    /// Supports `~` expansion.
+    pub paths: Vec<PathBuf>,
+
+    /// Directory for builtin scripts (expanded from embedded on first run).
+    ///
+    /// Supports `~` expansion. Defaults to `~/.orcs/builtins`.
+    pub builtins_dir: PathBuf,
+}
+
+impl Default for ComponentsConfig {
+    fn default() -> Self {
+        Self {
+            load: vec![
+                "agent_mgr".into(),
+                "skill_manager".into(),
+                "profile_manager".into(),
+                "shell".into(),
+                "tool".into(),
+            ],
+            paths: vec![PathBuf::from("~/.orcs/components")],
+            builtins_dir: PathBuf::from("~/.orcs/builtins"),
+        }
+    }
+}
+
+impl ComponentsConfig {
+    /// Resolves builtins_dir with tilde expansion.
+    #[must_use]
+    pub fn resolved_builtins_dir(&self) -> PathBuf {
+        expand_tilde(&self.builtins_dir)
+    }
+
+    /// Resolves user component paths with tilde expansion.
+    ///
+    /// Non-existent directories are **included** (they may be created later).
+    #[must_use]
+    pub fn resolved_paths(&self) -> Vec<PathBuf> {
+        self.paths.iter().map(|p| expand_tilde(p)).collect()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        let default = Self::default();
+
+        if other.load != default.load {
+            self.load = other.load.clone();
+        }
+        if other.paths != default.paths {
+            self.paths = other.paths.clone();
+        }
+        if other.builtins_dir != default.builtins_dir {
+            self.builtins_dir = other.builtins_dir.clone();
         }
     }
 }
