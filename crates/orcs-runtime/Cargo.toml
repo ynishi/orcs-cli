@@ -10,6 +10,7 @@ orcs-types = { workspace = true }
 orcs-event = { workspace = true }
 orcs-auth = { workspace = true }
 orcs-component = { workspace = true }
+orcs-hook = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

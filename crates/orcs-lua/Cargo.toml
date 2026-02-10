@@ -12,6 +12,7 @@ mlua = { version = "0.10", features = ["lua54", "send", "async", "serialize"] }
 # Internal crates
 orcs-component = { path = "../orcs-component" }
 orcs-event = { path = "../orcs-event" }
+orcs-hook = { path = "../orcs-hook" }
 orcs-runtime = { path = "../orcs-runtime" }
 orcs-types = { path = "../orcs-types" }
 

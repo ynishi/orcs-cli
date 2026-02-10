@@ -98,6 +98,7 @@ mod child;
 mod component;
 pub mod embedded;
 mod error;
+pub mod hook_helpers;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;
@@ -110,6 +111,10 @@ mod types;
 pub use child::LuaChild;
 pub use component::{LuaComponent, LuaComponentLoader};
 pub use error::LuaError;
+pub use hook_helpers::{
+    load_hooks_from_config, register_hook_function, register_hook_stub, register_unhook_function,
+    HookLoadError, HookLoadResult, LuaHook,
+};
 pub use loader::{LoadResult, LoadWarning, ScriptLoader};
 pub use lua_env::LuaEnv;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};

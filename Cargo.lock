@@ -762,6 +762,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orcs-hook"
+version = "0.1.0"
+dependencies = [
+ "orcs-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "orcs-lua"
 version = "0.1.0"
 dependencies = [
@@ -770,6 +783,7 @@ dependencies = [
  "mlua",
  "orcs-component",
  "orcs-event",
+ "orcs-hook",
  "orcs-runtime",
  "orcs-types",
  "regex",
@@ -793,6 +807,7 @@ dependencies = [
  "orcs-auth",
  "orcs-component",
  "orcs-event",
+ "orcs-hook",
  "orcs-types",
  "serde",
  "serde_json",

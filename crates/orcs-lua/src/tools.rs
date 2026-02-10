@@ -23,7 +23,7 @@
 //! injected at registration time — no implicit `current_dir()` dependency.
 
 use crate::error::LuaError;
-use mlua::{Lua, LuaSerdeExt, Table};
+use mlua::{Function, Lua, LuaSerdeExt, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
 use std::path::Path;
 use std::sync::Arc;
@@ -912,6 +912,175 @@ fn frontmatter_result_to_lua(lua: &Lua, result: FrontmatterResult) -> Result<Tab
     Ok(t)
 }
 
+// ─── Tool Hook Wrapping ────────────────────────────────────────────
+
+/// Context for tool hook dispatch, stored in Lua `app_data`.
+///
+/// Set by `LuaComponent::set_child_context()` when a hook registry
+/// is available. The wrapper closures (installed by
+/// [`wrap_tools_with_hooks`]) check this at call time.
+pub(crate) struct ToolHookContext {
+    pub(crate) registry: orcs_hook::SharedHookRegistry,
+    pub(crate) component_id: orcs_types::ComponentId,
+}
+
+/// Names of I/O tools that receive hook wrapping.
+const HOOKABLE_TOOLS: &[&str] = &[
+    "read",
+    "write",
+    "grep",
+    "glob",
+    "mkdir",
+    "remove",
+    "mv",
+    "scan_dir",
+    "parse_frontmatter",
+];
+
+/// Wraps registered tool functions with `ToolPreExecute`/`ToolPostExecute`
+/// hook dispatch.
+///
+/// For each tool in [`HOOKABLE_TOOLS`]:
+/// 1. Saves the original function reference
+/// 2. Replaces it with a Lua wrapper that dispatches hooks before/after
+///
+/// # Pre-hook semantics
+///
+/// - `Abort { reason }` → returns `{ ok = false, error = "blocked by hook: ..." }`
+/// - `Skip(value)` → returns the skip value directly (short-circuit)
+/// - `Continue` → proceeds to the original tool
+///
+/// # Post-hook semantics
+///
+/// - `Replace(value)` → returns the replacement value
+/// - `Continue` → returns the original result unchanged
+///
+/// # Prerequisites
+///
+/// Must be called after `register_tool_functions()`.
+/// `ToolHookContext` must be set in `lua.set_app_data()` before tools
+/// are called.
+///
+/// # Errors
+///
+/// Returns error if Lua function creation or table operations fail.
+pub(crate) fn wrap_tools_with_hooks(lua: &Lua) -> Result<(), LuaError> {
+    let orcs_table: Table = lua.globals().get("orcs")?;
+
+    // Register the internal Rust dispatch helper.
+    // Lua wrappers call this to dispatch ToolPreExecute / ToolPostExecute.
+    let dispatch_fn = lua.create_function(
+        |lua, (phase, tool_name, args_val): (String, String, mlua::Value)| {
+            // Extract registry + component_id, then drop the Ref
+            let (registry, component_id) = {
+                let ctx = lua.app_data_ref::<ToolHookContext>();
+                let Some(ctx) = ctx else {
+                    return Ok(mlua::Value::Nil);
+                };
+                (
+                    std::sync::Arc::clone(&ctx.registry),
+                    ctx.component_id.clone(),
+                )
+            };
+
+            let point = match phase.as_str() {
+                "pre" => orcs_hook::HookPoint::ToolPreExecute,
+                "post" => orcs_hook::HookPoint::ToolPostExecute,
+                _ => return Ok(mlua::Value::Nil),
+            };
+
+            let args_json: serde_json::Value =
+                lua.from_value(args_val).unwrap_or(serde_json::Value::Null);
+
+            let payload = serde_json::json!({
+                "tool": tool_name,
+                "args": args_json,
+            });
+
+            // For post-hooks, clone the payload to detect Replace
+            // (the registry converts Replace → Continue with modified payload)
+            let original_payload = if phase == "post" {
+                Some(payload.clone())
+            } else {
+                None
+            };
+
+            let hook_ctx = orcs_hook::HookContext::new(
+                point,
+                component_id.clone(),
+                orcs_types::ChannelId::new(),
+                orcs_types::Principal::System,
+                0,
+                payload,
+            );
+
+            let action = {
+                let guard = registry.read().unwrap_or_else(|poisoned| {
+                    tracing::warn!("hook registry lock poisoned, using inner value");
+                    poisoned.into_inner()
+                });
+                guard.dispatch(point, &component_id, None, hook_ctx)
+            };
+
+            match action {
+                orcs_hook::HookAction::Abort { reason } => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("error", format!("blocked by hook: {reason}"))?;
+                    Ok(mlua::Value::Table(result))
+                }
+                orcs_hook::HookAction::Skip(val) | orcs_hook::HookAction::Replace(val) => {
+                    lua.to_value(&val)
+                }
+                orcs_hook::HookAction::Continue(ctx) => {
+                    // For post-hooks, the registry converts Replace to
+                    // Continue(modified_ctx). Detect this by comparing payloads.
+                    if let Some(original) = original_payload {
+                        if ctx.payload != original {
+                            lua.to_value(&ctx.payload)
+                        } else {
+                            Ok(mlua::Value::Nil)
+                        }
+                    } else {
+                        Ok(mlua::Value::Nil)
+                    }
+                }
+            }
+        },
+    )?;
+    orcs_table.set("_dispatch_tool_hook", dispatch_fn)?;
+
+    // Wrap each hookable tool with Lua-level pre/post dispatch.
+    for &name in HOOKABLE_TOOLS {
+        if orcs_table.get::<Function>(name).is_err() {
+            continue;
+        }
+
+        let wrap_code = format!(
+            r#"
+            do
+                local _orig = orcs.{name}
+                orcs.{name} = function(...)
+                    local pre = orcs._dispatch_tool_hook("pre", "{name}", {{...}})
+                    if pre ~= nil then return pre end
+                    local result = _orig(...)
+                    local post = orcs._dispatch_tool_hook("post", "{name}", result)
+                    if post ~= nil then return post end
+                    return result
+                end
+            end
+            "#,
+        );
+
+        lua.load(&wrap_code)
+            .exec()
+            .map_err(|e| LuaError::InvalidScript(format!("failed to wrap tool '{name}': {e}")))?;
+    }
+
+    tracing::debug!("Wrapped tools with hook dispatch: {:?}", HOOKABLE_TOOLS);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1369,6 +1538,323 @@ mod tests {
                 result.is_err(),
                 "read via symlink escape should be rejected"
             );
+        }
+    }
+
+    // ─── Tool Hook Tests ────────────────────────────────────────────
+
+    mod tool_hook_tests {
+        use super::*;
+        use orcs_hook::{HookPoint, HookRegistry};
+        use orcs_types::ComponentId;
+
+        fn setup_lua_with_hooks() -> (Lua, orcs_hook::SharedHookRegistry, tempfile::TempDir) {
+            let td = tempfile::tempdir().unwrap();
+            let root = td.path().canonicalize().unwrap();
+            let sandbox: Arc<dyn SandboxPolicy> = Arc::new(ProjectSandbox::new(&root).unwrap());
+
+            let lua = Lua::new();
+            let orcs = lua.create_table().unwrap();
+            lua.globals().set("orcs", orcs).unwrap();
+            register_tool_functions(&lua, sandbox).unwrap();
+
+            let registry = std::sync::Arc::new(std::sync::RwLock::new(HookRegistry::new()));
+            let comp_id = ComponentId::builtin("test");
+
+            lua.set_app_data(ToolHookContext {
+                registry: std::sync::Arc::clone(&registry),
+                component_id: comp_id,
+            });
+
+            wrap_tools_with_hooks(&lua).unwrap();
+
+            (lua, registry, td)
+        }
+
+        #[test]
+        fn dispatch_function_registered() {
+            let (lua, _registry, _td) = setup_lua_with_hooks();
+            let orcs: Table = lua.globals().get("orcs").unwrap();
+            assert!(orcs.get::<Function>("_dispatch_tool_hook").is_ok());
+        }
+
+        #[test]
+        fn tools_work_normally_without_hooks() {
+            let (lua, _registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("test.txt"), "hello").unwrap();
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("test.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "hello");
+        }
+
+        #[test]
+        fn pre_hook_abort_blocks_read() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("secret.txt"), "top secret").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
+                    "block-read",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                    "access denied by policy",
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("secret.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(!result.get::<bool>("ok").unwrap());
+            let error = result.get::<String>("error").unwrap();
+            assert!(
+                error.contains("blocked by hook"),
+                "expected 'blocked by hook', got: {error}"
+            );
+            assert!(error.contains("access denied by policy"));
+        }
+
+        #[test]
+        fn pre_hook_skip_returns_custom_value() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("real.txt"), "real content").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::skipper(
+                    "skip-read",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                    serde_json::json!({"ok": true, "content": "cached", "size": 6}),
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("real.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "cached");
+        }
+
+        #[test]
+        fn pre_hook_continue_allows_tool() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("allowed.txt"), "allowed content").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::pass_through(
+                    "pass-read",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("allowed.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "allowed content");
+        }
+
+        #[test]
+        fn post_hook_replace_changes_result() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("original.txt"), "original").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::replacer(
+                    "replace-result",
+                    "*::*",
+                    HookPoint::ToolPostExecute,
+                    serde_json::json!({"ok": true, "content": "replaced", "size": 8}),
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("original.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "replaced");
+        }
+
+        #[test]
+        fn post_hook_continue_preserves_result() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("keep.txt"), "keep this").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::pass_through(
+                    "observe-only",
+                    "*::*",
+                    HookPoint::ToolPostExecute,
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("keep.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "keep this");
+        }
+
+        #[test]
+        fn pre_hook_abort_blocks_write() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
+                    "block-write",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                    "writes disabled",
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.write("{}", "evil")"#,
+                root.join("blocked.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(!result.get::<bool>("ok").unwrap());
+            let error = result.get::<String>("error").unwrap();
+            assert!(error.contains("writes disabled"));
+
+            // Verify file was NOT created
+            assert!(!root.join("blocked.txt").exists());
+        }
+
+        #[test]
+        fn hooks_receive_tool_name_in_payload() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("check.txt"), "data").unwrap();
+
+            // Use a modifier hook that only aborts for "write" tool
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::modifier(
+                    "check-tool",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                    |ctx| {
+                        // Verify the payload contains the tool name
+                        assert!(ctx.payload.get("tool").is_some());
+                        assert!(ctx.payload.get("args").is_some());
+                    },
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("check.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+        }
+
+        #[test]
+        fn no_context_tools_work_normally() {
+            // Setup WITHOUT ToolHookContext in app_data
+            let td = tempfile::tempdir().unwrap();
+            let root = td.path().canonicalize().unwrap();
+            let sandbox: Arc<dyn SandboxPolicy> = Arc::new(ProjectSandbox::new(&root).unwrap());
+
+            let lua = Lua::new();
+            let orcs = lua.create_table().unwrap();
+            lua.globals().set("orcs", orcs).unwrap();
+            register_tool_functions(&lua, sandbox).unwrap();
+
+            // Wrap but don't set app_data — dispatch should no-op
+            wrap_tools_with_hooks(&lua).unwrap();
+
+            fs::write(root.join("nocontext.txt"), "works").unwrap();
+
+            let code = format!(
+                r#"return orcs.read("{}")"#,
+                root.join("nocontext.txt")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(result.get::<bool>("ok").unwrap());
+            assert_eq!(result.get::<String>("content").unwrap(), "works");
+        }
+
+        #[test]
+        fn pre_hook_abort_blocks_glob() {
+            let (lua, registry, td) = setup_lua_with_hooks();
+            let root = td.path().canonicalize().unwrap();
+            fs::write(root.join("a.txt"), "").unwrap();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
+                    "block-glob",
+                    "*::*",
+                    HookPoint::ToolPreExecute,
+                    "glob not allowed",
+                )));
+            }
+
+            let code = format!(
+                r#"return orcs.glob("*.txt", "{}")"#,
+                root.display().to_string().replace('\\', "\\\\")
+            );
+            let result: Table = lua.load(&code).eval().unwrap();
+            assert!(!result.get::<bool>("ok").unwrap());
+            let error = result.get::<String>("error").unwrap();
+            assert!(error.contains("glob not allowed"));
         }
     }
 

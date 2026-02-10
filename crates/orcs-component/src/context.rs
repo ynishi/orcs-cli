@@ -543,6 +543,19 @@ pub trait ChildContext: Send + Sync + Debug {
         Err("request not supported by this context".into())
     }
 
+    /// Returns a type-erased runtime extension by key.
+    ///
+    /// Enables runtime-layer constructs (e.g., hook registries) to pass
+    /// through the Plugin SDK layer without introducing layer-breaking
+    /// dependencies.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `None` (no extensions available).
+    fn extension(&self, _key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;
 }

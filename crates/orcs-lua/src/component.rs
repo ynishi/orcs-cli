@@ -372,14 +372,52 @@ impl LuaComponent {
     ///
     /// * `ctx` - The child context
     pub fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        self.install_child_context(ctx);
+    }
+
+    /// Shared implementation for `set_child_context` (inherent + trait).
+    ///
+    /// Extracts hook registry, registers ctx functions, and wires up hooks.
+    fn install_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        let hook_registry = ctx
+            .extension("hook_registry")
+            .and_then(|any| any.downcast::<orcs_hook::SharedHookRegistry>().ok())
+            .map(|boxed| *boxed);
+
         let ctx_arc = Arc::new(Mutex::new(ctx));
         self.child_context = Some(Arc::clone(&ctx_arc));
 
-        // Register child context functions in Lua
-        if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
-                tracing::warn!("Failed to register child context functions: {}", e);
-            }
+        let Ok(lua) = self.lua.lock() else {
+            tracing::error!(component = %self.id.fqn(), "Lua mutex poisoned in install_child_context");
+            return;
+        };
+
+        if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
+            tracing::warn!("Failed to register child context functions: {}", e);
+        }
+
+        let Some(registry) = hook_registry else {
+            return;
+        };
+
+        if let Err(e) =
+            crate::hook_helpers::register_hook_function(&lua, registry.clone(), self.id.clone())
+        {
+            tracing::warn!("Failed to register orcs.hook(): {}", e);
+        } else {
+            tracing::debug!(component = %self.id.fqn(), "orcs.hook() registered");
+        }
+
+        if let Err(e) = crate::hook_helpers::register_unhook_function(&lua, registry.clone()) {
+            tracing::warn!("Failed to register orcs.unhook(): {}", e);
+        }
+
+        lua.set_app_data(crate::tools::ToolHookContext {
+            registry,
+            component_id: self.id.clone(),
+        });
+        if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
+            tracing::warn!("Failed to wrap tools with hooks: {}", e);
         }
     }
 }
@@ -537,15 +575,7 @@ impl Component for LuaComponent {
     }
 
     fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
-        let ctx_arc = Arc::new(Mutex::new(ctx));
-        self.child_context = Some(Arc::clone(&ctx_arc));
-
-        // Register child context functions in Lua
-        if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
-                tracing::warn!("Failed to register child context functions: {}", e);
-            }
-        }
+        self.install_child_context(ctx);
     }
 }
 

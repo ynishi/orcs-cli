@@ -15,6 +15,7 @@ use orcs_component::{
     ChildResult, Component, ComponentLoader, RunError, SpawnError,
 };
 use orcs_event::{EventCategory, Signal};
+use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,10 @@ pub struct ChildContextImpl {
     component_channel_map: Option<SharedComponentChannelMap>,
     /// Channel ID of the owning ChannelRunner (for RPC source_channel).
     channel_id: Option<ChannelId>,
+
+    // -- Hook support --
+    /// Shared hook registry (propagated to child runners).
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 /// Trait for loading Lua children from config.
@@ -110,6 +115,7 @@ impl ChildContextImpl {
             shared_handles: None,
             component_channel_map: None,
             channel_id: None,
+            hook_registry: None,
         }
     }
 
@@ -223,7 +229,37 @@ impl ChildContextImpl {
     /// ```
     #[must_use]
     pub fn check_command(&self, cmd: &str) -> CommandCheckResult {
-        match (&self.session, &self.checker) {
+        // -- AuthPreCheck hook --
+        let pre_payload = serde_json::json!({ "command": cmd });
+        let pre_action = self.dispatch_hook(orcs_hook::HookPoint::AuthPreCheck, pre_payload);
+
+        match &pre_action {
+            orcs_hook::HookAction::Abort { reason } => {
+                return CommandCheckResult::Denied(reason.clone());
+            }
+            orcs_hook::HookAction::Skip(value) => {
+                // Skip with {"allowed": true} → Allowed, otherwise → Denied
+                let allowed = value
+                    .as_object()
+                    .and_then(|o| o.get("allowed"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(value.as_bool().unwrap_or(true));
+                if allowed {
+                    return CommandCheckResult::Allowed;
+                }
+                let reason = value
+                    .as_object()
+                    .and_then(|o| o.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("denied by auth pre-check hook")
+                    .to_string();
+                return CommandCheckResult::Denied(reason);
+            }
+            _ => {} // Continue — proceed with normal check
+        }
+
+        // Normal permission check
+        let result = match (&self.session, &self.checker) {
             (Some(session), Some(checker)) => {
                 // grants 未注入時は空 store をfallback（grant_command が効かない）
                 let empty;
@@ -237,7 +273,20 @@ impl ChildContextImpl {
                 checker.check_command(session, grants, cmd)
             }
             _ => CommandCheckResult::Allowed, // Permissive mode when not configured
-        }
+        };
+
+        // -- AuthPostCheck hook (observe-only) --
+        let post_payload = serde_json::json!({
+            "command": cmd,
+            "result": match &result {
+                CommandCheckResult::Allowed => "allowed",
+                CommandCheckResult::Denied(_) => "denied",
+                CommandCheckResult::RequiresApproval { .. } => "requires_approval",
+            },
+        });
+        let _ = self.dispatch_hook(orcs_hook::HookPoint::AuthPostCheck, post_payload);
+
+        result
     }
 
     /// Grants a command pattern for future execution.
@@ -247,9 +296,7 @@ impl ChildContextImpl {
     ///
     /// Does nothing if no grants store is configured.
     pub fn grant_command(&self, pattern: &str) {
-        if let Some(grants) = &self.grants {
-            grants.grant(CommandGrant::persistent(pattern));
-        }
+        self.grant_command_inner(pattern);
     }
 
     /// Checks if child spawning is allowed.
@@ -315,6 +362,13 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the shared hook registry for propagation to child runners.
+    #[must_use]
+    pub fn with_hook_registry(mut self, registry: SharedHookRegistry) -> Self {
+        self.hook_registry = Some(registry);
+        self
+    }
+
     /// Returns true if runner spawning is enabled.
     #[must_use]
     pub fn can_spawn_runner(&self) -> bool {
@@ -376,6 +430,7 @@ impl ChildContextImpl {
         let session_clone = self.session.clone();
         let checker_clone = self.checker.clone();
         let grants_clone = self.grants.clone();
+        let hook_registry_clone = self.hook_registry.clone();
 
         // Spawn the runner in a new task
         tokio::spawn(async move {
@@ -399,6 +454,10 @@ impl ChildContextImpl {
             }
             if let Some(grants) = grants_clone {
                 builder = builder.with_grants(grants);
+            }
+            // Propagate hook registry to child runner
+            if let Some(registry) = hook_registry_clone {
+                builder = builder.with_hook_registry(registry);
             }
 
             let (runner, _handle) = builder.build();
@@ -439,7 +498,58 @@ impl ChildContextImpl {
         ) {
             ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m), ch);
         }
+        if let Some(reg) = &self.hook_registry {
+            ctx = ctx.with_hook_registry(Arc::clone(reg));
+        }
         Box::new(ctx)
+    }
+
+    /// Dispatches a hook through the shared hook registry.
+    ///
+    /// Returns `HookAction::Continue` with the original context when no
+    /// registry is configured.
+    fn dispatch_hook(
+        &self,
+        point: orcs_hook::HookPoint,
+        payload: serde_json::Value,
+    ) -> orcs_hook::HookAction {
+        let component_id = ComponentId::child(&self.parent_id);
+        let channel_id = self.channel_id.unwrap_or_else(ChannelId::new);
+
+        let ctx = orcs_hook::HookContext::new(
+            point,
+            component_id.clone(),
+            channel_id,
+            orcs_types::Principal::System,
+            0,
+            payload,
+        );
+
+        let Some(registry) = &self.hook_registry else {
+            return orcs_hook::HookAction::Continue(Box::new(ctx));
+        };
+
+        let guard = registry.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("hook registry lock poisoned, using inner value");
+            poisoned.into_inner()
+        });
+        guard.dispatch(point, &component_id, None, ctx)
+    }
+
+    /// Inner grant_command with hook dispatch.
+    ///
+    /// Called by both the inherent and trait `grant_command()` methods.
+    fn grant_command_inner(&self, pattern: &str) {
+        if let Some(grants) = &self.grants {
+            grants.grant(CommandGrant::persistent(pattern));
+        }
+
+        // -- AuthOnGrant hook (event) --
+        let payload = serde_json::json!({
+            "pattern": pattern,
+            "granted_by": self.parent_id,
+        });
+        let _ = self.dispatch_hook(orcs_hook::HookPoint::AuthOnGrant, payload);
     }
 
     /// Creates an output event.
@@ -580,37 +690,23 @@ impl ChildContext for ChildContextImpl {
 
     fn check_command_permission(&self, cmd: &str) -> orcs_component::CommandPermission {
         use orcs_component::CommandPermission;
-        match (&self.session, &self.checker) {
-            (Some(session), Some(checker)) => {
-                let empty;
-                let grants: &dyn GrantPolicy = match &self.grants {
-                    Some(g) => g.as_ref(),
-                    None => {
-                        empty = crate::auth::DefaultGrantStore::new();
-                        &empty
-                    }
-                };
-                let result = checker.check_command(session, grants, cmd);
-                match result {
-                    CommandCheckResult::Allowed => CommandPermission::Allowed,
-                    CommandCheckResult::Denied(reason) => CommandPermission::Denied(reason),
-                    CommandCheckResult::RequiresApproval {
-                        request,
-                        grant_pattern,
-                    } => CommandPermission::RequiresApproval {
-                        grant_pattern,
-                        description: request.description.clone(),
-                    },
-                }
-            }
-            _ => CommandPermission::Allowed, // Permissive mode when not configured
+        // Delegate to inherent check_command() which handles hook dispatch
+        let result = self.check_command(cmd);
+        match result {
+            CommandCheckResult::Allowed => CommandPermission::Allowed,
+            CommandCheckResult::Denied(reason) => CommandPermission::Denied(reason),
+            CommandCheckResult::RequiresApproval {
+                request,
+                grant_pattern,
+            } => CommandPermission::RequiresApproval {
+                grant_pattern,
+                description: request.description.clone(),
+            },
         }
     }
 
     fn grant_command(&self, pattern: &str) {
-        if let Some(grants) = &self.grants {
-            grants.grant(CommandGrant::persistent(pattern));
-        }
+        self.grant_command_inner(pattern);
     }
 
     fn can_spawn_child_auth(&self) -> bool {
@@ -661,6 +757,16 @@ impl ChildContext for ChildContextImpl {
                 },
             ))
         })
+    }
+
+    fn extension(&self, key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        match key {
+            "hook_registry" => self
+                .hook_registry
+                .as_ref()
+                .map(|r| Box::new(Arc::clone(r)) as Box<dyn std::any::Any + Send + Sync>),
+            _ => None,
+        }
     }
 
     fn clone_box(&self) -> Box<dyn ChildContext> {
@@ -1091,6 +1197,229 @@ mod tests {
             let ctx_dyn: &dyn ChildContext = &ctx;
             let perm = ctx_dyn.check_command_permission("rm -rf /");
             assert!(perm.is_allowed()); // Permissive mode
+        }
+    }
+
+    // --- Auth Hook integration tests (Step 4.2) ---
+
+    mod auth_hook_tests {
+        use super::*;
+        use crate::auth::{DefaultGrantStore, DefaultPolicy, Session};
+        use orcs_hook::testing::MockHook;
+        use orcs_hook::HookPoint;
+        use orcs_types::{Principal, PrincipalId};
+        use serde_json::json;
+        use std::time::Duration;
+
+        fn setup_with_hooks(
+            elevated: bool,
+        ) -> (
+            ChildContextImpl,
+            orcs_hook::SharedHookRegistry,
+            super::super::super::base::OutputReceiver,
+        ) {
+            let (output_tx, output_rx) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let session = if elevated {
+                Session::new(Principal::User(PrincipalId::new())).elevate(Duration::from_secs(60))
+            } else {
+                Session::new(Principal::User(PrincipalId::new()))
+            };
+
+            let grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+            let registry = orcs_hook::shared_hook_registry();
+
+            let ctx = ChildContextImpl::new("test-parent", output_tx, spawner_arc)
+                .with_lua_loader(Arc::new(TestLoader))
+                .with_session(session)
+                .with_checker(Arc::new(DefaultPolicy))
+                .with_grants(grants)
+                .with_hook_registry(Arc::clone(&registry));
+
+            (ctx, registry, output_rx)
+        }
+
+        #[test]
+        fn auth_pre_check_abort_denies_command() {
+            let (ctx, registry, _) = setup_with_hooks(true); // Elevated (would normally Allowed)
+
+            // Register aborting hook
+            let hook = MockHook::aborter(
+                "deny-rm",
+                "*::*",
+                HookPoint::AuthPreCheck,
+                "blocked by policy",
+            );
+            registry.write().unwrap().register(Box::new(hook));
+
+            let result = ctx.check_command("rm -rf /");
+            assert!(result.is_denied());
+            assert_eq!(result.denial_reason(), Some("blocked by policy"));
+        }
+
+        #[test]
+        fn auth_pre_check_skip_allows_command() {
+            let (ctx, registry, _) = setup_with_hooks(false); // Non-elevated (would require approval)
+
+            // Register skip hook that allows
+            let hook = MockHook::skipper(
+                "allow-all",
+                "*::*",
+                HookPoint::AuthPreCheck,
+                json!({"allowed": true}),
+            );
+            registry.write().unwrap().register(Box::new(hook));
+
+            let result = ctx.check_command("rm -rf /");
+            assert!(result.is_allowed());
+        }
+
+        #[test]
+        fn auth_pre_check_skip_denies_with_reason() {
+            let (ctx, registry, _) = setup_with_hooks(true); // Elevated
+
+            let hook = MockHook::skipper(
+                "deny-custom",
+                "*::*",
+                HookPoint::AuthPreCheck,
+                json!({"allowed": false, "reason": "custom deny"}),
+            );
+            registry.write().unwrap().register(Box::new(hook));
+
+            let result = ctx.check_command("echo hello");
+            assert!(result.is_denied());
+            assert_eq!(result.denial_reason(), Some("custom deny"));
+        }
+
+        #[test]
+        fn auth_pre_check_continue_preserves_normal_flow() {
+            let (ctx, registry, _) = setup_with_hooks(false); // Non-elevated
+
+            // Register pass-through hook
+            let hook = MockHook::pass_through("observer", "*::*", HookPoint::AuthPreCheck);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let result = ctx.check_command("ls -la");
+            // Hook was called
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+            // Normal result preserved (non-elevated → requires approval)
+            assert!(result.requires_approval());
+        }
+
+        #[test]
+        fn auth_post_check_fires_after_check() {
+            let (ctx, registry, _) = setup_with_hooks(true); // Elevated
+
+            let hook = MockHook::pass_through("post-observer", "*::*", HookPoint::AuthPostCheck);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let result = ctx.check_command("echo hello");
+            assert!(result.is_allowed());
+            // Post hook was invoked
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn auth_post_check_receives_result_in_payload() {
+            let (ctx, registry, _) = setup_with_hooks(true); // Elevated → Allowed
+
+            let hook =
+                MockHook::modifier("post-checker", "*::*", HookPoint::AuthPostCheck, |ctx| {
+                    // Verify payload contains result field
+                    assert_eq!(ctx.payload["result"], "allowed");
+                    assert_eq!(ctx.payload["command"], "echo hello");
+                });
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let _ = ctx.check_command("echo hello");
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn auth_on_grant_fires_on_grant_command() {
+            let (ctx, registry, _) = setup_with_hooks(false);
+
+            let hook = MockHook::pass_through("grant-observer", "*::*", HookPoint::AuthOnGrant);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            ctx.grant_command("rm -rf");
+
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn auth_on_grant_payload_contains_pattern() {
+            let (ctx, registry, _) = setup_with_hooks(false);
+
+            let hook = MockHook::modifier("grant-checker", "*::*", HookPoint::AuthOnGrant, |ctx| {
+                assert_eq!(ctx.payload["pattern"], "rm -rf");
+                assert_eq!(ctx.payload["granted_by"], "test-parent");
+            });
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            ctx.grant_command("rm -rf");
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn auth_hooks_no_registry_passthrough() {
+            // Without hook_registry, check_command should work normally
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("test", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let session =
+                Session::new(Principal::User(PrincipalId::new())).elevate(Duration::from_secs(60));
+
+            let ctx = ChildContextImpl::new("test", output_tx, spawner_arc)
+                .with_session(session)
+                .with_checker(Arc::new(DefaultPolicy));
+            // No hook_registry set
+
+            let result = ctx.check_command("echo hello");
+            assert!(result.is_allowed());
+        }
+
+        #[test]
+        fn trait_grant_command_dispatches_hook() {
+            let (ctx, registry, _) = setup_with_hooks(false);
+            let ctx_dyn: &dyn ChildContext = &ctx;
+
+            let hook = MockHook::pass_through("trait-grant", "*::*", HookPoint::AuthOnGrant);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            ctx_dyn.grant_command("ls");
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn trait_check_command_permission_dispatches_hooks() {
+            let (ctx, registry, _) = setup_with_hooks(true);
+            let ctx_dyn: &dyn ChildContext = &ctx;
+
+            let pre_hook = MockHook::pass_through("pre", "*::*", HookPoint::AuthPreCheck);
+            let pre_counter = pre_hook.call_count.clone();
+            let post_hook = MockHook::pass_through("post", "*::*", HookPoint::AuthPostCheck);
+            let post_counter = post_hook.call_count.clone();
+
+            {
+                let mut guard = registry.write().unwrap();
+                guard.register(Box::new(pre_hook));
+                guard.register(Box::new(post_hook));
+            }
+
+            let perm = ctx_dyn.check_command_permission("echo hello");
+            assert!(perm.is_allowed());
+            assert_eq!(pre_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(post_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
 }
