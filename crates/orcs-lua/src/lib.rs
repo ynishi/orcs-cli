@@ -74,9 +74,7 @@
 //!
 //! # Script Loading
 //!
-//! Scripts can be loaded from:
-//! 1. **Embedded** - Built into the binary at compile time
-//! 2. **Runtime** - Loaded from filesystem at runtime
+//! Scripts are loaded from filesystem search paths:
 //!
 //! ```ignore
 //! use orcs_lua::ScriptLoader;
@@ -85,18 +83,15 @@
 //!
 //! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
 //!
-//! // Load embedded script
-//! let component = ScriptLoader::load_embedded("echo", sandbox.clone())?;
-//!
-//! // Load with runtime fallback
-//! let loader = ScriptLoader::new(sandbox).with_path("./scripts");
+//! let loader = ScriptLoader::new(sandbox)
+//!     .with_path("~/.orcs/components")
+//!     .with_path("/versioned/builtins/components");
 //! let component = loader.load("echo")?;
 //! ```
 
 pub(crate) mod cap_tools;
 mod child;
 mod component;
-pub mod embedded;
 mod error;
 pub mod hook_helpers;
 mod loader;

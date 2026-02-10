@@ -474,7 +474,7 @@ impl ScenarioFileResult {
 /// Each file should return a Lua table with:
 /// - `name`: Suite name (string)
 /// - `component`: Inline Lua script for the component under test (string)
-///   OR `component_embedded`: Name of an embedded script (string)
+///   OR `component_name`: Name of a script in the crate's scripts/ directory (string)
 ///   OR `component_file`: Path to a Lua script file (string)
 /// - `scenarios`: Array of `{ name: string, run: function(harness) }` tables
 pub struct ScenarioRunner {
@@ -645,20 +645,34 @@ impl ScenarioRunner {
 
     /// Resolves the component source from the scenario table.
     fn resolve_component_source(&self, table: &Table) -> Result<String, String> {
-        // Priority: component > component_embedded > component_file
+        // Priority: component > component_name > component_file
         if let Ok(inline) = table.get::<String>("component") {
             return Ok(inline);
         }
 
-        if let Ok(name) = table.get::<String>("component_embedded") {
-            return crate::embedded::get(&name)
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    format!(
-                        "embedded script '{name}' not found. available: {:?}",
-                        crate::embedded::list()
-                    )
-                });
+        // component_name: resolve from crate scripts directory by name
+        // Also supports legacy key "component_embedded" for backward compatibility
+        let name_key = table
+            .get::<String>("component_name")
+            .or_else(|_| table.get::<String>("component_embedded"));
+        if let Ok(name) = name_key {
+            let scripts_dir = crate::ScriptLoader::crate_scripts_dir();
+            // Try single file: {scripts}/{name}.lua
+            let file_path = scripts_dir.join(format!("{name}.lua"));
+            if file_path.exists() {
+                return std::fs::read_to_string(&file_path)
+                    .map_err(|e| format!("failed to read script '{name}': {e}"));
+            }
+            // Try directory: {scripts}/{name}/init.lua
+            let init_path = scripts_dir.join(&name).join("init.lua");
+            if init_path.exists() {
+                return std::fs::read_to_string(&init_path)
+                    .map_err(|e| format!("failed to read '{name}/init.lua': {e}"));
+            }
+            return Err(format!(
+                "component '{name}' not found in {}",
+                scripts_dir.display()
+            ));
         }
 
         if let Ok(path_str) = table.get::<String>("component_file") {
@@ -667,7 +681,7 @@ impl ScenarioRunner {
         }
 
         Err(
-            "scenario must specify one of: 'component' (inline), 'component_embedded', or 'component_file'"
+            "scenario must specify one of: 'component' (inline), 'component_name', or 'component_file'"
                 .to_string(),
         )
     }

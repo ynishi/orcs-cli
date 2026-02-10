@@ -131,6 +131,34 @@ impl LuaTestHarness {
         })
     }
 
+    /// Creates a test harness from a component directory containing `init.lua`.
+    ///
+    /// The directory is added to Lua's search paths, enabling `require()` for
+    /// co-located modules (e.g. `require("helper")` resolves `helper.lua` in
+    /// the same directory).
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - Path to the component directory
+    /// * `sandbox` - Sandbox policy for file operations
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LuaError`] if `init.lua` not found or script is invalid.
+    pub fn from_dir<P: AsRef<Path>>(
+        dir: P,
+        sandbox: Arc<dyn SandboxPolicy>,
+    ) -> Result<Self, LuaError> {
+        let init_path = dir.as_ref().join("init.lua");
+        let script = std::fs::read_to_string(&init_path)
+            .map_err(|_| LuaError::ScriptNotFound(init_path.display().to_string()))?;
+        let component = LuaComponent::from_dir(dir, sandbox)?;
+        Ok(Self {
+            inner: ComponentTestHarness::new(component),
+            script_source: Some(script),
+        })
+    }
+
     /// Returns a reference to the underlying LuaComponent.
     pub fn component(&self) -> &LuaComponent {
         self.inner.component()

@@ -178,44 +178,6 @@ pub fn register_base_orcs_functions(
         orcs_table.set("toml_encode", toml_encode)?;
     }
 
-    // orcs.require_lib(name) -> module table
-    // Loads an embedded lib module by name. Cached after first load.
-    {
-        let require_lib_fn = lua.create_function(|lua, name: String| {
-            // Check cache first
-            let cache_key = format!("_orcs_lib_{name}");
-            let globals = lua.globals();
-            if let Ok(val) = globals.get::<mlua::Value>(cache_key.as_str()) {
-                if val != mlua::Value::Nil {
-                    return Ok(val);
-                }
-            }
-
-            // Look up embedded lib source
-            let source = crate::embedded::lib::get(&name).ok_or_else(|| {
-                mlua::Error::RuntimeError(format!(
-                    "lib module not found: {name}. available: {:?}",
-                    crate::embedded::lib::list()
-                ))
-            })?;
-
-            // Evaluate in main environment (not sandboxed - trusted code)
-            let value: mlua::Value = lua
-                .load(source)
-                .set_name(format!("lib/{name}"))
-                .eval()
-                .map_err(|e| mlua::Error::RuntimeError(format!("lib/{name} load failed: {e}")))?;
-
-            // Cache the result
-            globals
-                .set(cache_key.as_str(), value.clone())
-                .map_err(|e| mlua::Error::RuntimeError(format!("lib/{name} cache failed: {e}")))?;
-
-            Ok(value)
-        })?;
-        orcs_table.set("require_lib", require_lib_fn)?;
-    }
-
     // Register native Rust tools (read, write, grep, glob, mkdir, remove, mv)
     crate::tools::register_tool_functions(lua, Arc::clone(&sandbox))?;
 

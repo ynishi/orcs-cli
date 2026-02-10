@@ -3,17 +3,23 @@
 use orcs_component::EventCategory;
 use orcs_event::SignalResponse;
 use orcs_lua::testing::LuaTestHarness;
+use orcs_lua::ScriptLoader;
 use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Returns the path to the skill_manager component directory.
+fn skill_manager_dir() -> std::path::PathBuf {
+    ScriptLoader::crate_scripts_dir().join("skill_manager")
+}
+
 /// Creates a unique temp dir and returns (TempDir guard, sandbox, root_path).
 /// TempDir must be held alive for the test duration (auto-deleted on Drop).
 fn test_sandbox_with_root() -> (TempDir, Arc<dyn SandboxPolicy>, PathBuf) {
-    let td = tempfile::tempdir().unwrap();
-    let root = td.path().canonicalize().unwrap();
+    let td = tempfile::tempdir().expect("create temp dir");
+    let root = td.path().canonicalize().expect("canonicalize temp dir");
     let sandbox = Arc::new(ProjectSandbox::new(&root).expect("test sandbox"));
     (td, sandbox, root)
 }
@@ -25,13 +31,15 @@ fn test_sandbox() -> (TempDir, Arc<dyn SandboxPolicy>) {
 
 fn skill_harness() -> (TempDir, LuaTestHarness) {
     let (td, sandbox) = test_sandbox();
-    let harness = LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, sandbox).unwrap();
+    let harness = LuaTestHarness::from_dir(skill_manager_dir(), sandbox)
+        .expect("load skill_manager from crate scripts dir");
     (td, harness)
 }
 
 fn skill_harness_with_root() -> (TempDir, LuaTestHarness, PathBuf) {
     let (td, sandbox, root) = test_sandbox_with_root();
-    let harness = LuaTestHarness::from_script(orcs_lua::embedded::SKILL_MANAGER, sandbox).unwrap();
+    let harness = LuaTestHarness::from_dir(skill_manager_dir(), sandbox)
+        .expect("load skill_manager from crate scripts dir");
     (td, harness, root)
 }
 

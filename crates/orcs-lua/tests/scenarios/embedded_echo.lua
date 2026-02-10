@@ -1,15 +1,15 @@
--- Embedded Echo Component: Scenario Tests
+-- Echo Component: Scenario Tests
 --
--- Tests the built-in echo component loaded via component_embedded.
--- This validates that embedded scripts work through the scenario framework.
+-- Tests the built-in echo component loaded via component_name.
+-- This validates that named script loading works through the scenario framework.
 
 local test = orcs.test
 
 return {
-    name = "Embedded Echo Component",
+    name = "Echo Component",
 
-    -- Load the built-in echo component (scripts/echo.lua)
-    component_embedded = "echo",
+    -- Load the echo component from the crate's scripts/ directory
+    component_name = "echo",
 
     scenarios = {
         {

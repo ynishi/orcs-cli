@@ -2,7 +2,7 @@
 //!
 //! Provides a single entry point for creating sandboxed Lua VMs with:
 //! - `orcs.*` helper functions (log, exec, read, write, grep, glob, etc.)
-//! - Custom `require()` with sandbox-aware search paths + embedded lib support
+//! - Custom `require()` with sandbox-aware search paths
 //! - Dangerous Lua stdlib functions disabled (io.*, os.execute, etc.)
 //!
 //! # Search Order for `require()`
@@ -11,7 +11,6 @@
 //! require("lib.helper")
 //!   1. Filesystem: {search_path}/lib/helper.lua      (sandbox-validated)
 //!   2. Filesystem: {search_path}/lib/helper/init.lua  (sandbox-validated)
-//!   3. Embedded:   embedded::lib::get("lib.helper")
 //!   → error if not found
 //! ```
 //!
@@ -21,13 +20,11 @@
 //! use orcs_lua::LuaEnv;
 //!
 //! let env = LuaEnv::new(sandbox)
-//!     .with_search_path("/project/.orcs/components/my-comp")
-//!     .with_search_path("/project/.orcs/lib");
+//!     .with_search_path("/project/.orcs/components/my-comp");
 //!
 //! let lua = env.create_lua()?;
 //! // Lua scripts can now use:
-//! //   require("lib.helper")       -- from component dir
-//! //   require("skill_registry")   -- from embedded
+//! //   require("helper")       -- from component dir
 //! ```
 
 use crate::error::LuaError;
@@ -39,29 +36,23 @@ use std::sync::Arc;
 /// Unified Lua environment configuration.
 ///
 /// Creates Lua VMs with consistent sandbox, `orcs.*` functions,
-/// and a unified `require()` that resolves modules from:
-/// 1. Configured search paths (filesystem, sandbox-validated)
-/// 2. Embedded lib modules (compile-time)
+/// and a unified `require()` that resolves modules from
+/// configured search paths (filesystem, sandbox-validated).
 #[derive(Debug, Clone)]
 pub struct LuaEnv {
     /// Sandbox policy for file operations and require() path validation.
     sandbox: Arc<dyn SandboxPolicy>,
     /// Search paths for `require()` resolution (priority order).
     search_paths: Vec<PathBuf>,
-    /// Whether to include embedded libs in require() resolution (default: true).
-    include_embedded: bool,
 }
 
 impl LuaEnv {
     /// Creates a new LuaEnv with the given sandbox policy.
-    ///
-    /// By default, embedded libs are included in `require()` resolution.
     #[must_use]
     pub fn new(sandbox: Arc<dyn SandboxPolicy>) -> Self {
         Self {
             sandbox,
             search_paths: Vec::new(),
-            include_embedded: true,
         }
     }
 
@@ -84,10 +75,9 @@ impl LuaEnv {
         self
     }
 
-    /// Disables embedded lib resolution in `require()`.
+    /// No-op retained for API compatibility (embedded fallback has been removed).
     #[must_use]
-    pub fn without_embedded(mut self) -> Self {
-        self.include_embedded = false;
+    pub fn without_embedded(self) -> Self {
         self
     }
 
@@ -130,8 +120,7 @@ impl LuaEnv {
     /// Replaces the standard Lua `require` with a custom implementation that:
     /// 1. Checks `package.loaded` cache
     /// 2. Searches filesystem paths (sandbox-validated)
-    /// 3. Searches embedded libs
-    /// 4. Returns error if not found
+    /// 3. Returns error if not found
     ///
     /// `package.path` and `package.cpath` are set to empty strings
     /// to prevent any default search behavior.
@@ -185,7 +174,6 @@ impl LuaEnv {
 
         // Create our custom require() function.
         let search_paths = self.search_paths.clone();
-        let include_embedded = self.include_embedded;
 
         let custom_require = lua.create_function(move |lua, name: String| {
             // 1. Check package.loaded cache
@@ -223,32 +211,16 @@ impl LuaEnv {
                 }
             }
 
-            // 3. Try embedded libs
-            if include_embedded {
-                if let Some(source) = crate::embedded::lib::get(&name) {
-                    let result: mlua::Value = lua
-                        .load(source)
-                        .set_name(format!("embedded:{name}"))
-                        .eval()
-                        .map_err(|e| {
-                            mlua::Error::RuntimeError(format!(
-                                "error loading embedded module '{name}': {e}"
-                            ))
-                        })?;
-                    loaded.set(name.as_str(), result.clone())?;
-                    return Ok(result);
-                }
-            }
-
-            // 4. Not found
-            let mut searched = Vec::new();
-            for base in &search_paths {
-                searched.push(format!("{}/{module_rel}.lua", base.display()));
-                searched.push(format!("{}/{module_rel}/init.lua", base.display()));
-            }
-            if include_embedded {
-                searched.push(format!("embedded:{name}"));
-            }
+            // 3. Not found
+            let searched: Vec<_> = search_paths
+                .iter()
+                .flat_map(|base| {
+                    [
+                        format!("{}/{module_rel}.lua", base.display()),
+                        format!("{}/{module_rel}/init.lua", base.display()),
+                    ]
+                })
+                .collect();
 
             Err(mlua::Error::RuntimeError(format!(
                 "module '{}' not found (searched: {})",
@@ -396,43 +368,7 @@ mod tests {
         assert_eq!(result, "");
     }
 
-    // ─── require() with embedded libs ────────────────────────────────
-
-    #[test]
-    fn require_embedded_lib() {
-        let env = LuaEnv::new(test_sandbox());
-        let lua = env.create_lua().expect("create_lua");
-
-        // skill_registry is an embedded lib
-        let result: String = lua
-            .load(
-                r#"
-                local registry = require("skill_registry")
-                return type(registry)
-                "#,
-            )
-            .eval()
-            .expect("require embedded should succeed");
-        assert_eq!(result, "table");
-    }
-
-    #[test]
-    fn require_embedded_is_cached() {
-        let env = LuaEnv::new(test_sandbox());
-        let lua = env.create_lua().expect("create_lua");
-
-        let result: bool = lua
-            .load(
-                r#"
-                local a = require("skill_registry")
-                local b = require("skill_registry")
-                return a == b
-                "#,
-            )
-            .eval()
-            .expect("require should cache");
-        assert!(result, "second require should return cached module");
-    }
+    // ─── require() error handling ──────────────────────────────────
 
     #[test]
     fn require_nonexistent_errors() {
@@ -446,15 +382,6 @@ mod tests {
             err_str.contains("not found"),
             "error should say 'not found', got: {err_str}"
         );
-    }
-
-    #[test]
-    fn require_embedded_disabled() {
-        let env = LuaEnv::new(test_sandbox()).without_embedded();
-        let lua = env.create_lua().expect("create_lua");
-
-        let result = lua.load(r#"require("skill_registry")"#).exec();
-        assert!(result.is_err(), "embedded should be disabled");
     }
 
     // ─── require() with filesystem ───────────────────────────────────
@@ -593,15 +520,13 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_takes_priority_over_embedded() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create a filesystem module with the same name as an embedded lib
+    fn require_filesystem_module_loads() {
+        let dir = tempfile::tempdir().expect("create temp dir");
         std::fs::write(
-            dir.path().join("skill_registry.lua"),
-            r#"return { source = "filesystem", custom = true }"#,
+            dir.path().join("my_module.lua"),
+            r#"return { source = "filesystem" }"#,
         )
-        .unwrap();
+        .expect("write module");
 
         let sandbox = Arc::new(ProjectSandbox::new(dir.path()).expect("sandbox"));
         let env = LuaEnv::new(sandbox).with_search_path(dir.path());
@@ -611,16 +536,13 @@ mod tests {
         let result: String = lua
             .load(
                 r#"
-                local m = require("skill_registry")
+                local m = require("my_module")
                 return m.source
                 "#,
             )
             .eval()
-            .expect("require should prefer filesystem");
-        assert_eq!(
-            result, "filesystem",
-            "filesystem should take priority over embedded"
-        );
+            .expect("require should load from filesystem");
+        assert_eq!(result, "filesystem");
     }
 
     // ─── Error messages ──────────────────────────────────────────────
@@ -692,25 +614,5 @@ mod tests {
             .eval()
             .expect("json_parse should work");
         assert_eq!(result, 42);
-    }
-
-    // ─── require_lib backward compat (still available via orcs.require_lib) ──
-
-    #[test]
-    fn orcs_require_lib_still_works() {
-        let env = LuaEnv::new(test_sandbox());
-        let lua = env.create_lua().expect("create_lua");
-
-        // orcs.require_lib should still work (for backward compatibility)
-        let result: String = lua
-            .load(
-                r#"
-                local m = orcs.require_lib("skill_registry")
-                return type(m)
-                "#,
-            )
-            .eval()
-            .expect("orcs.require_lib should still work");
-        assert_eq!(result, "table");
     }
 }
