@@ -30,6 +30,7 @@ local function discover_profiles()
     }
 
     -- Add ~/.orcs/profiles if available
+    -- TODO: cross-platform support (Windows: USERPROFILE)
     local home = os.getenv("HOME")
     if home then
         table.insert(search_dirs, home .. "/.orcs/profiles")
@@ -85,6 +86,7 @@ local function load_profile(name)
     local search_dirs = {
         orcs.pwd .. "/.orcs/profiles",
     }
+    -- TODO: cross-platform support (Windows: USERPROFILE)
     local home = os.getenv("HOME")
     if home then
         table.insert(search_dirs, home .. "/.orcs/profiles")
@@ -315,6 +317,7 @@ return {
         if signal.kind == "Veto" then
             return "Abort"
         end
+        -- ProfileManager has no approval flow; Approve/Reject pass through.
         return "Handled"
     end,
 }

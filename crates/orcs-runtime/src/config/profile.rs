@@ -207,16 +207,16 @@ impl ProfileStore {
                     continue; // Higher-priority dir already has this name
                 }
 
-                // Quick parse for metadata only
-                match self.load_from_path(&path) {
-                    Ok(def) => {
+                match Self::load_meta(&path) {
+                    Ok(meta) => {
+                        let profile_name = if meta.name.is_empty() {
+                            stem.clone()
+                        } else {
+                            meta.name.clone()
+                        };
                         entries.push(ProfileEntry {
-                            name: if def.profile.name.is_empty() {
-                                stem.clone()
-                            } else {
-                                def.profile.name.clone()
-                            },
-                            description: def.profile.description.clone(),
+                            name: profile_name,
+                            description: meta.description.clone(),
                             path: path.clone(),
                         });
                         seen.insert(stem);
@@ -225,7 +225,7 @@ impl ProfileStore {
                         debug!(
                             path = %path.display(),
                             error = %e,
-                            "Failed to parse profile"
+                            "Failed to parse profile metadata"
                         );
                     }
                 }
@@ -248,7 +248,7 @@ impl ProfileStore {
         for dir in &self.search_dirs {
             let path = dir.join(&filename);
             if path.exists() {
-                return self.load_from_path(&path);
+                return Self::load_from_path(&path);
             }
         }
 
@@ -258,12 +258,27 @@ impl ProfileStore {
         })
     }
 
+    /// Loads profile metadata only (lightweight, no component settings).
+    ///
+    /// Used by [`list()`](Self::list) to avoid full deserialization.
+    fn load_meta(path: &Path) -> Result<ProfileMeta, ConfigError> {
+        #[derive(Deserialize)]
+        struct MetaOnly {
+            #[serde(default)]
+            profile: ProfileMeta,
+        }
+        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::read_file(path, e))?;
+        let meta: MetaOnly =
+            toml::from_str(&content).map_err(|e| ConfigError::parse_toml(path, e))?;
+        Ok(meta.profile)
+    }
+
     /// Loads a profile from an explicit file path.
     ///
     /// # Errors
     ///
     /// Returns `ConfigError` if read or parse fails.
-    pub fn load_from_path(&self, path: &Path) -> Result<ProfileDef, ConfigError> {
+    pub fn load_from_path(path: &Path) -> Result<ProfileDef, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::read_file(path, e))?;
 
         let mut def: ProfileDef =

@@ -373,7 +373,7 @@ fn lua_to_toml_value(_lua: &Lua, value: &mlua::Value) -> mlua::Result<toml::Valu
                 .clone()
                 .pairs::<i64, mlua::Value>()
                 .enumerate()
-                .all(|(i, pair)| pair.is_ok() && pair.unwrap().0 == (i as i64 + 1));
+                .all(|(i, pair)| pair.ok().is_some_and(|(k, _)| k == (i as i64 + 1)));
 
             if is_array && t.raw_len() > 0 {
                 let mut arr = Vec::new();
