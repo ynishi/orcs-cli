@@ -94,6 +94,7 @@ mod child;
 mod component;
 mod error;
 pub mod hook_helpers;
+pub(crate) mod llm_command;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;

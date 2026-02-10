@@ -588,10 +588,15 @@ fn register_context_functions(
     })?;
     orcs_table.set("exec", exec_fn)?;
 
-    // orcs.llm(prompt) -> { ok, content?, error? }
+    // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
     // Capability-checked override: requires Capability::LLM.
+    //
+    // opts (optional table):
+    //   { new_session = true }    → start tracked session (returns session_id)
+    //   { resume = "<uuid>" }    → continue existing session
+    //   (none)                    → single-shot (backward compatible)
     let llm_sandbox_root = sandbox.root().to_path_buf();
-    let llm_fn = lua.create_function(move |lua, prompt: String| {
+    let llm_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         let wrapper = lua
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
@@ -601,39 +606,17 @@ fn register_context_functions(
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
 
-        let result = lua.create_table()?;
         if !ctx.has_capability(orcs_component::Capability::LLM) {
+            let result = lua.create_table()?;
             result.set("ok", false)?;
             result.set("error", "permission denied: Capability::LLM not granted")?;
             return Ok(result);
         }
         drop(ctx);
 
-        let output = std::process::Command::new("claude")
-            .arg("-p")
-            .arg(&prompt)
-            .current_dir(&llm_sandbox_root)
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let content = String::from_utf8_lossy(&out.stdout).to_string();
-                result.set("ok", true)?;
-                result.set("content", content)?;
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                result.set("ok", false)?;
-                result.set("error", if stderr.is_empty() { stdout } else { stderr })?;
-            }
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", format!("failed to spawn claude: {e}"))?;
-            }
-        }
-
-        Ok(result)
+        let mode = crate::llm_command::parse_session_mode(opts.as_ref())?;
+        let llm_result = crate::llm_command::execute_llm(&prompt, &mode, &llm_sandbox_root);
+        crate::llm_command::result_to_lua_table(lua, &llm_result)
     })?;
     orcs_table.set("llm", llm_fn)?;
 
