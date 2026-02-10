@@ -272,23 +272,29 @@ mod tests {
     fn e2e_session_new_and_resume() {
         let cwd = std::env::current_dir().expect("get cwd");
 
-        // Step 1: new session
+        // Step 1: new session — introduce name
         let uuid = uuid::Uuid::new_v4().to_string();
+        eprintln!("[E2E] session_id = {uuid}");
+
         let mode_new = LlmSessionMode::NewSession(uuid.clone());
         let r1 = execute_llm("My name is ORCSTest42. Reply only: OK", &mode_new, &cwd);
         assert!(r1.ok, "Step 1 failed: {:?}", r1.error);
         assert_eq!(r1.session_id.as_deref(), Some(uuid.as_str()));
+        eprintln!("[E2E] Step 1 response: {:?}", r1.content);
 
-        // Step 2: resume
+        // Step 2: resume — ask for name back
         let mode_resume = LlmSessionMode::Resume(uuid.clone());
         let r2 = execute_llm("What is my name? Reply only the name.", &mode_resume, &cwd);
         assert!(r2.ok, "Step 2 failed: {:?}", r2.error);
         let content = r2.content.expect("should have content");
+        eprintln!("[E2E] Step 2 response: {content:?}");
+
         assert!(
             content.contains("ORCSTest42"),
             "Expected 'ORCSTest42' in response, got: {}",
             &content[..content.len().min(200)]
         );
+        eprintln!("[E2E] PASS: session continuity verified");
     }
 
     #[test]
