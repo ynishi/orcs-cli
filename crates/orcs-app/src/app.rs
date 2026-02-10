@@ -699,6 +699,28 @@ impl OrcsAppBuilder {
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
 
+        // Initialize hook registry and load hooks from config
+        if !config.hooks.hooks.is_empty() {
+            let registry = orcs_runtime::shared_hook_registry();
+            let result = orcs_lua::hook_helpers::load_hooks_from_config(
+                &config.hooks,
+                &registry,
+                sandbox.root(),
+            );
+            for err in &result.errors {
+                tracing::warn!(hook = %err.hook_label, error = %err.error, "Hook load failed");
+            }
+            if result.loaded > 0 {
+                tracing::info!(
+                    loaded = result.loaded,
+                    skipped = result.skipped,
+                    errors = result.errors.len(),
+                    "Hooks initialized"
+                );
+                engine.set_hook_registry(registry);
+            }
+        }
+
         // Load user scripts from configured directories (auto_load)
         if config.scripts.auto_load {
             let script_dirs = config.scripts.resolve_dirs(Some(sandbox.root()));
