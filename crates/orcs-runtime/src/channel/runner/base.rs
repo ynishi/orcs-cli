@@ -328,6 +328,8 @@ impl ChannelHandle {
 pub struct ChannelRunner {
     /// This channel's ID.
     id: ChannelId,
+    /// Bound component's ID (cached at build time to avoid locking for hook dispatch).
+    component_id: orcs_types::ComponentId,
     /// Receiver for incoming events (wrapped as [`InboundEvent`]).
     event_rx: mpsc::Receiver<InboundEvent>,
     /// Receiver for signals (broadcast).
@@ -378,6 +380,43 @@ async fn recv_request(rx: &mut Option<mpsc::Receiver<RequestEnvelope>>) -> Optio
 }
 
 impl ChannelRunner {
+    /// Dispatches hooks for the given point with the given payload.
+    ///
+    /// Returns `HookAction::Continue` with the (possibly modified) context
+    /// if no registry is configured.
+    fn dispatch_hook(
+        &self,
+        point: orcs_hook::HookPoint,
+        payload: serde_json::Value,
+    ) -> orcs_hook::HookAction {
+        let Some(registry) = &self.hook_registry else {
+            let ctx = orcs_hook::HookContext::new(
+                point,
+                self.component_id.clone(),
+                self.id,
+                orcs_types::Principal::System,
+                0,
+                payload,
+            );
+            return orcs_hook::HookAction::Continue(Box::new(ctx));
+        };
+
+        let ctx = orcs_hook::HookContext::new(
+            point,
+            self.component_id.clone(),
+            self.id,
+            orcs_types::Principal::System,
+            0,
+            payload,
+        );
+
+        let guard = registry.read().unwrap_or_else(|poisoned| {
+            warn!("hook registry lock poisoned, using inner value");
+            poisoned.into_inner()
+        });
+        guard.dispatch(point, &self.component_id, None, ctx)
+    }
+
     /// Returns a reference to the shared hook registry, if configured.
     #[must_use]
     pub fn hook_registry(&self) -> Option<&SharedHookRegistry> {
@@ -547,9 +586,21 @@ impl ChannelRunner {
                 }
             }
 
+            // --- Pre-init hook ---
+            self.dispatch_hook(
+                orcs_hook::HookPoint::ComponentPreInit,
+                serde_json::json!({ "component": comp.id().fqn() }),
+            );
+
             if let Err(e) = comp.init() {
                 warn!(error = %e, "component init failed");
             }
+
+            // --- Post-init hook ---
+            self.dispatch_hook(
+                orcs_hook::HookPoint::ComponentPostInit,
+                serde_json::json!({ "component": comp.id().fqn() }),
+            );
         }
 
         loop {
@@ -622,7 +673,17 @@ impl ChannelRunner {
             };
 
             // 2. Shutdown
+            self.dispatch_hook(
+                orcs_hook::HookPoint::ComponentPreShutdown,
+                serde_json::json!({ "component": &fqn }),
+            );
+
             comp.shutdown();
+
+            self.dispatch_hook(
+                orcs_hook::HookPoint::ComponentPostShutdown,
+                serde_json::json!({ "component": &fqn }),
+            );
             debug!(component = %fqn, "component shutdown complete");
 
             (fqn, snapshot)
@@ -646,6 +707,24 @@ impl ChannelRunner {
         // Check if signal affects this channel
         if !signal.affects_channel(self.id) {
             return true;
+        }
+
+        // --- Pre-dispatch hook ---
+        let pre_payload = serde_json::json!({
+            "signal_kind": format!("{:?}", signal.kind),
+            "signal_scope": format!("{:?}", signal.scope),
+        });
+        let pre_action = self.dispatch_hook(orcs_hook::HookPoint::SignalPreDispatch, pre_payload);
+        match pre_action {
+            orcs_hook::HookAction::Skip(_) => {
+                debug!("signal skipped by pre-dispatch hook");
+                return true;
+            }
+            orcs_hook::HookAction::Abort { reason } => {
+                warn!(reason = %reason, "signal aborted by pre-dispatch hook");
+                return true;
+            }
+            orcs_hook::HookAction::Continue(_) | orcs_hook::HookAction::Replace(_) => {}
         }
 
         // Propagate signal to spawned children
@@ -685,6 +764,14 @@ impl ChannelRunner {
             }
             SignalAction::Continue => {}
         }
+
+        // --- Post-dispatch hook ---
+        let post_payload = serde_json::json!({
+            "signal_kind": format!("{:?}", signal.kind),
+            "handled": true,
+        });
+        let _post_action =
+            self.dispatch_hook(orcs_hook::HookPoint::SignalPostDispatch, post_payload);
 
         true
     }
@@ -745,18 +832,61 @@ impl ChannelRunner {
             return;
         }
 
+        // --- Pre-dispatch hook ---
+        let pre_payload = serde_json::json!({
+            "category": format!("{:?}", event.category),
+            "operation": &event.operation,
+            "source": event.source.fqn(),
+            "payload": &event.payload,
+        });
+        let pre_action = self.dispatch_hook(orcs_hook::HookPoint::RequestPreDispatch, pre_payload);
+        let request_payload = match pre_action {
+            orcs_hook::HookAction::Continue(ctx) => {
+                // Use potentially modified payload from hook chain
+                ctx.payload.get("payload").cloned().unwrap_or(event.payload)
+            }
+            orcs_hook::HookAction::Skip(value) => {
+                debug!(value = ?value, "request skipped by pre-dispatch hook");
+                return;
+            }
+            orcs_hook::HookAction::Abort { reason } => {
+                warn!(reason = %reason, "request aborted by pre-dispatch hook");
+                return;
+            }
+            orcs_hook::HookAction::Replace(_) => {
+                // Replace is invalid for pre-hooks (registry already warns)
+                event.payload
+            }
+        };
+
         let request = Request::new(
             event.category,
             &event.operation,
             event.source,
             self.id,
-            event.payload,
+            request_payload,
         );
 
         let result = {
             let mut comp = self.component.lock().await;
             comp.on_request(&request)
         };
+
+        // --- Post-dispatch hook ---
+        let post_payload = match &result {
+            Ok(response) => serde_json::json!({
+                "operation": &event.operation,
+                "response": response,
+                "success": true,
+            }),
+            Err(e) => serde_json::json!({
+                "operation": &event.operation,
+                "error": e.to_string(),
+                "success": false,
+            }),
+        };
+        let _post_action =
+            self.dispatch_hook(orcs_hook::HookPoint::RequestPostDispatch, post_payload);
 
         match result {
             Ok(response) => {
@@ -793,13 +923,62 @@ impl ChannelRunner {
             "handling RPC request"
         );
 
+        // --- Pre-dispatch hook ---
+        let pre_payload = serde_json::json!({
+            "request_id": envelope.request.id.to_string(),
+            "operation": &envelope.request.operation,
+            "source": envelope.request.source.fqn(),
+            "payload": &envelope.request.payload,
+        });
+        let pre_action = self.dispatch_hook(orcs_hook::HookPoint::RequestPreDispatch, pre_payload);
+        match &pre_action {
+            orcs_hook::HookAction::Skip(value) => {
+                debug!(value = ?value, "RPC request skipped by pre-dispatch hook");
+                let response = Ok(value.clone());
+                if envelope.reply_tx.send(response).is_err() {
+                    debug!("RPC reply dropped (caller cancelled)");
+                }
+                return;
+            }
+            orcs_hook::HookAction::Abort { reason } => {
+                warn!(reason = %reason, "RPC request aborted by pre-dispatch hook");
+                let response = Err(reason.clone());
+                if envelope.reply_tx.send(response).is_err() {
+                    debug!("RPC reply dropped (caller cancelled)");
+                }
+                return;
+            }
+            orcs_hook::HookAction::Continue(_) | orcs_hook::HookAction::Replace(_) => {}
+        }
+
         let result = {
             let mut comp = self.component.lock().await;
             comp.on_request(&envelope.request)
         };
 
-        let response = result.map_err(|e| e.to_string());
-        if envelope.reply_tx.send(response).is_err() {
+        // --- Post-dispatch hook ---
+        let post_payload = match &result {
+            Ok(response) => serde_json::json!({
+                "operation": &envelope.request.operation,
+                "response": response,
+                "success": true,
+            }),
+            Err(e) => serde_json::json!({
+                "operation": &envelope.request.operation,
+                "error": e.to_string(),
+                "success": false,
+            }),
+        };
+        let post_action =
+            self.dispatch_hook(orcs_hook::HookPoint::RequestPostDispatch, post_payload);
+
+        // Apply Replace from post-hook if present
+        let final_result = match post_action {
+            orcs_hook::HookAction::Replace(value) => Ok(value),
+            _ => result.map_err(|e| e.to_string()),
+        };
+
+        if envelope.reply_tx.send(final_result).is_err() {
             debug!("RPC reply dropped (caller cancelled)");
         }
     }
@@ -1157,6 +1336,9 @@ impl ChannelRunnerBuilder {
     pub fn build(mut self) -> (ChannelRunner, ChannelHandle) {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_SIZE);
 
+        // Cache component ID before moving component into Arc
+        let component_id = self.component.id().clone();
+
         // Clone output_tx for ChildContext IO routing (before emitter takes it)
         let io_output_tx = self.output_tx.as_ref().cloned();
 
@@ -1318,6 +1500,7 @@ impl ChannelRunnerBuilder {
 
         let runner = ChannelRunner {
             id: self.id,
+            component_id,
             event_rx,
             signal_rx: self.signal_rx,
             world_tx: self.world_tx,
