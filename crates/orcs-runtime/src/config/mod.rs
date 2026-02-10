@@ -105,7 +105,7 @@ mod resolver;
 mod types;
 
 pub use error::ConfigError;
-pub use loader::{save_global_config, ConfigLoader};
+pub use loader::{save_global_config, ConfigLoader, EnvOverrides};
 pub use profile::{ProfileDef, ProfileEntry, ProfileStore};
 pub use resolver::{ConfigResolver, NoOpResolver};
 pub use types::{HilConfig, ModelConfig, OrcsConfig, PathsConfig, ScriptsConfig, UiConfig};

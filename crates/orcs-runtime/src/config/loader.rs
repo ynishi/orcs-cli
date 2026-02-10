@@ -6,7 +6,7 @@
 //! 2. Global config (`~/.orcs/config.toml`)
 //! 3. Project config (`.orcs/config.toml`)
 //! 4. Profile config (`.orcs/profiles/{name}.toml` `[config]` section)
-//! 5. Environment variables (`ORCS_*`, including `ORCS_PROFILE`)
+//! 5. Environment overrides (`ORCS_*`, including `ORCS_PROFILE`)
 //!
 //! Each layer overrides the previous.
 
@@ -17,14 +17,84 @@ use super::{
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-/// Helper macro for parsing boolean environment variables.
-macro_rules! parse_env_bool {
-    ($config:expr, $field:expr, $var:literal) => {
-        if let Ok(val) = std::env::var($var) {
-            $field = parse_bool(&val)
-                .ok_or_else(|| ConfigError::invalid_env_var($var, "expected bool"))?;
-        }
-    };
+/// Environment variable overrides.
+///
+/// Captures all `ORCS_*` environment variables as typed fields.
+/// Constructed once via [`from_env()`](Self::from_env) at startup,
+/// or directly in tests without touching the process environment.
+///
+/// # Example
+///
+/// ```ignore
+/// // Production: read from process environment
+/// let overrides = EnvOverrides::from_env()?;
+///
+/// // Test: construct directly (no env mutation)
+/// let overrides = EnvOverrides {
+///     debug: Some(true),
+///     model: Some("test-model".into()),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EnvOverrides {
+    /// `ORCS_DEBUG`
+    pub debug: Option<bool>,
+    /// `ORCS_AUTO_APPROVE`
+    pub auto_approve: Option<bool>,
+    /// `ORCS_VERBOSE`
+    pub verbose: Option<bool>,
+    /// `ORCS_COLOR`
+    pub color: Option<bool>,
+    /// `ORCS_SCRIPTS_AUTO_LOAD`
+    pub scripts_auto_load: Option<bool>,
+    /// `ORCS_MODEL`
+    pub model: Option<String>,
+    /// `ORCS_SESSION_PATH`
+    pub session_path: Option<PathBuf>,
+    /// `ORCS_PROFILE`
+    pub profile: Option<String>,
+}
+
+impl EnvOverrides {
+    /// Reads all `ORCS_*` environment variables from the process environment.
+    ///
+    /// This is the **only** place that calls `std::env::var` for config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidEnvVar`] if a boolean variable
+    /// contains an unparseable value.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            debug: read_env_bool("ORCS_DEBUG")?,
+            auto_approve: read_env_bool("ORCS_AUTO_APPROVE")?,
+            verbose: read_env_bool("ORCS_VERBOSE")?,
+            color: read_env_bool("ORCS_COLOR")?,
+            scripts_auto_load: read_env_bool("ORCS_SCRIPTS_AUTO_LOAD")?,
+            model: read_env_string("ORCS_MODEL"),
+            session_path: read_env_string("ORCS_SESSION_PATH").map(PathBuf::from),
+            profile: read_env_string("ORCS_PROFILE"),
+        })
+    }
+}
+
+/// Reads a boolean environment variable.
+///
+/// Returns `Ok(None)` if not set, `Ok(Some(bool))` if valid,
+/// `Err` if set but not parseable as bool.
+fn read_env_bool(name: &str) -> Result<Option<bool>, ConfigError> {
+    match std::env::var(name) {
+        Ok(val) => parse_bool(&val)
+            .map(Some)
+            .ok_or_else(|| ConfigError::invalid_env_var(name, "expected bool")),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Reads a string environment variable. Returns `None` if not set.
+fn read_env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 /// Configuration loader with builder pattern.
@@ -47,11 +117,17 @@ pub struct ConfigLoader {
     /// Project root directory.
     project_root: Option<PathBuf>,
 
-    /// Profile name to activate.
+    /// Profile name to activate (explicit, highest priority).
     ///
-    /// When set, the profile's `[config]` section is merged as a layer
-    /// between project config and env vars.
+    /// When set, this takes precedence over `ORCS_PROFILE` env var.
     profile: Option<String>,
+
+    /// Pre-built environment overrides.
+    ///
+    /// - `Some(overrides)` + `skip_env=false` → use these (test injection).
+    /// - `None` + `skip_env=false` → call `EnvOverrides::from_env()`.
+    /// - `skip_env=true` → no env overrides applied regardless.
+    env_overrides: Option<EnvOverrides>,
 
     /// Skip environment variable loading.
     skip_env: bool,
@@ -71,6 +147,7 @@ impl ConfigLoader {
             global_config_path: None,
             project_root: None,
             profile: None,
+            env_overrides: None,
             skip_env: false,
             skip_global: false,
             skip_project: false,
@@ -104,6 +181,18 @@ impl ConfigLoader {
         self
     }
 
+    /// Injects pre-built environment overrides.
+    ///
+    /// When set, `load()` uses these instead of reading `std::env::var`.
+    /// This enables deterministic testing without env mutation.
+    ///
+    /// Ignored if [`skip_env_vars()`](Self::skip_env_vars) is also called.
+    #[must_use]
+    pub fn with_env_overrides(mut self, overrides: EnvOverrides) -> Self {
+        self.env_overrides = Some(overrides);
+        self
+    }
+
     /// Skips environment variable loading.
     ///
     /// Useful for testing with deterministic config.
@@ -134,6 +223,9 @@ impl ConfigLoader {
     /// Returns [`ConfigError`] if any config file exists but cannot be parsed.
     /// Missing config files are silently ignored.
     pub fn load(&self) -> Result<OrcsConfig, ConfigError> {
+        // Resolve environment overrides once
+        let overrides = self.resolve_env_overrides()?;
+
         // Start with defaults
         let mut config = OrcsConfig::default();
 
@@ -169,11 +261,11 @@ impl ConfigLoader {
         }
 
         // Layer 3: Profile config overlay
-        // Resolve profile name: explicit > ORCS_PROFILE env var
+        // Priority: explicit > env override
         let profile_name = self
             .profile
             .clone()
-            .or_else(|| std::env::var("ORCS_PROFILE").ok());
+            .or_else(|| overrides.as_ref().and_then(|o| o.profile.clone()));
 
         if let Some(ref name) = profile_name {
             let store = ProfileStore::new(self.project_root.as_deref());
@@ -190,12 +282,29 @@ impl ConfigLoader {
             }
         }
 
-        // Layer 4: Environment variables
-        if !self.skip_env {
-            self.apply_env_vars(&mut config)?;
+        // Layer 4: Environment overrides
+        if let Some(ref ov) = overrides {
+            Self::apply_overrides(&mut config, ov);
         }
 
         Ok(config)
+    }
+
+    /// Resolves environment overrides based on builder state.
+    ///
+    /// - `skip_env=true` → `None` (no overrides)
+    /// - `env_overrides=Some(x)` → `Some(x)` (injected)
+    /// - otherwise → `Some(EnvOverrides::from_env()?)` (read from process)
+    fn resolve_env_overrides(&self) -> Result<Option<EnvOverrides>, ConfigError> {
+        if self.skip_env {
+            return Ok(None);
+        }
+
+        if let Some(ref ov) = self.env_overrides {
+            return Ok(Some(ov.clone()));
+        }
+
+        EnvOverrides::from_env().map(Some)
     }
 
     /// Loads a config file, returning None if it doesn't exist.
@@ -212,26 +321,31 @@ impl ConfigLoader {
         Ok(Some(config))
     }
 
-    /// Applies environment variable overrides.
-    fn apply_env_vars(&self, config: &mut OrcsConfig) -> Result<(), ConfigError> {
-        // Boolean environment variables
-        parse_env_bool!(config, config.debug, "ORCS_DEBUG");
-        parse_env_bool!(config, config.hil.auto_approve, "ORCS_AUTO_APPROVE");
-        parse_env_bool!(config, config.ui.verbose, "ORCS_VERBOSE");
-        parse_env_bool!(config, config.ui.color, "ORCS_COLOR");
-        parse_env_bool!(config, config.scripts.auto_load, "ORCS_SCRIPTS_AUTO_LOAD");
-
-        // String environment variables
-        if let Ok(val) = std::env::var("ORCS_MODEL") {
-            config.model.default = val;
+    /// Applies environment overrides to config.
+    ///
+    /// Pure function: reads from `EnvOverrides` fields only.
+    fn apply_overrides(config: &mut OrcsConfig, ov: &EnvOverrides) {
+        if let Some(v) = ov.debug {
+            config.debug = v;
         }
-
-        // Path environment variables
-        if let Ok(val) = std::env::var("ORCS_SESSION_PATH") {
-            config.paths.session_dir = Some(PathBuf::from(val));
+        if let Some(v) = ov.auto_approve {
+            config.hil.auto_approve = v;
         }
-
-        Ok(())
+        if let Some(v) = ov.verbose {
+            config.ui.verbose = v;
+        }
+        if let Some(v) = ov.color {
+            config.ui.color = v;
+        }
+        if let Some(v) = ov.scripts_auto_load {
+            config.scripts.auto_load = v;
+        }
+        if let Some(ref v) = ov.model {
+            config.model.default.clone_from(v);
+        }
+        if let Some(ref v) = ov.session_path {
+            config.paths.session_dir = Some(v.clone());
+        }
     }
 }
 
@@ -443,23 +557,180 @@ default = "profile-model"
         assert_eq!(config, OrcsConfig::default());
     }
 
+    // --- EnvOverrides tests (no set_var/remove_var) ---
+
     #[test]
-    fn env_var_override() {
-        // This test modifies env vars, run in isolation
-        std::env::set_var("ORCS_DEBUG", "true");
-        std::env::set_var("ORCS_MODEL", "env-model");
+    fn env_overrides_applied() {
+        let overrides = EnvOverrides {
+            debug: Some(true),
+            model: Some("env-model".into()),
+            ..Default::default()
+        };
 
         let config = ConfigLoader::new()
             .skip_global_config()
             .skip_project_config()
+            .with_env_overrides(overrides)
             .load()
             .unwrap();
 
         assert!(config.debug);
         assert_eq!(config.model.default, "env-model");
+    }
 
-        // Cleanup
-        std::env::remove_var("ORCS_DEBUG");
-        std::env::remove_var("ORCS_MODEL");
+    #[test]
+    fn env_overrides_all_fields() {
+        let overrides = EnvOverrides {
+            debug: Some(true),
+            auto_approve: Some(true),
+            verbose: Some(true),
+            color: Some(false),
+            scripts_auto_load: Some(false),
+            model: Some("override-model".into()),
+            session_path: Some(PathBuf::from("/custom/sessions")),
+            profile: None,
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .load()
+            .unwrap();
+
+        assert!(config.debug);
+        assert!(config.hil.auto_approve);
+        assert!(config.ui.verbose);
+        assert!(!config.ui.color);
+        assert!(!config.scripts.auto_load);
+        assert_eq!(config.model.default, "override-model");
+        assert_eq!(
+            config.paths.session_dir,
+            Some(PathBuf::from("/custom/sessions"))
+        );
+    }
+
+    #[test]
+    fn skip_env_ignores_injected_overrides() {
+        let overrides = EnvOverrides {
+            debug: Some(true),
+            ..Default::default()
+        };
+
+        // skip_env_vars takes precedence
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .skip_env_vars()
+            .load()
+            .unwrap();
+
+        assert!(!config.debug); // default, not overridden
+    }
+
+    #[test]
+    fn env_profile_activates_profile() {
+        let project_temp = TempDir::new().unwrap();
+
+        let profiles_dir = project_temp.path().join(".orcs").join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::write(
+            profiles_dir.join("env-profile.toml"),
+            r#"
+[profile]
+name = "env-profile"
+
+[config]
+debug = true
+"#,
+        )
+        .unwrap();
+
+        let overrides = EnvOverrides {
+            profile: Some("env-profile".into()),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .with_project_root(project_temp.path())
+            .with_env_overrides(overrides)
+            .load()
+            .unwrap();
+
+        assert!(config.debug);
+    }
+
+    #[test]
+    fn explicit_profile_overrides_env_profile() {
+        let project_temp = TempDir::new().unwrap();
+        let profiles_dir = project_temp.path().join(".orcs").join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+
+        std::fs::write(
+            profiles_dir.join("env-profile.toml"),
+            r#"
+[profile]
+name = "env-profile"
+
+[config.model]
+default = "env-model"
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            profiles_dir.join("explicit-profile.toml"),
+            r#"
+[profile]
+name = "explicit-profile"
+
+[config.model]
+default = "explicit-model"
+"#,
+        )
+        .unwrap();
+
+        let overrides = EnvOverrides {
+            profile: Some("env-profile".into()),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .with_project_root(project_temp.path())
+            .with_profile("explicit-profile")
+            .with_env_overrides(overrides)
+            .load()
+            .unwrap();
+
+        // explicit profile wins over env
+        assert_eq!(config.model.default, "explicit-model");
+    }
+
+    #[test]
+    fn env_overrides_default_is_empty() {
+        let ov = EnvOverrides::default();
+        assert!(ov.debug.is_none());
+        assert!(ov.auto_approve.is_none());
+        assert!(ov.verbose.is_none());
+        assert!(ov.color.is_none());
+        assert!(ov.scripts_auto_load.is_none());
+        assert!(ov.model.is_none());
+        assert!(ov.session_path.is_none());
+        assert!(ov.profile.is_none());
+    }
+
+    #[test]
+    fn empty_overrides_preserve_defaults() {
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(EnvOverrides::default())
+            .load()
+            .unwrap();
+
+        assert_eq!(config, OrcsConfig::default());
     }
 }
