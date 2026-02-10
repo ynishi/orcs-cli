@@ -44,6 +44,7 @@ use crate::session::{SessionAsset, SessionStore, StorageError};
 use crate::Principal;
 use orcs_component::{Component, ComponentSnapshot};
 use orcs_event::Signal;
+use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -131,6 +132,8 @@ pub struct OrcsEngine {
     io_channel: ChannelId,
     /// Shared Board for cross-component event visibility.
     board: SharedBoard,
+    /// Shared hook registry (injected into all spawned runners).
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 impl OrcsEngine {
@@ -182,6 +185,32 @@ impl OrcsEngine {
             collected_snapshots: HashMap::new(),
             io_channel,
             board: board::shared_board(),
+            hook_registry: None,
+        }
+    }
+
+    /// Sets the shared hook registry for all spawned runners.
+    ///
+    /// Must be called before spawning runners to ensure they receive
+    /// the registry.
+    pub fn set_hook_registry(&mut self, registry: SharedHookRegistry) {
+        self.hook_registry = Some(registry);
+    }
+
+    /// Returns a reference to the hook registry, if configured.
+    #[must_use]
+    pub fn hook_registry(&self) -> Option<&SharedHookRegistry> {
+        self.hook_registry.as_ref()
+    }
+
+    /// Applies the hook registry to a ChannelRunnerBuilder if configured.
+    fn apply_hook_registry(
+        &self,
+        builder: crate::channel::ChannelRunnerBuilder,
+    ) -> crate::channel::ChannelRunnerBuilder {
+        match &self.hook_registry {
+            Some(reg) => builder.with_hook_registry(Arc::clone(reg)),
+            None => builder,
         }
     }
 
@@ -219,15 +248,15 @@ impl OrcsEngine {
     ) -> ChannelHandle {
         let component_id = component.id().clone();
         let signal_rx = self.signal_tx.subscribe();
-        let (runner, handle) = ChannelRunner::builder(
+        let builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
             signal_rx,
             component,
         )
-        .with_request_channel()
-        .build();
+        .with_request_channel();
+        let (runner, handle) = self.apply_hook_registry(builder).build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!("Spawned runner for channel {}", channel_id);
@@ -289,7 +318,7 @@ impl OrcsEngine {
             builder = builder.with_output_channel(tx);
         }
 
-        let (runner, handle) = builder.build();
+        let (runner, handle) = self.apply_hook_registry(builder).build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -352,7 +381,7 @@ impl OrcsEngine {
             builder = builder.with_child_spawner(lua_loader);
         }
 
-        let (runner, handle) = builder.build();
+        let (runner, handle) = self.apply_hook_registry(builder).build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -528,7 +557,7 @@ impl OrcsEngine {
         let component_id = component.id().clone();
 
         // Build runner with auth
-        let (runner, handle) = ChannelRunner::builder(
+        let builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
@@ -541,8 +570,8 @@ impl OrcsEngine {
         .with_board(Arc::clone(&self.board))
         .with_session_arc(session)
         .with_checker(checker)
-        .with_request_channel()
-        .build();
+        .with_request_channel();
+        let (runner, handle) = self.apply_hook_registry(builder).build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -615,7 +644,7 @@ impl OrcsEngine {
             builder = builder.with_child_spawner(lua_loader);
         }
 
-        let (runner, handle) = builder.build();
+        let (runner, handle) = self.apply_hook_registry(builder).build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(

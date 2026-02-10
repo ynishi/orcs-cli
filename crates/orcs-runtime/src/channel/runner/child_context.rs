@@ -15,6 +15,7 @@ use orcs_component::{
     ChildResult, Component, ComponentLoader, RunError, SpawnError,
 };
 use orcs_event::{EventCategory, Signal};
+use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,10 @@ pub struct ChildContextImpl {
     component_channel_map: Option<SharedComponentChannelMap>,
     /// Channel ID of the owning ChannelRunner (for RPC source_channel).
     channel_id: Option<ChannelId>,
+
+    // -- Hook support --
+    /// Shared hook registry (propagated to child runners).
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 /// Trait for loading Lua children from config.
@@ -110,6 +115,7 @@ impl ChildContextImpl {
             shared_handles: None,
             component_channel_map: None,
             channel_id: None,
+            hook_registry: None,
         }
     }
 
@@ -315,6 +321,13 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the shared hook registry for propagation to child runners.
+    #[must_use]
+    pub fn with_hook_registry(mut self, registry: SharedHookRegistry) -> Self {
+        self.hook_registry = Some(registry);
+        self
+    }
+
     /// Returns true if runner spawning is enabled.
     #[must_use]
     pub fn can_spawn_runner(&self) -> bool {
@@ -376,6 +389,7 @@ impl ChildContextImpl {
         let session_clone = self.session.clone();
         let checker_clone = self.checker.clone();
         let grants_clone = self.grants.clone();
+        let hook_registry_clone = self.hook_registry.clone();
 
         // Spawn the runner in a new task
         tokio::spawn(async move {
@@ -399,6 +413,10 @@ impl ChildContextImpl {
             }
             if let Some(grants) = grants_clone {
                 builder = builder.with_grants(grants);
+            }
+            // Propagate hook registry to child runner
+            if let Some(registry) = hook_registry_clone {
+                builder = builder.with_hook_registry(registry);
             }
 
             let (runner, _handle) = builder.build();
@@ -438,6 +456,9 @@ impl ChildContextImpl {
             self.channel_id,
         ) {
             ctx = ctx.with_rpc_support(Arc::clone(h), Arc::clone(m), ch);
+        }
+        if let Some(reg) = &self.hook_registry {
+            ctx = ctx.with_hook_registry(Arc::clone(reg));
         }
         Box::new(ctx)
     }

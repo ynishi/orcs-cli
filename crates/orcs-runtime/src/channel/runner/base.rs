@@ -1328,6 +1328,9 @@ impl ChannelRunnerBuilder {
         if let (Some(handles), Some(map)) = (rpc_handles.clone(), rpc_map.clone()) {
             ctx = ctx.with_rpc_support(handles, map, channel_id);
         }
+        if let Some(reg) = &self.hook_registry {
+            ctx = ctx.with_hook_registry(Arc::clone(reg));
+        }
         ctx
     }
 
