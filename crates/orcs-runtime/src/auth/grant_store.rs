@@ -16,7 +16,7 @@
 //! Uses **prefix matching**: a command is granted if it starts with
 //! any stored pattern. One-time grants are consumed on first match.
 
-use orcs_auth::{CommandGrant, GrantKind, GrantPolicy};
+use orcs_auth::{CommandGrant, GrantError, GrantKind, GrantPolicy};
 use std::collections::HashSet;
 use std::sync::RwLock;
 
@@ -74,7 +74,7 @@ impl DefaultGrantStore {
     ///
     /// Typically used to restore session state:
     /// ```ignore
-    /// let grants = old_store.list_grants();
+    /// let grants = old_store.list_grants().unwrap();
     /// // ... serialize grants to SessionAsset, persist, reload ...
     /// let new_store = DefaultGrantStore::new();
     /// new_store.restore_grants(&grants);
@@ -175,22 +175,25 @@ impl GrantPolicy for DefaultGrantStore {
         persistent.saturating_add(one_time)
     }
 
-    fn list_grants(&self) -> Vec<CommandGrant> {
-        let mut grants = Vec::new();
+    fn list_grants(&self) -> Result<Vec<CommandGrant>, GrantError> {
+        let persistent = self
+            .persistent
+            .read()
+            .map_err(|_| GrantError::LockPoisoned {
+                context: "persistent grants".into(),
+            })?;
+        let one_time = self.one_time.read().map_err(|_| GrantError::LockPoisoned {
+            context: "one-time grants".into(),
+        })?;
 
-        if let Ok(set) = self.persistent.read() {
-            grants.extend(set.iter().map(|p| CommandGrant::persistent(p.as_str())));
-        } else {
-            tracing::error!("grant_store: persistent lock poisoned on list_grants");
-        }
-
-        if let Ok(set) = self.one_time.read() {
-            grants.extend(set.iter().map(|p| CommandGrant::one_time(p.as_str())));
-        } else {
-            tracing::error!("grant_store: one_time lock poisoned on list_grants");
-        }
-
-        grants
+        let mut grants = Vec::with_capacity(persistent.len() + one_time.len());
+        grants.extend(
+            persistent
+                .iter()
+                .map(|p| CommandGrant::persistent(p.as_str())),
+        );
+        grants.extend(one_time.iter().map(|p| CommandGrant::one_time(p.as_str())));
+        Ok(grants)
     }
 }
 
@@ -310,7 +313,7 @@ mod tests {
     #[test]
     fn list_grants_empty() {
         let store = DefaultGrantStore::new();
-        assert!(store.list_grants().is_empty());
+        assert!(store.list_grants().unwrap().is_empty());
     }
 
     #[test]
@@ -319,7 +322,7 @@ mod tests {
         store.grant(CommandGrant::persistent("ls"));
         store.grant(CommandGrant::persistent("cargo"));
 
-        let grants = store.list_grants();
+        let grants = store.list_grants().unwrap();
         assert_eq!(grants.len(), 2);
         assert!(grants.iter().all(|g| g.kind == GrantKind::Persistent));
 
@@ -334,7 +337,7 @@ mod tests {
         store.grant(CommandGrant::persistent("ls"));
         store.grant(CommandGrant::one_time("rm -rf"));
 
-        let grants = store.list_grants();
+        let grants = store.list_grants().unwrap();
         assert_eq!(grants.len(), 2);
 
         let persistent: Vec<_> = grants
@@ -358,7 +361,7 @@ mod tests {
         store.grant(CommandGrant::persistent("cargo"));
         store.grant(CommandGrant::one_time("rm -rf"));
 
-        let grants = store.list_grants();
+        let grants = store.list_grants().unwrap();
 
         // Restore into a new store via restore_grants
         let store2 = DefaultGrantStore::new();
@@ -395,7 +398,7 @@ mod tests {
         store.grant(CommandGrant::persistent("cargo"));
         store.grant(CommandGrant::one_time("rm -rf"));
 
-        let grants = store.list_grants();
+        let grants = store.list_grants().unwrap();
         let json = serde_json::to_string(&grants).expect("serialize grants");
         let restored: Vec<CommandGrant> = serde_json::from_str(&json).expect("deserialize grants");
 

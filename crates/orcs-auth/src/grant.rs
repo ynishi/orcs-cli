@@ -31,6 +31,18 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error returned by grant operations that access internal state.
+#[derive(Debug, Error)]
+pub enum GrantError {
+    /// Internal lock was poisoned (a thread panicked while holding it).
+    #[error("grant store lock poisoned: {context}")]
+    LockPoisoned {
+        /// Which lock was poisoned.
+        context: String,
+    },
+}
 
 /// A dynamic permission grant for a command pattern.
 ///
@@ -134,11 +146,15 @@ pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
     /// Used for snapshot/persistence — callers can serialize the returned
     /// grants and later restore them via [`grant`](Self::grant).
     ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    ///
     /// # Notes
     ///
     /// - OneTime grants are included (they haven't been consumed yet)
     /// - The order of returned grants is unspecified
-    fn list_grants(&self) -> Vec<CommandGrant>;
+    fn list_grants(&self) -> Result<Vec<CommandGrant>, GrantError>;
 }
 
 #[cfg(test)]

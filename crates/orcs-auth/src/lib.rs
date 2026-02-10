@@ -54,7 +54,7 @@ pub mod session;
 // Re-export core types
 pub use capability::Capability;
 pub use error::AccessDenied;
-pub use grant::{CommandGrant, GrantKind, GrantPolicy};
+pub use grant::{CommandGrant, GrantError, GrantKind, GrantPolicy};
 pub use permission::CommandPermission;
 pub use policy::PermissionPolicy;
 pub use privilege::PrivilegeLevel;
