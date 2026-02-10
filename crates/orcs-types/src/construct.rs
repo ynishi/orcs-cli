@@ -291,7 +291,8 @@ mod tests {
     fn try_new_tuple_args_valid() {
         let result = Range::try_new((1, 10));
         assert!(result.is_ok());
-        let range = result.unwrap();
+        let range =
+            result.expect("Range::try_new((1, 10)) should succeed for valid ascending range");
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 10);
     }

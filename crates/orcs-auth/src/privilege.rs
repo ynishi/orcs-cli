@@ -188,7 +188,9 @@ mod tests {
     #[test]
     fn remaining_decreases() {
         let level = PrivilegeLevel::elevated_for(Duration::from_secs(60));
-        let remaining = level.remaining().unwrap();
+        let remaining = level
+            .remaining()
+            .expect("elevated level should have remaining duration");
         assert!(remaining <= Duration::from_secs(60));
     }
 }
