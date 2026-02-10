@@ -58,6 +58,7 @@
 //! ```
 
 mod app;
+pub mod builtins;
 mod error;
 
 pub use app::{OrcsApp, OrcsAppBuilder};
@@ -85,8 +86,8 @@ pub use orcs_runtime::{
 
 // Re-export configuration types
 pub use orcs_runtime::{
-    ConfigError, ConfigLoader, ConfigResolver, EnvOverrides, HilConfig, ModelConfig, NoOpResolver,
-    OrcsConfig, PathsConfig, UiConfig,
+    ComponentsConfig, ConfigError, ConfigLoader, ConfigResolver, EnvOverrides, HilConfig,
+    ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
 };
 
 // Re-export sandbox types
