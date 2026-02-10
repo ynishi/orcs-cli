@@ -48,6 +48,7 @@ use orcs_component::{
     AsyncChildContext, ChildContext, Component, ComponentLoader, ComponentSnapshot, SnapshotError,
 };
 use orcs_event::{EventCategory, Request, Signal};
+use orcs_hook::SharedHookRegistry;
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -361,6 +362,8 @@ pub struct ChannelRunner {
     shared_handles: Option<SharedChannelHandles>,
     /// Shared FQN → ChannelId map for RPC from children.
     component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
+    /// Shared hook registry for lifecycle hook dispatch.
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -375,6 +378,12 @@ async fn recv_request(rx: &mut Option<mpsc::Receiver<RequestEnvelope>>) -> Optio
 }
 
 impl ChannelRunner {
+    /// Returns a reference to the shared hook registry, if configured.
+    #[must_use]
+    pub fn hook_registry(&self) -> Option<&SharedHookRegistry> {
+        self.hook_registry.as_ref()
+    }
+
     /// Creates a ChildContext for use by managed children.
     ///
     /// The returned context can be injected into LuaChild instances
@@ -886,6 +895,8 @@ pub struct ChannelRunnerBuilder {
     enable_request_channel: bool,
     /// Shared ComponentId → ChannelId mapping for RPC routing via Emitter.
     component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
+    /// Shared hook registry for lifecycle hook dispatch.
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 impl ChannelRunnerBuilder {
@@ -917,6 +928,7 @@ impl ChannelRunnerBuilder {
             initial_snapshot: None,
             enable_request_channel: false,
             component_channel_map: None,
+            hook_registry: None,
         }
     }
 
@@ -1083,6 +1095,16 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_request_channel(mut self) -> Self {
         self.enable_request_channel = true;
+        self
+    }
+
+    /// Sets the shared hook registry for lifecycle hook dispatch.
+    ///
+    /// When set, the runner will dispatch hooks at lifecycle points
+    /// (e.g., pre/post request, signal, component init/shutdown).
+    #[must_use]
+    pub fn with_hook_registry(mut self, registry: SharedHookRegistry) -> Self {
+        self.hook_registry = Some(registry);
         self
     }
 
@@ -1309,6 +1331,7 @@ impl ChannelRunnerBuilder {
             initial_snapshot: self.initial_snapshot,
             shared_handles: rpc_handles,
             component_channel_map: rpc_map,
+            hook_registry: self.hook_registry,
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

@@ -2,6 +2,7 @@
 //!
 //! All types implement [`Default`] for compile-time fallback values.
 
+use orcs_hook::HooksConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -42,6 +43,9 @@ pub struct OrcsConfig {
 
     /// Script configuration.
     pub scripts: ScriptsConfig,
+
+    /// Hooks configuration.
+    pub hooks: HooksConfig,
 }
 
 impl OrcsConfig {
@@ -86,6 +90,7 @@ impl OrcsConfig {
         self.paths.merge(&other.paths);
         self.ui.merge(&other.ui);
         self.scripts.merge(&other.scripts);
+        self.hooks.merge(&other.hooks);
     }
 }
 
@@ -313,6 +318,7 @@ mod tests {
         assert!(!config.debug);
         assert_eq!(config.model.default, "claude-3-opus");
         assert!(!config.hil.auto_approve);
+        assert!(config.hooks.hooks.is_empty());
     }
 
     #[test]
@@ -441,5 +447,138 @@ auto_load = true
 
         // Nonexistent paths are filtered out
         assert!(resolved.is_empty());
+    }
+
+    // === HooksConfig integration tests ===
+
+    #[test]
+    fn hooks_config_toml_parse() {
+        let toml = r#"
+[[hooks.hooks]]
+id = "audit"
+fql = "builtin::*"
+point = "request.pre_dispatch"
+script = "hooks/audit.lua"
+priority = 50
+enabled = true
+"#;
+        let config = OrcsConfig::from_toml(toml).unwrap();
+        assert_eq!(config.hooks.hooks.len(), 1);
+        assert_eq!(config.hooks.hooks[0].id.as_deref(), Some("audit"));
+        assert_eq!(config.hooks.hooks[0].priority, 50);
+    }
+
+    #[test]
+    fn hooks_config_toml_roundtrip() {
+        let mut config = OrcsConfig::default();
+        config.hooks = HooksConfig {
+            hooks: vec![orcs_hook::HookDef {
+                id: Some("test-hook".into()),
+                fql: "*::*".into(),
+                point: "request.pre_dispatch".into(),
+                script: Some("hooks/test.lua".into()),
+                handler_inline: None,
+                priority: 100,
+                enabled: true,
+            }],
+        };
+
+        let toml = config.to_toml().unwrap();
+        let restored = OrcsConfig::from_toml(&toml).unwrap();
+        assert_eq!(config.hooks, restored.hooks);
+    }
+
+    #[test]
+    fn hooks_config_merge() {
+        let mut base = OrcsConfig::default();
+        base.hooks = HooksConfig {
+            hooks: vec![orcs_hook::HookDef {
+                id: Some("h1".into()),
+                fql: "*::*".into(),
+                point: "request.pre_dispatch".into(),
+                script: Some("base.lua".into()),
+                handler_inline: None,
+                priority: 100,
+                enabled: true,
+            }],
+        };
+
+        let overlay = OrcsConfig {
+            hooks: HooksConfig {
+                hooks: vec![orcs_hook::HookDef {
+                    id: Some("h2".into()),
+                    fql: "builtin::llm".into(),
+                    point: "tool.pre_execute".into(),
+                    script: Some("overlay.lua".into()),
+                    handler_inline: None,
+                    priority: 50,
+                    enabled: true,
+                }],
+            },
+            ..Default::default()
+        };
+
+        base.merge(&overlay);
+        assert_eq!(base.hooks.hooks.len(), 2);
+        assert_eq!(base.hooks.hooks[0].id.as_deref(), Some("h1"));
+        assert_eq!(base.hooks.hooks[1].id.as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn hooks_config_merge_override_same_id() {
+        let mut base = OrcsConfig::default();
+        base.hooks = HooksConfig {
+            hooks: vec![orcs_hook::HookDef {
+                id: Some("h1".into()),
+                fql: "*::*".into(),
+                point: "request.pre_dispatch".into(),
+                script: Some("old.lua".into()),
+                handler_inline: None,
+                priority: 100,
+                enabled: true,
+            }],
+        };
+
+        let overlay = OrcsConfig {
+            hooks: HooksConfig {
+                hooks: vec![orcs_hook::HookDef {
+                    id: Some("h1".into()),
+                    fql: "builtin::llm".into(),
+                    point: "request.pre_dispatch".into(),
+                    script: Some("new.lua".into()),
+                    handler_inline: None,
+                    priority: 10,
+                    enabled: true,
+                }],
+            },
+            ..Default::default()
+        };
+
+        base.merge(&overlay);
+        assert_eq!(base.hooks.hooks.len(), 1);
+        assert_eq!(base.hooks.hooks[0].script.as_deref(), Some("new.lua"));
+        assert_eq!(base.hooks.hooks[0].priority, 10);
+    }
+
+    #[test]
+    fn hooks_config_empty_merge_preserves_base() {
+        let mut base = OrcsConfig::default();
+        base.hooks = HooksConfig {
+            hooks: vec![orcs_hook::HookDef {
+                id: Some("h1".into()),
+                fql: "*::*".into(),
+                point: "request.pre_dispatch".into(),
+                script: Some("keep.lua".into()),
+                handler_inline: None,
+                priority: 100,
+                enabled: true,
+            }],
+        };
+
+        let overlay = OrcsConfig::default();
+        base.merge(&overlay);
+
+        assert_eq!(base.hooks.hooks.len(), 1);
+        assert_eq!(base.hooks.hooks[0].id.as_deref(), Some("h1"));
     }
 }

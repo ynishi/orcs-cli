@@ -806,6 +806,7 @@ dependencies = [
  "orcs-auth",
  "orcs-component",
  "orcs-event",
+ "orcs-hook",
  "orcs-types",
  "serde",
  "serde_json",

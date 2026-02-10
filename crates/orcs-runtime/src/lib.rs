@@ -139,6 +139,7 @@ pub use io::{
     IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort, InputCommand, InputContext,
     OutputStyle,
 };
+pub use orcs_hook::{shared_hook_registry, SharedHookRegistry};
 pub use sandbox::{ProjectSandbox, SandboxError, SandboxPolicy};
 pub use session::{
     default_session_path, LocalFileStore, SessionAsset, SessionMeta, SessionStore, StorageError,
