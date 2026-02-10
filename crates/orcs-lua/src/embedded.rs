@@ -223,6 +223,7 @@ mod tests {
         assert!(scripts.contains_key("tool"));
         assert!(scripts.contains_key("code_agent"));
         assert!(scripts.contains_key("skill_manager"));
+        assert!(scripts.contains_key("profile_manager"));
     }
 
     #[test]

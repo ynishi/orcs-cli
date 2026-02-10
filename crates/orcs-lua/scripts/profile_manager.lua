@@ -19,24 +19,38 @@ local profiles_cache = {}    -- name -> { path, def }
 
 -- === Helpers ===
 
+--- Build the ordered list of profile search directories.
+--- Project profiles (highest priority) come first, then global.
+local function get_search_dirs()
+    local dirs = {
+        orcs.pwd .. "/.orcs/profiles",
+    }
+    local home = os.getenv("HOME")
+    if home then
+        table.insert(dirs, home .. "/.orcs/profiles")
+    end
+    return dirs
+end
+
+--- Validate a profile name (no path traversal characters).
+--- Returns true if valid, false + error string if not.
+local function validate_profile_name(name)
+    if not name or name == "" then
+        return false, "profile name is empty"
+    end
+    if name:find("[/\\]") or name:find("%.%.") then
+        return false, "invalid profile name (must not contain '/', '\\', or '..'): " .. name
+    end
+    return true
+end
+
 --- Discover profile TOML files from well-known directories.
 --- Returns array of { name, path, description }
 local function discover_profiles()
     local entries = {}
     local seen = {}
 
-    local search_dirs = {
-        orcs.pwd .. "/.orcs/profiles",
-    }
-
-    -- Add ~/.orcs/profiles if available
-    -- TODO: cross-platform support (Windows: USERPROFILE)
-    local home = os.getenv("HOME")
-    if home then
-        table.insert(search_dirs, home .. "/.orcs/profiles")
-    end
-
-    for _, dir in ipairs(search_dirs) do
+    for _, dir in ipairs(get_search_dirs()) do
         local result = orcs.glob("*.toml", dir)
         if result and result.ok and result.files then
             for _, file_path in ipairs(result.files) do
@@ -77,22 +91,18 @@ end
 --- Load a profile definition by name.
 --- Returns def table or nil, error_string
 local function load_profile(name)
+    -- Validate name to prevent path traversal
+    local valid, verr = validate_profile_name(name)
+    if not valid then
+        return nil, verr
+    end
+
     -- Check cache first
     if profiles_cache[name] and profiles_cache[name].def then
         return profiles_cache[name].def
     end
 
-    -- Search for the profile file
-    local search_dirs = {
-        orcs.pwd .. "/.orcs/profiles",
-    }
-    -- TODO: cross-platform support (Windows: USERPROFILE)
-    local home = os.getenv("HOME")
-    if home then
-        table.insert(search_dirs, home .. "/.orcs/profiles")
-    end
-
-    for _, dir in ipairs(search_dirs) do
+    for _, dir in ipairs(get_search_dirs()) do
         local path = dir .. "/" .. name .. ".toml"
         local result = orcs.read(path)
         if result and result.ok and result.content then

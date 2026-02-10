@@ -368,17 +368,30 @@ fn lua_to_toml_value(_lua: &Lua, value: &mlua::Value) -> mlua::Result<toml::Valu
         mlua::Value::Number(f) => Ok(toml::Value::Float(*f)),
         mlua::Value::String(s) => Ok(toml::Value::String(s.to_str()?.to_string())),
         mlua::Value::Table(t) => {
-            // Detect array (consecutive integer keys starting from 1)
-            let is_array = t
-                .clone()
-                .pairs::<i64, mlua::Value>()
-                .enumerate()
-                .all(|(i, pair)| pair.ok().is_some_and(|(k, _)| k == (i as i64 + 1)));
+            // Single-pass: collect pairs and detect array simultaneously.
+            // Array = all keys are consecutive integers starting from 1.
+            let mut int_entries: Vec<(i64, mlua::Value)> = Vec::new();
+            let mut is_array = true;
+            let mut expected_idx: i64 = 1;
 
-            if is_array && t.raw_len() > 0 {
-                let mut arr = Vec::new();
-                for pair in t.clone().pairs::<i64, mlua::Value>() {
-                    let (_, v) = pair?;
+            for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+                let (k, v) = pair?;
+                if is_array {
+                    if let mlua::Value::Integer(i) = k {
+                        if i == expected_idx {
+                            int_entries.push((i, v));
+                            expected_idx += 1;
+                            continue;
+                        }
+                    }
+                    // Not a consecutive integer key — fall back to table
+                    is_array = false;
+                }
+            }
+
+            if is_array && !int_entries.is_empty() {
+                let mut arr = Vec::with_capacity(int_entries.len());
+                for (_, v) in int_entries {
                     arr.push(lua_to_toml_value(_lua, &v)?);
                 }
                 Ok(toml::Value::Array(arr))
@@ -386,12 +399,17 @@ fn lua_to_toml_value(_lua: &Lua, value: &mlua::Value) -> mlua::Result<toml::Valu
                 let mut map = toml::map::Map::new();
                 for pair in t.clone().pairs::<String, mlua::Value>() {
                     let (k, v) = pair?;
+                    if matches!(v, mlua::Value::Nil) {
+                        continue; // skip nil values
+                    }
                     map.insert(k, lua_to_toml_value(_lua, &v)?);
                 }
                 Ok(toml::Value::Table(map))
             }
         }
-        mlua::Value::Nil => Ok(toml::Value::String(String::new())),
+        mlua::Value::Nil => Err(mlua::Error::RuntimeError(
+            "cannot convert nil to TOML value".to_string(),
+        )),
         _ => Err(mlua::Error::RuntimeError(format!(
             "cannot convert {:?} to TOML",
             value
