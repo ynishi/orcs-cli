@@ -114,7 +114,7 @@ pub enum GrantKind {
 /// use orcs_auth::{GrantPolicy, CommandGrant};
 ///
 /// fn check_with_grants(grants: &dyn GrantPolicy, cmd: &str) -> bool {
-///     grants.is_granted(cmd)
+///     grants.is_granted(cmd).unwrap_or(false)
 /// }
 /// ```
 pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
@@ -122,21 +122,37 @@ pub trait GrantPolicy: Send + Sync + std::fmt::Debug {
     ///
     /// After granting, commands matching this pattern will be allowed
     /// by [`is_granted`](Self::is_granted).
-    fn grant(&self, grant: CommandGrant);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn grant(&self, grant: CommandGrant) -> Result<(), GrantError>;
 
     /// Revokes a previously granted pattern.
     ///
     /// The pattern must match exactly (not prefix match).
-    fn revoke(&self, pattern: &str);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn revoke(&self, pattern: &str) -> Result<(), GrantError>;
 
     /// Checks if a command is allowed by any granted pattern.
     ///
     /// Uses **prefix matching**: returns `true` if the command starts
     /// with any granted pattern. One-time grants are consumed on match.
-    fn is_granted(&self, command: &str) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn is_granted(&self, command: &str) -> Result<bool, GrantError>;
 
     /// Clears all grants.
-    fn clear(&self);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantError`] if internal state is inaccessible.
+    fn clear(&self) -> Result<(), GrantError>;
 
     /// Returns the number of active grants.
     fn grant_count(&self) -> usize;

@@ -168,8 +168,10 @@ impl SessionAsset {
     /// Call this before persisting the session to capture the current
     /// grant state from a [`GrantPolicy`].
     pub fn save_grants(&mut self, grants: Vec<CommandGrant>) {
-        self.granted_commands = grants;
-        self.touch();
+        if self.granted_commands != grants {
+            self.granted_commands = grants;
+            self.touch();
+        }
     }
 
     /// Returns the saved granted commands.
@@ -749,8 +751,8 @@ mod tests {
         asset.add_turn(ConversationTurn::user("test"));
         asset.preferences.coding_style.preferred_languages = vec!["Rust".into()];
 
-        let json = asset.to_json().unwrap();
-        let restored = SessionAsset::from_json(&json).unwrap();
+        let json = asset.to_json().expect("serialize session asset");
+        let restored = SessionAsset::from_json(&json).expect("deserialize session asset");
 
         assert_eq!(asset.id, restored.id);
         assert_eq!(restored.history.len(), 1);
@@ -813,8 +815,8 @@ mod tests {
             CommandGrant::one_time("rm -rf"),
         ]);
 
-        let json = asset.to_json().unwrap();
-        let restored = SessionAsset::from_json(&json).unwrap();
+        let json = asset.to_json().expect("serialize grants asset");
+        let restored = SessionAsset::from_json(&json).expect("deserialize grants asset");
 
         assert_eq!(restored.grant_count(), 2);
         assert_eq!(restored.granted_commands()[0].pattern, "ls");
@@ -850,7 +852,7 @@ mod tests {
             "metadata": {}
         }"#;
 
-        let asset = SessionAsset::from_json(json).unwrap();
+        let asset = SessionAsset::from_json(json).expect("backward compat deserialization");
         assert!(asset.granted_commands().is_empty());
     }
 }

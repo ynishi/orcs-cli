@@ -248,7 +248,9 @@ impl ChildContextImpl {
     /// Does nothing if no grants store is configured.
     pub fn grant_command(&self, pattern: &str) {
         if let Some(grants) = &self.grants {
-            grants.grant(CommandGrant::persistent(pattern));
+            if let Err(e) = grants.grant(CommandGrant::persistent(pattern)) {
+                tracing::error!("grant_command failed: {e}");
+            }
         }
     }
 
@@ -609,7 +611,9 @@ impl ChildContext for ChildContextImpl {
 
     fn grant_command(&self, pattern: &str) {
         if let Some(grants) = &self.grants {
-            grants.grant(CommandGrant::persistent(pattern));
+            if let Err(e) = grants.grant(CommandGrant::persistent(pattern)) {
+                tracing::error!("grant_command failed: {e}");
+            }
         }
     }
 
