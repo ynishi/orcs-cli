@@ -70,8 +70,8 @@ use orcs_event::Signal;
 use orcs_lua::{LuaChild, ScriptLoader};
 use orcs_runtime::auth::{DefaultGrantStore, DefaultPolicy, GrantPolicy, PermissionChecker};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
-use orcs_runtime::LuaChildLoader;
 use orcs_runtime::session::SessionStore;
+use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
     ChannelConfig, ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle, IOPort,
     InputCommand, InputContext, LocalFileStore, OrcsConfig, OrcsEngine, Session, SessionAsset,

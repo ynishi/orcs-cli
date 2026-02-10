@@ -875,7 +875,6 @@ impl OrcsEngine {
     pub fn collected_snapshots(&self) -> &HashMap<String, ComponentSnapshot> {
         &self.collected_snapshots
     }
-
 }
 
 #[cfg(test)]
@@ -1161,7 +1160,9 @@ mod tests {
         let mut asset = SessionAsset::new();
         let session_id = asset.id.clone();
         for (fqn, snapshot) in engine.collected_snapshots() {
-            asset.component_snapshots.insert(fqn.clone(), snapshot.clone());
+            asset
+                .component_snapshots
+                .insert(fqn.clone(), snapshot.clone());
         }
         asset.touch();
         store.save(&asset).await.expect("save session");
