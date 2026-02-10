@@ -372,6 +372,12 @@ impl LuaComponent {
     ///
     /// * `ctx` - The child context
     pub fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        // Extract hook_registry via type-erased extension before wrapping ctx
+        let hook_registry = ctx
+            .extension("hook_registry")
+            .and_then(|any| any.downcast::<orcs_hook::SharedHookRegistry>().ok())
+            .map(|boxed| *boxed);
+
         let ctx_arc = Arc::new(Mutex::new(ctx));
         self.child_context = Some(Arc::clone(&ctx_arc));
 
@@ -379,6 +385,33 @@ impl LuaComponent {
         if let Ok(lua) = self.lua.lock() {
             if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
                 tracing::warn!("Failed to register child context functions: {}", e);
+            }
+
+            // Wire up orcs.hook() / orcs.unhook() / tool hooks if hook_registry is available
+            if let Some(registry) = hook_registry {
+                if let Err(e) = crate::hook_helpers::register_hook_function(
+                    &lua,
+                    registry.clone(),
+                    self.id.clone(),
+                ) {
+                    tracing::warn!("Failed to register orcs.hook(): {}", e);
+                } else {
+                    tracing::debug!(component = %self.id.fqn(), "orcs.hook() registered");
+                }
+                if let Err(e) =
+                    crate::hook_helpers::register_unhook_function(&lua, registry.clone())
+                {
+                    tracing::warn!("Failed to register orcs.unhook(): {}", e);
+                }
+
+                // Wrap tool functions with ToolPreExecute / ToolPostExecute hooks
+                lua.set_app_data(crate::tools::ToolHookContext {
+                    registry,
+                    component_id: self.id.clone(),
+                });
+                if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
+                    tracing::warn!("Failed to wrap tools with hooks: {}", e);
+                }
             }
         }
     }
@@ -537,6 +570,12 @@ impl Component for LuaComponent {
     }
 
     fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
+        // Extract hook_registry via type-erased extension before wrapping ctx
+        let hook_registry = ctx
+            .extension("hook_registry")
+            .and_then(|any| any.downcast::<orcs_hook::SharedHookRegistry>().ok())
+            .map(|boxed| *boxed);
+
         let ctx_arc = Arc::new(Mutex::new(ctx));
         self.child_context = Some(Arc::clone(&ctx_arc));
 
@@ -544,6 +583,33 @@ impl Component for LuaComponent {
         if let Ok(lua) = self.lua.lock() {
             if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
                 tracing::warn!("Failed to register child context functions: {}", e);
+            }
+
+            // Wire up orcs.hook() / orcs.unhook() / tool hooks if hook_registry is available
+            if let Some(registry) = hook_registry {
+                if let Err(e) = crate::hook_helpers::register_hook_function(
+                    &lua,
+                    registry.clone(),
+                    self.id.clone(),
+                ) {
+                    tracing::warn!("Failed to register orcs.hook(): {}", e);
+                } else {
+                    tracing::debug!(component = %self.id.fqn(), "orcs.hook() registered");
+                }
+                if let Err(e) =
+                    crate::hook_helpers::register_unhook_function(&lua, registry.clone())
+                {
+                    tracing::warn!("Failed to register orcs.unhook(): {}", e);
+                }
+
+                // Wrap tool functions with ToolPreExecute / ToolPostExecute hooks
+                lua.set_app_data(crate::tools::ToolHookContext {
+                    registry,
+                    component_id: self.id.clone(),
+                });
+                if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
+                    tracing::warn!("Failed to wrap tools with hooks: {}", e);
+                }
             }
         }
     }

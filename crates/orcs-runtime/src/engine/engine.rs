@@ -194,6 +194,7 @@ impl OrcsEngine {
     /// Must be called before spawning runners to ensure they receive
     /// the registry.
     pub fn set_hook_registry(&mut self, registry: SharedHookRegistry) {
+        self.eventbus.set_hook_registry(Arc::clone(&registry));
         self.hook_registry = Some(registry);
     }
 

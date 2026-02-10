@@ -46,6 +46,7 @@
 use super::error::EngineError;
 use crate::channel::{ChannelHandle, Event};
 use orcs_event::{EventCategory, Request, Signal};
+use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId, RequestId};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -105,6 +106,8 @@ pub struct EventBus {
     /// Shared with EventEmitter instances to enable `orcs.request()` from Lua.
     /// Populated by [`register_component_channel()`] when Engine spawns runners.
     component_channel_map: SharedComponentChannelMap,
+    /// Shared hook registry for dispatching EventBus hooks.
+    hook_registry: Option<SharedHookRegistry>,
 }
 
 impl EventBus {
@@ -119,7 +122,44 @@ impl EventBus {
             subscriptions: HashMap::new(),
             channel_handles: Arc::new(RwLock::new(HashMap::new())),
             component_channel_map: Arc::new(RwLock::new(HashMap::new())),
+            hook_registry: None,
         }
+    }
+
+    /// Sets the shared hook registry for EventBus hooks.
+    pub fn set_hook_registry(&mut self, registry: SharedHookRegistry) {
+        self.hook_registry = Some(registry);
+    }
+
+    /// Dispatches a hook through the shared hook registry.
+    ///
+    /// Uses `ComponentId::builtin("eventbus")` as the component identity.
+    fn dispatch_hook(
+        &self,
+        point: orcs_hook::HookPoint,
+        target_id: &ComponentId,
+        payload: serde_json::Value,
+    ) -> orcs_hook::HookAction {
+        let channel_id = ChannelId::new();
+
+        let ctx = orcs_hook::HookContext::new(
+            point,
+            target_id.clone(),
+            channel_id,
+            orcs_types::Principal::System,
+            0,
+            payload,
+        );
+
+        let Some(registry) = &self.hook_registry else {
+            return orcs_hook::HookAction::Continue(Box::new(ctx));
+        };
+
+        let guard = registry.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("hook registry lock poisoned, using inner value");
+            poisoned.into_inner()
+        });
+        guard.dispatch(point, target_id, None, ctx)
     }
 
     /// Returns a clone of the shared channel handles.
@@ -170,12 +210,20 @@ impl EventBus {
         self.request_senders.insert(id.clone(), req_tx);
 
         // Register subscriptions
+        let sub_strings: Vec<String> = subscriptions.iter().map(|c| format!("{c:?}")).collect();
         for category in subscriptions {
             self.subscriptions
                 .entry(category)
                 .or_default()
                 .insert(id.clone());
         }
+
+        // -- BusOnRegister hook (event) --
+        let payload = serde_json::json!({
+            "component_id": id.fqn(),
+            "subscriptions": sub_strings,
+        });
+        let _ = self.dispatch_hook(orcs_hook::HookPoint::BusOnRegister, &id, payload);
 
         ComponentHandle {
             component_id: id,
@@ -195,6 +243,12 @@ impl EventBus {
 
     /// Unregister component
     pub fn unregister(&mut self, id: &ComponentId) {
+        // -- BusOnUnregister hook (event) — fire before cleanup --
+        let payload = serde_json::json!({
+            "component_id": id.fqn(),
+        });
+        let _ = self.dispatch_hook(orcs_hook::HookPoint::BusOnUnregister, id, payload);
+
         self.request_senders.remove(id);
         // Remove from all subscription lists
         for subscribers in self.subscriptions.values_mut() {
@@ -457,6 +511,23 @@ impl EventBus {
     /// Number of channels that successfully received the event.
     /// Channels with full buffers or closed handles are skipped.
     pub fn broadcast(&self, event: Event) -> usize {
+        let bus_id = ComponentId::builtin("eventbus");
+
+        // -- BusPreBroadcast hook --
+        let pre_payload = serde_json::json!({
+            "category": format!("{:?}", event.category),
+            "operation": event.operation,
+            "source": event.source.fqn(),
+        });
+        let pre_action =
+            self.dispatch_hook(orcs_hook::HookPoint::BusPreBroadcast, &bus_id, pre_payload);
+        match &pre_action {
+            orcs_hook::HookAction::Abort { .. } | orcs_hook::HookAction::Skip(_) => {
+                return 0;
+            }
+            _ => {} // Continue
+        }
+
         let handles = self.channel_handles.read().expect("lock poisoned");
         let mut delivered = 0;
         for handle in handles.values() {
@@ -464,6 +535,19 @@ impl EventBus {
                 delivered += 1;
             }
         }
+
+        // -- BusPostBroadcast hook (observe-only) --
+        let post_payload = serde_json::json!({
+            "category": format!("{:?}", event.category),
+            "operation": event.operation,
+            "delivered": delivered,
+        });
+        let _ = self.dispatch_hook(
+            orcs_hook::HookPoint::BusPostBroadcast,
+            &bus_id,
+            post_payload,
+        );
+
         delivered
     }
 
@@ -480,6 +564,23 @@ impl EventBus {
     ///
     /// Number of channels that successfully received the event.
     pub async fn broadcast_async(&self, event: Event) -> usize {
+        let bus_id = ComponentId::builtin("eventbus");
+
+        // -- BusPreBroadcast hook --
+        let pre_payload = serde_json::json!({
+            "category": format!("{:?}", event.category),
+            "operation": event.operation,
+            "source": event.source.fqn(),
+        });
+        let pre_action =
+            self.dispatch_hook(orcs_hook::HookPoint::BusPreBroadcast, &bus_id, pre_payload);
+        match &pre_action {
+            orcs_hook::HookAction::Abort { .. } | orcs_hook::HookAction::Skip(_) => {
+                return 0;
+            }
+            _ => {}
+        }
+
         // Collect handles first to avoid holding lock during async operations
         let handles: Vec<_> = {
             let h = self.channel_handles.read().expect("lock poisoned");
@@ -492,6 +593,19 @@ impl EventBus {
                 delivered += 1;
             }
         }
+
+        // -- BusPostBroadcast hook (observe-only) --
+        let post_payload = serde_json::json!({
+            "category": format!("{:?}", event.category),
+            "operation": event.operation,
+            "delivered": delivered,
+        });
+        let _ = self.dispatch_hook(
+            orcs_hook::HookPoint::BusPostBroadcast,
+            &bus_id,
+            post_payload,
+        );
+
         delivered
     }
 
@@ -1178,5 +1292,237 @@ mod tests {
             .read()
             .unwrap()
             .contains_key(&target.fqn()));
+    }
+
+    // --- EventBus Hook integration tests (Step 4.3) ---
+
+    mod hook_tests {
+        use super::*;
+        use orcs_hook::testing::MockHook;
+        use orcs_hook::HookPoint;
+        use serde_json::json;
+
+        fn setup_with_hooks() -> (EventBus, orcs_hook::SharedHookRegistry) {
+            let registry = orcs_hook::shared_hook_registry();
+            let mut bus = EventBus::new();
+            bus.set_hook_registry(Arc::clone(&registry));
+            (bus, registry)
+        }
+
+        #[test]
+        fn bus_on_register_fires() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let hook = MockHook::pass_through("reg-observer", "*::*", HookPoint::BusOnRegister);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let _handle =
+                bus.register(ComponentId::builtin("test"), vec![EventCategory::Lifecycle]);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn bus_on_register_payload_contains_component_info() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let hook = MockHook::modifier("reg-checker", "*::*", HookPoint::BusOnRegister, |ctx| {
+                assert_eq!(ctx.payload["component_id"], "builtin::test-comp");
+                let subs = ctx.payload["subscriptions"].as_array().unwrap();
+                assert!(!subs.is_empty());
+            });
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let _handle = bus.register(
+                ComponentId::builtin("test-comp"),
+                vec![EventCategory::Lifecycle],
+            );
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn bus_on_unregister_fires() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let id = ComponentId::builtin("test");
+            let _handle = bus.register(id.clone(), vec![EventCategory::Lifecycle]);
+
+            let hook = MockHook::pass_through("unreg-observer", "*::*", HookPoint::BusOnUnregister);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            bus.unregister(&id);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn bus_on_unregister_payload_contains_component_id() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let id = ComponentId::builtin("my-comp");
+            let _handle = bus.register(id.clone(), vec![EventCategory::Echo]);
+
+            let hook =
+                MockHook::modifier("unreg-checker", "*::*", HookPoint::BusOnUnregister, |ctx| {
+                    assert_eq!(ctx.payload["component_id"], "builtin::my-comp");
+                });
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            bus.unregister(&id);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn bus_pre_broadcast_abort_prevents_delivery() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let ch = ChannelId::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let hook = MockHook::aborter(
+                "block-broadcast",
+                "*::*",
+                HookPoint::BusPreBroadcast,
+                "policy",
+            );
+            registry.write().unwrap().register(Box::new(hook));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({"msg": "hello"}),
+            };
+
+            let delivered = bus.broadcast(event);
+            assert_eq!(delivered, 0);
+        }
+
+        #[test]
+        fn bus_pre_broadcast_skip_prevents_delivery() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let ch = ChannelId::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let hook = MockHook::skipper(
+                "skip-broadcast",
+                "*::*",
+                HookPoint::BusPreBroadcast,
+                json!(null),
+            );
+            registry.write().unwrap().register(Box::new(hook));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({}),
+            };
+
+            let delivered = bus.broadcast(event);
+            assert_eq!(delivered, 0);
+        }
+
+        #[test]
+        fn bus_pre_broadcast_continue_allows_delivery() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let ch = ChannelId::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let hook =
+                MockHook::pass_through("allow-broadcast", "*::*", HookPoint::BusPreBroadcast);
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({"msg": "ok"}),
+            };
+
+            let delivered = bus.broadcast(event);
+            assert_eq!(delivered, 1);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(rx.try_recv().is_ok());
+        }
+
+        #[test]
+        fn bus_post_broadcast_fires_with_delivered_count() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let ch = ChannelId::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let hook =
+                MockHook::modifier("post-checker", "*::*", HookPoint::BusPostBroadcast, |ctx| {
+                    assert_eq!(ctx.payload["delivered"], 1);
+                    assert_eq!(ctx.payload["operation"], "input");
+                });
+            let counter = hook.call_count.clone();
+            registry.write().unwrap().register(Box::new(hook));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({}),
+            };
+
+            let _ = bus.broadcast(event);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn bus_pre_broadcast_abort_prevents_async_delivery() {
+            let (mut bus, registry) = setup_with_hooks();
+
+            let ch = ChannelId::new();
+            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let hook =
+                MockHook::aborter("block-async", "*::*", HookPoint::BusPreBroadcast, "blocked");
+            registry.write().unwrap().register(Box::new(hook));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({}),
+            };
+
+            let delivered = bus.broadcast_async(event).await;
+            assert_eq!(delivered, 0);
+        }
+
+        #[test]
+        fn no_hook_registry_passthrough() {
+            // Without hook_registry, everything should work normally
+            let mut bus = EventBus::new();
+
+            let ch = ChannelId::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            bus.register_channel(ChannelHandle::new(ch, tx));
+
+            let event = Event {
+                category: EventCategory::UserInput,
+                operation: "input".to_string(),
+                source: ComponentId::builtin("source"),
+                payload: json!({"msg": "normal"}),
+            };
+
+            let delivered = bus.broadcast(event);
+            assert_eq!(delivered, 1);
+            assert!(rx.try_recv().is_ok());
+        }
     }
 }
