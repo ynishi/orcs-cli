@@ -45,10 +45,10 @@ pub const TOOL: &str = include_str!("../scripts/tool.lua");
 /// executes them, and feeds results back.
 pub const CODE_AGENT: &str = include_str!("../scripts/code_agent.lua");
 
-/// Skill management component.
+/// Skill management component (directory-based: scripts/skill_manager/init.lua).
 ///
 /// Manages Discovery / Registration / Activation of Agent Skills.
-pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager.lua");
+pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager/init.lua");
 
 /// Profile management component.
 ///
@@ -56,16 +56,18 @@ pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager.lua");
 /// Distributes per-component settings via orcs.request().
 pub const PROFILE_MANAGER: &str = include_str!("../scripts/profile_manager.lua");
 
-/// Embedded library modules (loaded via `require()` or legacy `orcs.require_lib`).
+/// Embedded library modules (co-located in scripts/skill_manager/).
+///
+/// These are loaded via `require()` or legacy `orcs.require_lib`.
 pub mod lib {
     /// Format adapter: converts skill formats to common model.
-    pub const FORMAT_ADAPTER: &str = include_str!("../scripts/lib/format_adapter.lua");
+    pub const FORMAT_ADAPTER: &str = include_str!("../scripts/skill_manager/format_adapter.lua");
     /// Skill registry: registration, search, freeze/reload.
-    pub const SKILL_REGISTRY: &str = include_str!("../scripts/lib/skill_registry.lua");
+    pub const SKILL_REGISTRY: &str = include_str!("../scripts/skill_manager/skill_registry.lua");
     /// Skill loader: format detection and loading.
-    pub const SKILL_LOADER: &str = include_str!("../scripts/lib/skill_loader.lua");
+    pub const SKILL_LOADER: &str = include_str!("../scripts/skill_manager/skill_loader.lua");
     /// Skill catalog: Progressive Disclosure (L1/L2/L3).
-    pub const SKILL_CATALOG: &str = include_str!("../scripts/lib/skill_catalog.lua");
+    pub const SKILL_CATALOG: &str = include_str!("../scripts/skill_manager/skill_catalog.lua");
 
     /// Gets an embedded lib module by name.
     #[must_use]

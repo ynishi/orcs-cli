@@ -641,6 +641,63 @@ mod tests {
     }
 
     #[test]
+    fn load_skill_manager_as_directory_component() {
+        let loader = ScriptLoader::new(test_sandbox())
+            .with_path(ScriptLoader::crate_scripts_dir())
+            .without_embedded_fallback();
+
+        let component = loader
+            .load("skill_manager")
+            .expect("skill_manager should load as directory component via init.lua");
+
+        assert_eq!(component.id().name, "skill_manager");
+    }
+
+    #[test]
+    fn list_available_includes_skill_manager_directory() {
+        let loader = ScriptLoader::new(test_sandbox())
+            .with_path(ScriptLoader::crate_scripts_dir())
+            .without_embedded_fallback();
+        let names = loader.list_available();
+        assert!(
+            names.contains(&"skill_manager".to_string()),
+            "directory component should appear in list: {names:?}"
+        );
+    }
+
+    #[test]
+    fn from_dir_require_flat_colocated_module() {
+        // Verify that require("module_name") resolves to a flat co-located file
+        // (no lib/ subdirectory needed).
+        let dir = tempfile::tempdir().expect("create temp dir");
+
+        std::fs::write(
+            dir.path().join("my_helper.lua"),
+            r#"local M = {}
+            function M.value() return 42 end
+            return M"#,
+        )
+        .expect("write my_helper.lua");
+
+        std::fs::write(
+            dir.path().join("init.lua"),
+            r#"local helper = require("my_helper")
+            return {
+                id = "flat-require-test",
+                namespace = "test",
+                subscriptions = {"Echo"},
+                on_request = function(r) return {success=true, data={v=helper.value()}} end,
+                on_signal = function(s) return "Handled" end,
+            }"#,
+        )
+        .expect("write init.lua");
+
+        let component = LuaComponent::from_dir(dir.path(), test_sandbox())
+            .expect("load flat require component");
+        assert_eq!(component.id().name, "flat-require-test");
+    }
+
+    #[test]
     fn list_available_includes_directories() {
         let dir = tempfile::tempdir().unwrap();
         let comp_dir = dir.path().join("dir_comp");
