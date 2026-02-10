@@ -57,10 +57,7 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
         } else if !target_fqn.contains("::") {
             // Short-name fallback: find key ending with "::<target>"
             let suffix = format!("::{target_fqn}");
-            let matches: Vec<_> = m
-                .iter()
-                .filter(|(k, _)| k.ends_with(&suffix))
-                .collect();
+            let matches: Vec<_> = m.iter().filter(|(k, _)| k.ends_with(&suffix)).collect();
             match matches.len() {
                 0 => return Err(format!("component not found: {target_fqn}")),
                 1 => *matches[0].1,
