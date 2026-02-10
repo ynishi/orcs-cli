@@ -696,19 +696,23 @@ impl OrcsAppBuilder {
         let store = LocalFileStore::new(session_path)
             .map_err(|e| AppError::Config(format!("Failed to create session store: {e}")))?;
 
-        // Create World with IO channel + pre-allocated builtin channels
+        // Expand builtins to versioned directory on disk
+        let builtins_base = config.components.resolved_builtins_dir();
+        crate::builtins::ensure_expanded(&builtins_base)
+            .map_err(|e| AppError::Config(format!("Failed to expand builtins: {e}")))?;
+        let versioned_builtins = crate::builtins::versioned_dir(&builtins_base);
+
+        // Build component loader: user paths (higher priority) + builtins (fallback)
+        let component_loader = ScriptLoader::new(Arc::clone(&sandbox))
+            .with_paths(config.components.resolved_paths())
+            .with_path(&versioned_builtins)
+            .without_embedded_fallback();
+
+        // Create World with IO channel + pre-allocated component channels
+        let component_names = &config.components.load;
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
-        let builtin_names: &[&str] = &[
-            "claude_cli",
-            "subagent",
-            "shell",
-            "tool",
-            "agent_mgr",
-            "skill_manager",
-            "profile_manager",
-        ];
-        let builtin_channels: Vec<_> = builtin_names
+        let builtin_channels: Vec<_> = component_names
             .iter()
             .map(|_| world.create_channel(ChannelConfig::default()))
             .collect();
@@ -806,12 +810,13 @@ impl OrcsAppBuilder {
             elevated_session.is_elevated()
         );
 
-        // Spawn builtin components driven by RuntimeHints
+        // Spawn components driven by RuntimeHints
         let mut component_routes = HashMap::new();
 
-        for (name, &channel_id) in builtin_names.iter().zip(builtin_channels.iter()) {
-            let component = ScriptLoader::load_embedded(name, Arc::clone(&sandbox))
-                .map_err(|e| AppError::Config(format!("Failed to load {name} script: {e}")))?;
+        for (name, &channel_id) in component_names.iter().zip(builtin_channels.iter()) {
+            let component = component_loader
+                .load(name)
+                .map_err(|e| AppError::Config(format!("Failed to load component '{name}': {e}")))?;
             let hints = component.runtime_hints();
             let component_id = component.id().clone();
 
