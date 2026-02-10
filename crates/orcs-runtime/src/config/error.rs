@@ -45,6 +45,13 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    /// Profile not found.
+    #[error("profile '{name}' not found (searched: {searched:?})")]
+    ProfileNotFound {
+        name: String,
+        searched: Vec<PathBuf>,
+    },
 }
 
 impl ConfigError {

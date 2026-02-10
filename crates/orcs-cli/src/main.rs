@@ -51,6 +51,10 @@ struct Args {
     #[arg(long)]
     session_path: Option<PathBuf>,
 
+    /// Activate a profile (overrides ORCS_PROFILE env var)
+    #[arg(long)]
+    profile: Option<String>,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -65,6 +69,7 @@ struct CliConfigResolver {
     debug: bool,
     verbose: bool,
     session_path: Option<PathBuf>,
+    profile: Option<String>,
 }
 
 impl CliConfigResolver {
@@ -81,15 +86,20 @@ impl CliConfigResolver {
             debug: args.debug,
             verbose: args.verbose,
             session_path: args.session_path.clone(),
+            profile: args.profile.clone(),
         }
     }
 }
 
 impl ConfigResolver for CliConfigResolver {
     fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
-        let mut config = ConfigLoader::new()
-            .with_project_root(&self.project_root)
-            .load()?;
+        let mut loader = ConfigLoader::new().with_project_root(&self.project_root);
+
+        if let Some(ref profile) = self.profile {
+            loader = loader.with_profile(profile);
+        }
+
+        let mut config = loader.load()?;
 
         // CLI args override (highest priority)
         if self.debug {
@@ -182,6 +192,7 @@ mod tests {
             debug,
             verbose,
             session_path,
+            profile: None,
         }
     }
 
@@ -257,6 +268,7 @@ mod tests {
             project: None,
             resume: None,
             session_path: None,
+            profile: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -276,6 +288,7 @@ mod tests {
             project: Some(PathBuf::from("/tmp")),
             resume: Some("sess-123".into()),
             session_path: Some(PathBuf::from("/sessions")),
+            profile: Some("rust-dev".into()),
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);

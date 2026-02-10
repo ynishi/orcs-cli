@@ -683,6 +683,7 @@ impl OrcsAppBuilder {
             "tool",
             "agent_mgr",
             "skill_manager",
+            "profile_manager",
         ];
         let builtin_channels: Vec<_> = builtin_names
             .iter()

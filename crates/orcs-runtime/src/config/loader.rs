@@ -5,12 +5,14 @@
 //! 1. Default values (compile-time)
 //! 2. Global config (`~/.orcs/config.toml`)
 //! 3. Project config (`.orcs/config.toml`)
-//! 4. Environment variables (`ORCS_*`)
+//! 4. Profile config (`.orcs/profiles/{name}.toml` `[config]` section)
+//! 5. Environment variables (`ORCS_*`, including `ORCS_PROFILE`)
 //!
 //! Each layer overrides the previous.
 
 use super::{
-    default_config_path, ConfigError, OrcsConfig, PROJECT_CONFIG_DIR, PROJECT_CONFIG_FILE,
+    default_config_path, profile::ProfileStore, ConfigError, OrcsConfig, PROJECT_CONFIG_DIR,
+    PROJECT_CONFIG_FILE,
 };
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -45,6 +47,12 @@ pub struct ConfigLoader {
     /// Project root directory.
     project_root: Option<PathBuf>,
 
+    /// Profile name to activate.
+    ///
+    /// When set, the profile's `[config]` section is merged as a layer
+    /// between project config and env vars.
+    profile: Option<String>,
+
     /// Skip environment variable loading.
     skip_env: bool,
 
@@ -62,6 +70,7 @@ impl ConfigLoader {
         Self {
             global_config_path: None,
             project_root: None,
+            profile: None,
             skip_env: false,
             skip_global: false,
             skip_project: false,
@@ -81,6 +90,17 @@ impl ConfigLoader {
     #[must_use]
     pub fn with_project_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.project_root = Some(path.into());
+        self
+    }
+
+    /// Sets the profile to activate.
+    ///
+    /// The profile's `[config]` section is merged as a layer
+    /// between project config and env vars. The profile is
+    /// loaded from `ProfileStore` search dirs.
+    #[must_use]
+    pub fn with_profile(mut self, name: impl Into<String>) -> Self {
+        self.profile = Some(name.into());
         self
     }
 
@@ -148,7 +168,29 @@ impl ConfigLoader {
             }
         }
 
-        // Layer 3: Environment variables
+        // Layer 3: Profile config overlay
+        // Resolve profile name: explicit > ORCS_PROFILE env var
+        let profile_name = self
+            .profile
+            .clone()
+            .or_else(|| std::env::var("ORCS_PROFILE").ok());
+
+        if let Some(ref name) = profile_name {
+            let store = ProfileStore::new(self.project_root.as_deref());
+            match store.load(name) {
+                Ok(profile_def) => {
+                    if let Some(ref profile_config) = profile_def.config {
+                        debug!(profile = %name, "Applying profile config overlay");
+                        config.merge(profile_config);
+                    }
+                }
+                Err(e) => {
+                    debug!(profile = %name, error = %e, "Profile not found, skipping config overlay");
+                }
+            }
+        }
+
+        // Layer 4: Environment variables
         if !self.skip_env {
             self.apply_env_vars(&mut config)?;
         }
@@ -350,6 +392,55 @@ default = "project-model"
         assert_eq!(parse_bool("off"), Some(false));
 
         assert_eq!(parse_bool("invalid"), None);
+    }
+
+    #[test]
+    fn load_with_profile_overlay() {
+        let project_temp = TempDir::new().unwrap();
+
+        // Create profile
+        let profiles_dir = project_temp.path().join(".orcs").join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::write(
+            profiles_dir.join("test-profile.toml"),
+            r#"
+[profile]
+name = "test-profile"
+description = "Test profile"
+
+[config]
+debug = true
+
+[config.model]
+default = "profile-model"
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .with_project_root(project_temp.path())
+            .with_profile("test-profile")
+            .skip_env_vars()
+            .load()
+            .unwrap();
+
+        assert!(config.debug);
+        assert_eq!(config.model.default, "profile-model");
+    }
+
+    #[test]
+    fn load_with_nonexistent_profile_ignores() {
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_profile("nonexistent")
+            .skip_env_vars()
+            .load()
+            .unwrap();
+
+        // Should fall back to defaults
+        assert_eq!(config, OrcsConfig::default());
     }
 
     #[test]

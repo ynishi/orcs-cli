@@ -156,6 +156,28 @@ pub fn register_base_orcs_functions(
         orcs_table.set("json_encode", json_encode)?;
     }
 
+    // orcs.toml_parse(str) -> value
+    // Parses a TOML string into a Lua value (table).
+    {
+        let toml_parse = lua.create_function(|lua, s: String| {
+            let value: toml::Value = toml::from_str(&s)
+                .map_err(|e| mlua::Error::RuntimeError(format!("toml parse error: {e}")))?;
+            toml_value_to_lua(lua, &value)
+        })?;
+        orcs_table.set("toml_parse", toml_parse)?;
+    }
+
+    // orcs.toml_encode(value) -> string
+    // Encodes a Lua table into a TOML string.
+    {
+        let toml_encode = lua.create_function(|lua, value: mlua::Value| {
+            let toml_value = lua_to_toml_value(lua, &value)?;
+            toml::to_string_pretty(&toml_value)
+                .map_err(|e| mlua::Error::RuntimeError(format!("toml encode error: {e}")))
+        })?;
+        orcs_table.set("toml_encode", toml_encode)?;
+    }
+
     // orcs.require_lib(name) -> module table
     // Loads an embedded lib module by name. Cached after first load.
     {
@@ -310,6 +332,70 @@ pub fn ensure_orcs_table(lua: &Lua) -> Result<Table, LuaError> {
             lua.globals().set(ORCS_TABLE_NAME, table.clone())?;
             Ok(table)
         }
+    }
+}
+
+/// Converts a TOML value to a Lua value.
+fn toml_value_to_lua(lua: &Lua, value: &toml::Value) -> mlua::Result<mlua::Value> {
+    match value {
+        toml::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
+        toml::Value::Integer(n) => Ok(mlua::Value::Integer(*n)),
+        toml::Value::Float(f) => Ok(mlua::Value::Number(*f)),
+        toml::Value::Boolean(b) => Ok(mlua::Value::Boolean(*b)),
+        toml::Value::Datetime(dt) => Ok(mlua::Value::String(lua.create_string(dt.to_string())?)),
+        toml::Value::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                table.set(i + 1, toml_value_to_lua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+        toml::Value::Table(map) => {
+            let table = lua.create_table()?;
+            for (k, v) in map {
+                table.set(k.as_str(), toml_value_to_lua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+    }
+}
+
+/// Converts a Lua value to a TOML value.
+fn lua_to_toml_value(_lua: &Lua, value: &mlua::Value) -> mlua::Result<toml::Value> {
+    match value {
+        mlua::Value::Boolean(b) => Ok(toml::Value::Boolean(*b)),
+        mlua::Value::Integer(n) => Ok(toml::Value::Integer(*n)),
+        mlua::Value::Number(f) => Ok(toml::Value::Float(*f)),
+        mlua::Value::String(s) => Ok(toml::Value::String(s.to_str()?.to_string())),
+        mlua::Value::Table(t) => {
+            // Detect array (consecutive integer keys starting from 1)
+            let is_array = t
+                .clone()
+                .pairs::<i64, mlua::Value>()
+                .enumerate()
+                .all(|(i, pair)| pair.is_ok() && pair.unwrap().0 == (i as i64 + 1));
+
+            if is_array && t.raw_len() > 0 {
+                let mut arr = Vec::new();
+                for pair in t.clone().pairs::<i64, mlua::Value>() {
+                    let (_, v) = pair?;
+                    arr.push(lua_to_toml_value(_lua, &v)?);
+                }
+                Ok(toml::Value::Array(arr))
+            } else {
+                let mut map = toml::map::Map::new();
+                for pair in t.clone().pairs::<String, mlua::Value>() {
+                    let (k, v) = pair?;
+                    map.insert(k, lua_to_toml_value(_lua, &v)?);
+                }
+                Ok(toml::Value::Table(map))
+            }
+        }
+        mlua::Value::Nil => Ok(toml::Value::String(String::new())),
+        _ => Err(mlua::Error::RuntimeError(format!(
+            "cannot convert {:?} to TOML",
+            value
+        ))),
     }
 }
 
@@ -477,5 +563,102 @@ mod tests {
         // ensure returns existing
         let table = ensure_orcs_table(&lua).unwrap();
         assert_eq!(table.get::<i32>("test").unwrap(), 123);
+    }
+
+    #[test]
+    fn toml_parse_table() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: Table = lua
+            .load(
+                r#"return orcs.toml_parse([[
+[profile]
+name = "test"
+description = "a test profile"
+
+[config]
+debug = true
+]])"#,
+            )
+            .eval()
+            .unwrap();
+
+        let profile: Table = result.get("profile").unwrap();
+        assert_eq!(profile.get::<String>("name").unwrap(), "test");
+        assert_eq!(
+            profile.get::<String>("description").unwrap(),
+            "a test profile"
+        );
+
+        let config: Table = result.get("config").unwrap();
+        assert!(config.get::<bool>("debug").unwrap());
+    }
+
+    #[test]
+    fn toml_parse_array() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: Table = lua
+            .load(
+                r#"return orcs.toml_parse([[
+[components.skill_manager]
+activate = ["rust-dev", "git-workflow"]
+]])"#,
+            )
+            .eval()
+            .unwrap();
+
+        let components: Table = result.get("components").unwrap();
+        let sm: Table = components.get("skill_manager").unwrap();
+        let activate: Table = sm.get("activate").unwrap();
+        assert_eq!(activate.get::<String>(1).unwrap(), "rust-dev");
+        assert_eq!(activate.get::<String>(2).unwrap(), "git-workflow");
+    }
+
+    #[test]
+    fn toml_parse_invalid_returns_error() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result = lua
+            .load(r#"return orcs.toml_parse('not valid toml {{{{')"#)
+            .eval::<mlua::Value>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn toml_encode_table() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: String = lua
+            .load(r#"return orcs.toml_encode({name = "test", count = 42})"#)
+            .eval()
+            .unwrap();
+        assert!(result.contains("name"));
+        assert!(result.contains("test"));
+    }
+
+    #[test]
+    fn toml_roundtrip() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+
+        let result: String = lua
+            .load(
+                r#"
+                local obj = orcs.toml_parse([[
+name = "roundtrip"
+value = 123
+]])
+                return orcs.toml_encode(obj)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(result.contains("roundtrip"));
+        assert!(result.contains("123"));
     }
 }

@@ -50,6 +50,12 @@ pub const CODE_AGENT: &str = include_str!("../scripts/code_agent.lua");
 /// Manages Discovery / Registration / Activation of Agent Skills.
 pub const SKILL_MANAGER: &str = include_str!("../scripts/skill_manager.lua");
 
+/// Profile management component.
+///
+/// Manages Discovery / Loading / Switching of Profiles.
+/// Distributes per-component settings via orcs.request().
+pub const PROFILE_MANAGER: &str = include_str!("../scripts/profile_manager.lua");
+
 /// Embedded library modules (loaded via `require()` or legacy `orcs.require_lib`).
 pub mod lib {
     /// Format adapter: converts skill formats to common model.
@@ -98,6 +104,7 @@ pub fn all() -> HashMap<&'static str, &'static str> {
     scripts.insert("tool", TOOL);
     scripts.insert("code_agent", CODE_AGENT);
     scripts.insert("skill_manager", SKILL_MANAGER);
+    scripts.insert("profile_manager", PROFILE_MANAGER);
     scripts
 }
 
@@ -114,6 +121,7 @@ pub fn get(name: &str) -> Option<&'static str> {
         "tool" => Some(TOOL),
         "code_agent" => Some(CODE_AGENT),
         "skill_manager" => Some(SKILL_MANAGER),
+        "profile_manager" => Some(PROFILE_MANAGER),
         _ => None,
     }
 }
@@ -131,6 +139,7 @@ pub fn list() -> Vec<&'static str> {
         "tool",
         "code_agent",
         "skill_manager",
+        "profile_manager",
     ]
 }
 
@@ -204,7 +213,7 @@ mod tests {
     #[test]
     fn all_contains_all_scripts() {
         let scripts = all();
-        assert_eq!(scripts.len(), 9);
+        assert_eq!(scripts.len(), 10);
         assert!(scripts.contains_key("echo"));
         assert!(scripts.contains_key("claude_cli"));
         assert!(scripts.contains_key("echo_emitter"));
