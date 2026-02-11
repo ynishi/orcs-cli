@@ -768,3 +768,263 @@ mod file_io {
         );
     }
 }
+
+// =============================================================================
+// Snapshot / Restore
+// =============================================================================
+
+mod snapshot_restore {
+    use super::*;
+    use orcs_component::Component;
+
+    #[test]
+    fn snapshot_returns_valid_data() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        // Register skills
+        register_sample(&mut harness);
+        harness
+            .request(
+                ext_cat(),
+                "register",
+                json!({
+                    "skill": {
+                        "name": "second-skill",
+                        "description": "Another skill",
+                        "source": { "format": "agent-skills", "path": "/tmp/second" },
+                        "frontmatter": {},
+                        "metadata": { "tags": ["extra"], "categories": ["test"] },
+                        "state": "discovered"
+                    }
+                }),
+            )
+            .expect("register second-skill should succeed");
+
+        // Take snapshot via Component trait
+        let snapshot = harness
+            .component()
+            .snapshot()
+            .expect("snapshot should succeed");
+
+        assert!(
+            snapshot.component_fqn.contains("skill_manager"),
+            "FQN should contain skill_manager, got: {}",
+            snapshot.component_fqn
+        );
+        assert!(
+            !snapshot.state.is_null(),
+            "snapshot state should not be null"
+        );
+
+        // State should contain skills data
+        let state = &snapshot.state;
+        assert!(
+            state["skills"].is_array(),
+            "state.skills should be an array, got: {state}"
+        );
+        let skills = state["skills"].as_array().expect("skills should be array");
+        assert_eq!(skills.len(), 2, "should have 2 skills in snapshot");
+    }
+
+    #[test]
+    fn snapshot_restore_roundtrip() {
+        // Phase 1: Create and populate
+        let (_td1, mut harness1) = skill_harness();
+        let _ = harness1.init();
+
+        // Register multiple skills
+        for (name, desc) in [
+            ("alpha", "First skill"),
+            ("beta", "Second skill"),
+            ("gamma", "Third skill"),
+        ] {
+            harness1
+                .request(
+                    ext_cat(),
+                    "register",
+                    json!({
+                        "skill": {
+                            "name": name,
+                            "description": desc,
+                            "source": { "format": "agent-skills", "path": format!("/tmp/{name}") },
+                            "frontmatter": {},
+                            "metadata": { "tags": [name], "categories": ["test"] },
+                            "state": "discovered"
+                        }
+                    }),
+                )
+                .expect("register should succeed");
+        }
+
+        // Verify 3 skills registered
+        let status1 = harness1
+            .request(ext_cat(), "status", json!({}))
+            .expect("status should succeed");
+        assert_eq!(status1["total"], 3);
+
+        // Take snapshot
+        let snapshot = harness1
+            .component()
+            .snapshot()
+            .expect("snapshot should succeed");
+
+        // Phase 2: Restore into fresh component
+        let (_td2, mut harness2) = skill_harness();
+
+        // Restore BEFORE init (matching ChannelRunner behavior)
+        harness2
+            .component_mut()
+            .restore(&snapshot)
+            .expect("restore should succeed");
+
+        // init() should detect restored state and skip re-init
+        let _ = harness2.init();
+
+        // Verify restored state
+        let status2 = harness2
+            .request(ext_cat(), "status", json!({}))
+            .expect("status should succeed");
+        assert_eq!(
+            status2["total"], 3,
+            "restored component should have 3 skills"
+        );
+
+        // Verify each skill is accessible
+        for name in ["alpha", "beta", "gamma"] {
+            let result = harness2
+                .request(ext_cat(), "get", json!({ "name": name }))
+                .expect(&format!("get '{name}' should succeed"));
+            assert_eq!(result["name"], name);
+        }
+
+        // Verify search still works
+        let result = harness2
+            .request(ext_cat(), "search", json!({ "query": "beta" }))
+            .expect("search should succeed");
+        assert!(result.is_array());
+        assert_eq!(result.as_array().expect("should be array").len(), 1);
+        assert_eq!(result[0]["name"], "beta");
+    }
+
+    #[test]
+    fn snapshot_preserves_skill_descriptions() {
+        let (_td1, mut harness1) = skill_harness();
+        let _ = harness1.init();
+
+        harness1
+            .request(
+                ext_cat(),
+                "register",
+                json!({
+                    "skill": {
+                        "name": "detailed-skill",
+                        "description": "A very detailed description of this skill",
+                        "source": { "format": "lua-dsl", "path": "/tmp/detailed" },
+                        "frontmatter": { "user-invocable": true },
+                        "metadata": { "tags": ["lua", "test"], "categories": ["dev"] },
+                        "state": "discovered"
+                    }
+                }),
+            )
+            .expect("register should succeed");
+
+        let snapshot = harness1
+            .component()
+            .snapshot()
+            .expect("snapshot should succeed");
+
+        let (_td2, mut harness2) = skill_harness();
+        harness2
+            .component_mut()
+            .restore(&snapshot)
+            .expect("restore should succeed");
+        let _ = harness2.init();
+
+        let skill = harness2
+            .request(ext_cat(), "get", json!({ "name": "detailed-skill" }))
+            .expect("get should succeed");
+        assert_eq!(skill["name"], "detailed-skill");
+        assert_eq!(
+            skill["description"],
+            "A very detailed description of this skill"
+        );
+    }
+
+    #[test]
+    fn snapshot_empty_registry() {
+        let (_td1, mut harness1) = skill_harness();
+        let _ = harness1.init();
+
+        // Snapshot with no skills registered
+        let snapshot = harness1
+            .component()
+            .snapshot()
+            .expect("snapshot of empty registry should succeed");
+
+        let (_td2, mut harness2) = skill_harness();
+        harness2
+            .component_mut()
+            .restore(&snapshot)
+            .expect("restore of empty snapshot should succeed");
+        let _ = harness2.init();
+
+        let status = harness2
+            .request(ext_cat(), "status", json!({}))
+            .expect("status should succeed");
+        assert_eq!(status["total"], 0);
+    }
+
+    #[test]
+    fn operations_work_after_restore() {
+        let (_td1, mut harness1) = skill_harness();
+        let _ = harness1.init();
+
+        register_sample(&mut harness1);
+
+        let snapshot = harness1
+            .component()
+            .snapshot()
+            .expect("snapshot should succeed");
+
+        let (_td2, mut harness2) = skill_harness();
+        harness2
+            .component_mut()
+            .restore(&snapshot)
+            .expect("restore should succeed");
+        let _ = harness2.init();
+
+        // Register new skill after restore
+        harness2
+            .request(
+                ext_cat(),
+                "register",
+                json!({
+                    "skill": {
+                        "name": "post-restore-skill",
+                        "description": "Added after restore",
+                        "source": { "format": "agent-skills", "path": "/tmp/post" },
+                        "frontmatter": {},
+                        "metadata": { "tags": [], "categories": [] },
+                        "state": "discovered"
+                    }
+                }),
+            )
+            .expect("register after restore should succeed");
+
+        let status = harness2
+            .request(ext_cat(), "status", json!({}))
+            .expect("status should succeed");
+        assert_eq!(status["total"], 2, "should have original + new skill");
+
+        // Unregister should work
+        harness2
+            .request(ext_cat(), "unregister", json!({ "name": "test-skill" }))
+            .expect("unregister should succeed");
+
+        let status = harness2
+            .request(ext_cat(), "status", json!({}))
+            .expect("status should succeed");
+        assert_eq!(status["total"], 1);
+    }
+}

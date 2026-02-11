@@ -340,6 +340,8 @@ impl OrcsApp {
         }
 
         self.engine.stop();
+        // Await runners to complete and collect snapshots before saving
+        self.engine.shutdown().await;
 
         // Save session if paused
         if should_save {

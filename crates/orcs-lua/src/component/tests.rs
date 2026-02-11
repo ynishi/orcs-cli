@@ -628,3 +628,321 @@ mod emitter_tests {
         assert_eq!(result["last"], "msg4");
     }
 }
+
+// --- JSON ↔ Lua conversion tests ---
+
+mod json_lua_conversion_tests {
+    use super::*;
+
+    /// Helper: create a Lua VM and convert JSON → Lua → JSON roundtrip.
+    fn roundtrip(input: &JsonValue) -> JsonValue {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, input).expect("json_to_lua_value should succeed");
+        lua_value_to_json(&lua_val)
+    }
+
+    #[test]
+    fn null_roundtrip() {
+        assert_eq!(roundtrip(&JsonValue::Null), JsonValue::Null);
+    }
+
+    #[test]
+    fn bool_roundtrip() {
+        assert_eq!(roundtrip(&serde_json::json!(true)), serde_json::json!(true));
+        assert_eq!(
+            roundtrip(&serde_json::json!(false)),
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn integer_roundtrip() {
+        assert_eq!(roundtrip(&serde_json::json!(42)), serde_json::json!(42));
+        assert_eq!(roundtrip(&serde_json::json!(-7)), serde_json::json!(-7));
+        assert_eq!(roundtrip(&serde_json::json!(0)), serde_json::json!(0));
+    }
+
+    #[test]
+    fn float_roundtrip() {
+        let val = serde_json::json!(3.14);
+        let result = roundtrip(&val);
+        let diff = (result.as_f64().expect("should be f64") - 3.14).abs();
+        assert!(diff < 1e-10, "float roundtrip drift: {diff}");
+    }
+
+    #[test]
+    fn string_roundtrip() {
+        assert_eq!(
+            roundtrip(&serde_json::json!("hello")),
+            serde_json::json!("hello")
+        );
+        assert_eq!(roundtrip(&serde_json::json!("")), serde_json::json!(""));
+    }
+
+    #[test]
+    fn array_roundtrip() {
+        let input = serde_json::json!([1, 2, 3]);
+        assert_eq!(roundtrip(&input), input);
+    }
+
+    #[test]
+    fn object_roundtrip() {
+        let input = serde_json::json!({"key": "value", "num": 42});
+        let result = roundtrip(&input);
+        assert_eq!(result["key"], "value");
+        assert_eq!(result["num"], 42);
+    }
+
+    #[test]
+    fn nested_structure_roundtrip() {
+        let input = serde_json::json!({
+            "skills": [
+                {"name": "deploy", "tags": ["ci", "cd"]},
+                {"name": "review", "tags": ["code"]}
+            ],
+            "frozen": false,
+            "count": 2
+        });
+        let result = roundtrip(&input);
+        assert_eq!(result["frozen"], false);
+        assert_eq!(result["count"], 2);
+        assert!(result["skills"].is_array());
+        let skills = result["skills"].as_array().expect("should be array");
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0]["name"], "deploy");
+        assert_eq!(skills[1]["tags"][0], "code");
+    }
+
+    #[test]
+    fn empty_array_roundtrip() {
+        // Note: empty Lua table {} is ambiguous (array or object).
+        // json_to_lua_value creates empty table; lua_value_to_json detects len=0 → object.
+        let input = serde_json::json!([]);
+        let result = roundtrip(&input);
+        // Empty array becomes empty object in Lua roundtrip (known limitation)
+        assert!(
+            result.is_object() || result.is_array(),
+            "empty collection: {result}"
+        );
+    }
+
+    #[test]
+    fn empty_object_roundtrip() {
+        let input = serde_json::json!({});
+        let result = roundtrip(&input);
+        assert!(result.is_object());
+        assert!(result.as_object().expect("should be object").is_empty());
+    }
+}
+
+// --- Snapshot / Restore tests ---
+
+mod snapshot_tests {
+    use super::*;
+    use orcs_component::Component;
+
+    #[test]
+    fn snapshot_without_callback_returns_not_supported() {
+        let script = r#"
+            return {
+                id = "no-snapshot",
+                subscriptions = {"Echo"},
+                on_request = function(req) return { success = true } end,
+                on_signal = function(sig) return "Ignored" end,
+            }
+        "#;
+
+        let component =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+        let result = component.snapshot();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::NotSupported(_)),
+            "expected NotSupported, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_without_callback_returns_not_supported() {
+        let script = r#"
+            return {
+                id = "no-restore",
+                subscriptions = {"Echo"},
+                on_request = function(req) return { success = true } end,
+                on_signal = function(sig) return "Ignored" end,
+            }
+        "#;
+
+        let mut component =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+        let snapshot = ComponentSnapshot::from_state(
+            "lua::no-restore",
+            &serde_json::json!({"key": "value"}),
+        )
+        .expect("should create snapshot");
+
+        let result = component.restore(&snapshot);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::NotSupported(_)),
+            "expected NotSupported, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_simple_state() {
+        let script = r#"
+            local state = { counter = 0, name = "test" }
+
+            return {
+                id = "snap-test",
+                subscriptions = {"Echo"},
+                on_request = function(req)
+                    if req.operation == "increment" then
+                        state.counter = state.counter + 1
+                        return { success = true, data = { counter = state.counter } }
+                    elseif req.operation == "get" then
+                        return { success = true, data = state }
+                    end
+                    return { success = false, error = "unknown" }
+                end,
+                on_signal = function(sig) return "Ignored" end,
+
+                snapshot = function()
+                    return state
+                end,
+
+                restore = function(s)
+                    state = s
+                end,
+            }
+        "#;
+
+        // Create component, mutate state
+        let mut comp1 =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+        let req = create_test_request("increment", JsonValue::Null);
+        comp1.on_request(&req).expect("increment should succeed");
+        comp1.on_request(&req).expect("increment should succeed");
+        comp1.on_request(&req).expect("increment should succeed");
+
+        // Verify state is counter=3
+        let get_req = create_test_request("get", JsonValue::Null);
+        let data = comp1.on_request(&get_req).expect("get should succeed");
+        assert_eq!(data["counter"], 3);
+
+        // Take snapshot
+        let snapshot = comp1.snapshot().expect("snapshot should succeed");
+        assert_eq!(snapshot.component_fqn, "lua::snap-test");
+        assert!(!snapshot.state.is_null(), "snapshot state should not be null");
+
+        // Create new component, restore
+        let mut comp2 =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+
+        // Verify fresh state is counter=0
+        let data = comp2.on_request(&get_req).expect("get should succeed");
+        assert_eq!(data["counter"], 0);
+
+        // Restore from snapshot
+        comp2.restore(&snapshot).expect("restore should succeed");
+
+        // Verify restored state is counter=3
+        let data = comp2.on_request(&get_req).expect("get should succeed");
+        assert_eq!(data["counter"], 3);
+        assert_eq!(data["name"], "test");
+    }
+
+    #[test]
+    fn snapshot_with_nested_tables() {
+        let script = r#"
+            local state = {
+                items = {},
+                metadata = { version = 1 },
+            }
+
+            return {
+                id = "snap-nested",
+                subscriptions = {"Echo"},
+                on_request = function(req)
+                    if req.operation == "add" then
+                        table.insert(state.items, req.payload.item)
+                        return { success = true }
+                    elseif req.operation == "get" then
+                        return { success = true, data = {
+                            items = state.items,
+                            count = #state.items,
+                            version = state.metadata.version,
+                        }}
+                    end
+                    return { success = false, error = "unknown" }
+                end,
+                on_signal = function(sig) return "Ignored" end,
+
+                snapshot = function()
+                    return state
+                end,
+
+                restore = function(s)
+                    state = s
+                end,
+            }
+        "#;
+
+        let mut comp1 =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+
+        // Add items
+        let add_req =
+            create_test_request("add", serde_json::json!({"item": "alpha"}));
+        comp1.on_request(&add_req).expect("add should succeed");
+        let add_req =
+            create_test_request("add", serde_json::json!({"item": "beta"}));
+        comp1.on_request(&add_req).expect("add should succeed");
+
+        // Snapshot
+        let snapshot = comp1.snapshot().expect("snapshot should succeed");
+
+        // Restore into new component
+        let mut comp2 =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+        comp2.restore(&snapshot).expect("restore should succeed");
+
+        // Verify
+        let get_req = create_test_request("get", JsonValue::Null);
+        let data = comp2.on_request(&get_req).expect("get should succeed");
+        assert_eq!(data["count"], 2);
+        assert_eq!(data["version"], 1);
+        assert_eq!(data["items"][0], "alpha");
+        assert_eq!(data["items"][1], "beta");
+    }
+
+    #[test]
+    fn restore_validates_component_fqn() {
+        let script = r#"
+            return {
+                id = "fqn-check",
+                subscriptions = {"Echo"},
+                on_request = function(req) return { success = true } end,
+                on_signal = function(sig) return "Ignored" end,
+                snapshot = function() return {} end,
+                restore = function(s) end,
+            }
+        "#;
+
+        let mut component =
+            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+
+        // Create snapshot with wrong FQN
+        let wrong_snapshot = ComponentSnapshot::from_state(
+            "lua::wrong-component",
+            &serde_json::json!({}),
+        )
+        .expect("should create snapshot");
+
+        let result = component.restore(&wrong_snapshot);
+        assert!(result.is_err(), "restore with wrong FQN should fail");
+    }
+}

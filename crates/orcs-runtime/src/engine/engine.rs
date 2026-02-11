@@ -613,6 +613,27 @@ impl OrcsEngine {
         checker: Arc<dyn crate::auth::PermissionChecker>,
         grants: Arc<dyn orcs_auth::GrantPolicy>,
     ) -> ChannelHandle {
+        self.spawn_runner_full_auth_with_snapshot(
+            channel_id, component, output_tx, lua_loader, session, checker, grants, None,
+        )
+    }
+
+    /// Spawns a ChannelRunner with full auth and an optional initial snapshot.
+    ///
+    /// Same as [`spawn_runner_full_auth`] but accepts an optional
+    /// [`ComponentSnapshot`] to restore before `init()` (session resume).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_runner_full_auth_with_snapshot(
+        &mut self,
+        channel_id: ChannelId,
+        component: Box<dyn Component>,
+        output_tx: Option<OutputSender>,
+        lua_loader: Option<Arc<dyn LuaChildLoader>>,
+        session: Arc<crate::Session>,
+        checker: Arc<dyn crate::auth::PermissionChecker>,
+        grants: Arc<dyn orcs_auth::GrantPolicy>,
+        initial_snapshot: Option<ComponentSnapshot>,
+    ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
 
@@ -642,6 +663,11 @@ impl OrcsEngine {
         let has_child_spawner = lua_loader.is_some();
         if has_child_spawner {
             builder = builder.with_child_spawner(lua_loader);
+        }
+
+        // Restore from initial snapshot if provided (session resume)
+        if let Some(snapshot) = initial_snapshot {
+            builder = builder.with_initial_snapshot(snapshot);
         }
 
         let (runner, handle) = self.apply_hook_registry(builder).build();
@@ -712,9 +738,20 @@ impl OrcsEngine {
     /// Stop the engine by sending a Veto signal.
     ///
     /// This triggers graceful shutdown via the signal broadcast channel.
+    /// Call [`shutdown()`](Self::shutdown) after this to await runner
+    /// completion and collect snapshots.
     pub fn stop(&self) {
         info!("Engine stop requested");
         let _ = self.signal_tx.send(Signal::veto(Principal::System));
+    }
+
+    /// Awaits all runners, collects snapshots, and cleans up.
+    ///
+    /// Must be called after [`stop()`](Self::stop) to complete the
+    /// shutdown sequence. Snapshots are available via
+    /// [`collected_snapshots()`](Self::collected_snapshots) after this returns.
+    pub async fn shutdown(&mut self) {
+        self.shutdown_parallel().await;
     }
 
     /// Returns the shared Board handle.

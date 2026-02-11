@@ -235,4 +235,44 @@ function SkillRegistry:reload(new_skills)
     return { registered = registered, updated = updated, removed = removed }
 end
 
+-- Serialize registry state for snapshot persistence.
+-- Returns a plain table (no metatables) suitable for JSON serialization.
+function SkillRegistry:serialize()
+    local skill_list = {}
+    for _, name in ipairs(self.load_order) do
+        local skill = self.skills[name]
+        if skill then
+            table.insert(skill_list, {
+                name = skill.name,
+                description = skill.description,
+                source = skill.source,
+                frontmatter = skill.frontmatter,
+                metadata = skill.metadata,
+                state = skill.state,
+                body = skill.body,
+                token_estimate = skill.token_estimate,
+            })
+        end
+    end
+    return {
+        skills = skill_list,
+        frozen = self.frozen,
+    }
+end
+
+-- Restore registry state from a serialized snapshot.
+-- Idempotent: replaces current state entirely (no append).
+function SkillRegistry:deserialize(data)
+    self.skills = {}
+    self.load_order = {}
+    self.frozen = false
+
+    if data and data.skills then
+        for _, skill in ipairs(data.skills) do
+            self:register(skill)
+        end
+    end
+    self.frozen = data and data.frozen or false
+end
+
 return SkillRegistry

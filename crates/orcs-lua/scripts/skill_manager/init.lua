@@ -306,6 +306,15 @@ return {
     elevated = true,
 
     init = function()
+        -- If restore() was already called, registry is set; skip re-init
+        if registry then
+            orcs.log("info", string.format(
+                "SkillManager init: restored session (skills: %d, active: %d)",
+                registry:count(), catalog:active_count()
+            ))
+            return
+        end
+
         registry = SkillRegistry.new()
         catalog = SkillCatalog.new(registry)
 
@@ -367,5 +376,39 @@ return {
             return "Abort"
         end
         return "Handled"
+    end,
+
+    snapshot = function()
+        if not registry then return {} end
+        local data = registry:serialize()
+        -- Include activated skill names for catalog rebuild
+        local active_names = {}
+        if catalog then
+            for name in pairs(catalog.activated) do
+                table.insert(active_names, name)
+            end
+        end
+        data.active_names = active_names
+        return data
+    end,
+
+    restore = function(state)
+        if not state then return end
+        registry = SkillRegistry.new()
+        registry:deserialize(state)
+        catalog = SkillCatalog.new(registry)
+        -- Rebuild activated set from snapshot
+        if state.active_names then
+            for _, name in ipairs(state.active_names) do
+                local skill = registry:get(name)
+                if skill and skill.state == "activated" then
+                    catalog.activated[name] = true
+                end
+            end
+        end
+        orcs.log("info", string.format(
+            "SkillManager restored (skills: %d, active: %d)",
+            registry:count(), catalog:active_count()
+        ))
     end,
 }

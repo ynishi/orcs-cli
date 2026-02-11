@@ -234,6 +234,31 @@ impl OrcsAppBuilder {
             elevated_session.is_elevated()
         );
 
+        // Load or create session (before component spawn so snapshots are available)
+        let (session_asset, is_resumed, restored_count) =
+            if let Some(session_id) = &self.resume_session_id {
+                tracing::info!("Resuming session: {}", session_id);
+                let asset = store.load(session_id).await?;
+                let count = asset.component_snapshots.len();
+
+                // Restore grants from previous session
+                let saved_grants = asset.granted_commands();
+                if !saved_grants.is_empty() {
+                    match shared_grants.restore_grants(saved_grants) {
+                        Ok(()) => {
+                            tracing::info!("Restored {} grant(s) from session", saved_grants.len());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to restore grants: {e}");
+                        }
+                    }
+                }
+
+                (asset, true, count)
+            } else {
+                (SessionAsset::new(), false, 0)
+            };
+
         // Spawn components driven by RuntimeHints
         let mut component_routes = HashMap::new();
 
@@ -268,7 +293,19 @@ impl OrcsAppBuilder {
                 None
             };
 
-            engine.spawn_runner_full_auth(
+            // Look up initial snapshot for this component (session resume)
+            let initial_snapshot = session_asset
+                .get_snapshot(&component_id.fqn())
+                .cloned();
+
+            if initial_snapshot.is_some() {
+                tracing::info!(
+                    component = %component_id.fqn(),
+                    "Restoring snapshot for component"
+                );
+            }
+
+            engine.spawn_runner_full_auth_with_snapshot(
                 channel_id,
                 Box::new(component),
                 output_tx,
@@ -276,6 +313,7 @@ impl OrcsAppBuilder {
                 session,
                 Arc::clone(&auth_checker),
                 grants,
+                initial_snapshot,
             );
 
             let short_name = component_id.name.clone();
@@ -296,31 +334,6 @@ impl OrcsAppBuilder {
             component_routes.keys().collect::<Vec<_>>()
         );
 
-        // Load or create session
-        let (session, is_resumed, restored_count) =
-            if let Some(session_id) = &self.resume_session_id {
-                tracing::info!("Resuming session: {}", session_id);
-                let asset = store.load(session_id).await?;
-                let count = asset.component_snapshots.len();
-
-                // Restore grants from previous session
-                let saved_grants = asset.granted_commands();
-                if !saved_grants.is_empty() {
-                    match shared_grants.restore_grants(saved_grants) {
-                        Ok(()) => {
-                            tracing::info!("Restored {} grant(s) from session", saved_grants.len());
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to restore grants: {e}");
-                        }
-                    }
-                }
-
-                (asset, true, count)
-            } else {
-                (SessionAsset::new(), false, 0)
-            };
-
         // Create console renderer based on config
         let renderer = if config.ui.verbose {
             orcs_runtime::io::ConsoleRenderer::verbose()
@@ -340,7 +353,7 @@ impl OrcsAppBuilder {
             io_output,
             pending_approval: None,
             store,
-            session,
+            session: session_asset,
             is_resumed,
             restored_count,
             shared_grants,

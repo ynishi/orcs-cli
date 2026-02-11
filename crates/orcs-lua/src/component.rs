@@ -10,10 +10,10 @@ use crate::lua_env::LuaEnv;
 use crate::types::{
     parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
 };
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, IntoLua, Lua, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
-    ChildContext, Component, ComponentError, ComponentLoader, Emitter, EventCategory, RuntimeHints,
-    SpawnError, Status,
+    ChildContext, Component, ComponentError, ComponentLoader, ComponentSnapshot, Emitter,
+    EventCategory, RuntimeHints, SnapshotError, SpawnError, Status,
 };
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_runtime::sandbox::SandboxPolicy;
@@ -67,6 +67,10 @@ pub struct LuaComponent {
     init_key: Option<RegistryKey>,
     /// Registry key for shutdown callback (optional).
     shutdown_key: Option<RegistryKey>,
+    /// Registry key for snapshot callback (optional).
+    snapshot_key: Option<RegistryKey>,
+    /// Registry key for restore callback (optional).
+    restore_key: Option<RegistryKey>,
     /// Script path (for hot reload).
     script_path: Option<String>,
     /// Event emitter for ChannelRunner mode.
@@ -272,6 +276,18 @@ impl LuaComponent {
             .map(|f| lua.create_registry_value(f))
             .transpose()?;
 
+        let snapshot_key = component_table
+            .get::<Function>("snapshot")
+            .ok()
+            .map(|f| lua.create_registry_value(f))
+            .transpose()?;
+
+        let restore_key = component_table
+            .get::<Function>("restore")
+            .ok()
+            .map(|f| lua.create_registry_value(f))
+            .transpose()?;
+
         // Extract runtime hints (all optional, default false)
         let hints = RuntimeHints {
             output_to_io: component_table.get("output_to_io").unwrap_or(false),
@@ -288,6 +304,8 @@ impl LuaComponent {
             on_signal_key,
             init_key,
             shutdown_key,
+            snapshot_key,
+            restore_key,
             script_path: None,
             emitter: None,
             child_context: None,
@@ -321,6 +339,8 @@ impl LuaComponent {
         self.on_signal_key = new_component.on_signal_key;
         self.init_key = new_component.init_key;
         self.shutdown_key = new_component.shutdown_key;
+        self.snapshot_key = new_component.snapshot_key;
+        self.restore_key = new_component.restore_key;
         // Note: emitter is preserved across reload
 
         // Re-register orcs.output if emitter is set
@@ -562,6 +582,56 @@ impl Component for LuaComponent {
         }
     }
 
+    fn snapshot(&self) -> Result<ComponentSnapshot, SnapshotError> {
+        let Some(snapshot_key) = &self.snapshot_key else {
+            return Err(SnapshotError::NotSupported(self.id.fqn()));
+        };
+
+        let lua = self.lua.lock().map_err(|e| {
+            SnapshotError::InvalidData(format!("lua mutex poisoned: {e}"))
+        })?;
+
+        let snapshot_fn: Function = lua.registry_value(snapshot_key).map_err(|e| {
+            SnapshotError::InvalidData(format!("snapshot callback not found: {e}"))
+        })?;
+
+        let lua_result: LuaValue = snapshot_fn.call(()).map_err(|e| {
+            SnapshotError::InvalidData(format!("snapshot callback failed: {e}"))
+        })?;
+
+        let json_value = lua_value_to_json(&lua_result);
+        ComponentSnapshot::from_state(self.id.fqn(), &json_value)
+    }
+
+    fn restore(&mut self, snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {
+        let Some(restore_key) = &self.restore_key else {
+            return Err(SnapshotError::NotSupported(self.id.fqn()));
+        };
+
+        snapshot.validate(&self.id.fqn())?;
+
+        let lua = self.lua.lock().map_err(|e| {
+            SnapshotError::InvalidData(format!("lua mutex poisoned: {e}"))
+        })?;
+
+        let restore_fn: Function = lua.registry_value(restore_key).map_err(|e| {
+            SnapshotError::InvalidData(format!("restore callback not found: {e}"))
+        })?;
+
+        let lua_value = json_to_lua_value(&lua, &snapshot.state).map_err(|e| {
+            SnapshotError::InvalidData(format!("failed to convert snapshot to lua: {e}"))
+        })?;
+
+        restore_fn.call::<()>(lua_value).map_err(|e| {
+            SnapshotError::RestoreFailed {
+                component: self.id.fqn(),
+                reason: format!("restore callback failed: {e}"),
+            }
+        })?;
+
+        Ok(())
+    }
+
     fn set_emitter(&mut self, emitter: Box<dyn Emitter>) {
         let emitter_arc = Arc::new(Mutex::new(emitter));
         self.emitter = Some(Arc::clone(&emitter_arc));
@@ -606,6 +676,95 @@ impl ComponentLoader for LuaComponentLoader {
         LuaComponent::from_script(script, Arc::clone(&self.sandbox))
             .map(|c| Box::new(c) as Box<dyn Component>)
             .map_err(|e| SpawnError::InvalidScript(e.to_string()))
+    }
+}
+
+// === JSON ↔ Lua conversion helpers for snapshot/restore ===
+
+/// Converts a Lua value to a serde_json::Value.
+fn lua_value_to_json(value: &LuaValue) -> JsonValue {
+    match value {
+        LuaValue::Nil => JsonValue::Null,
+        LuaValue::Boolean(b) => JsonValue::Bool(*b),
+        LuaValue::Integer(i) => JsonValue::Number((*i).into()),
+        LuaValue::Number(n) => {
+            serde_json::Number::from_f64(*n)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null)
+        }
+        LuaValue::String(s) => {
+            JsonValue::String(s.to_string_lossy().to_string())
+        }
+        LuaValue::Table(table) => {
+            // Detect array vs object: check if sequential integer keys starting at 1
+            let len = table.raw_len();
+            let is_array = len > 0
+                && table
+                    .clone()
+                    .pairs::<i64, LuaValue>()
+                    .enumerate()
+                    .all(|(idx, pair)| {
+                        pair.map(|(k, _)| k == (idx as i64 + 1)).unwrap_or(false)
+                    });
+
+            if is_array {
+                let arr: Vec<JsonValue> = table
+                    .clone()
+                    .sequence_values::<LuaValue>()
+                    .filter_map(|v| v.ok())
+                    .map(|v| lua_value_to_json(&v))
+                    .collect();
+                JsonValue::Array(arr)
+            } else {
+                let mut map = serde_json::Map::new();
+                if let Ok(pairs) = table.clone().pairs::<LuaValue, LuaValue>().collect::<Result<Vec<_>, _>>() {
+                    for (k, v) in pairs {
+                        let key = match &k {
+                            LuaValue::String(s) => s.to_string_lossy().to_string(),
+                            LuaValue::Integer(i) => i.to_string(),
+                            _ => continue,
+                        };
+                        map.insert(key, lua_value_to_json(&v));
+                    }
+                }
+                JsonValue::Object(map)
+            }
+        }
+        _ => JsonValue::Null,
+    }
+}
+
+/// Converts a serde_json::Value to a Lua value.
+fn json_to_lua_value(lua: &Lua, value: &JsonValue) -> Result<LuaValue, mlua::Error> {
+    match value {
+        JsonValue::Null => Ok(LuaValue::Nil),
+        JsonValue::Bool(b) => Ok(LuaValue::Boolean(*b)),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(LuaValue::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(LuaValue::Number(f))
+            } else {
+                Ok(LuaValue::Nil)
+            }
+        }
+        JsonValue::String(s) => s.as_str().into_lua(lua),
+        JsonValue::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                let lua_val = json_to_lua_value(lua, v)?;
+                table.raw_set(i + 1, lua_val)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        JsonValue::Object(map) => {
+            let table = lua.create_table()?;
+            for (k, v) in map {
+                let lua_val = json_to_lua_value(lua, v)?;
+                table.raw_set(k.as_str(), lua_val)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
     }
 }
 
