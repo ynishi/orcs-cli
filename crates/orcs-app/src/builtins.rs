@@ -35,6 +35,29 @@ pub fn ensure_expanded(base_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> 
         return Ok(vec![]);
     }
 
+    write_all(&target)
+}
+
+/// Force-expands builtin components, removing any existing versioned directory first.
+///
+/// Unlike [`ensure_expanded`], this always writes fresh copies of all files,
+/// even if the versioned directory already exists.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if removal, directory creation, or file writes fail.
+pub fn force_expand(base_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let target = versioned_dir(base_dir);
+
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+
+    write_all(&target)
+}
+
+/// Writes all embedded builtin files to the target directory.
+fn write_all(target: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut written = Vec::new();
 
     for (rel_path, content) in FILES {
@@ -108,5 +131,43 @@ mod tests {
 
         let second = ensure_expanded(tmp.path()).expect("second expansion");
         assert!(second.is_empty(), "should skip existing version");
+    }
+
+    #[test]
+    fn force_expand_overwrites_existing() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+
+        // First expansion
+        let first = ensure_expanded(tmp.path()).expect("initial expansion");
+        assert_eq!(first.len(), FILES.len(), "should write all files initially");
+
+        // Tamper with a file to verify it gets overwritten
+        let echo_path = versioned_dir(tmp.path()).join("echo.lua");
+        std::fs::write(&echo_path, "-- tampered").expect("should write tamper");
+        let tampered = std::fs::read_to_string(&echo_path).expect("should read tampered");
+        assert_eq!(tampered, "-- tampered");
+
+        // Force expand should overwrite
+        let forced = force_expand(tmp.path()).expect("force expansion");
+        assert_eq!(forced.len(), FILES.len(), "should write all files again");
+
+        // Verify tampered file is restored
+        let restored = std::fs::read_to_string(&echo_path).expect("should read restored");
+        assert_ne!(
+            restored, "-- tampered",
+            "tampered file should be overwritten"
+        );
+    }
+
+    #[test]
+    fn force_expand_works_on_empty_dir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+
+        // Force expand on fresh directory (no existing version)
+        let written = force_expand(tmp.path()).expect("force expansion on empty");
+        assert_eq!(written.len(), FILES.len(), "should write all files");
+
+        let sm_init = versioned_dir(tmp.path()).join("skill_manager/init.lua");
+        assert!(sm_init.exists(), "skill_manager/init.lua should exist");
     }
 }

@@ -52,6 +52,8 @@ pub struct EnvOverrides {
     pub model: Option<String>,
     /// `ORCS_SESSION_PATH`
     pub session_path: Option<PathBuf>,
+    /// `ORCS_BUILTINS_DIR`
+    pub builtins_dir: Option<PathBuf>,
     /// `ORCS_PROFILE`
     pub profile: Option<String>,
 }
@@ -74,6 +76,7 @@ impl EnvOverrides {
             scripts_auto_load: read_env_bool("ORCS_SCRIPTS_AUTO_LOAD")?,
             model: read_env_string("ORCS_MODEL"),
             session_path: read_env_string("ORCS_SESSION_PATH").map(PathBuf::from),
+            builtins_dir: read_env_string("ORCS_BUILTINS_DIR").map(PathBuf::from),
             profile: read_env_string("ORCS_PROFILE"),
         })
     }
@@ -345,6 +348,9 @@ impl ConfigLoader {
         }
         if let Some(ref v) = ov.session_path {
             config.paths.session_dir = Some(v.clone());
+        }
+        if let Some(ref v) = ov.builtins_dir {
+            config.components.builtins_dir = v.clone();
         }
     }
 }

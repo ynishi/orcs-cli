@@ -17,6 +17,7 @@
 //! - `ORCS_MODEL`: Default model name
 //! - `ORCS_AUTO_APPROVE`: Auto-approve all requests (dangerous)
 //! - `ORCS_SESSION_PATH`: Custom session storage path
+//! - `ORCS_BUILTINS_DIR`: Override builtin components directory
 
 use anyhow::Result;
 use clap::Parser;
@@ -51,6 +52,18 @@ struct Args {
     #[arg(long)]
     session_path: Option<PathBuf>,
 
+    /// Override builtin components directory (also: ORCS_BUILTINS_DIR)
+    #[arg(long)]
+    builtins_dir: Option<PathBuf>,
+
+    /// Install/refresh builtin components and exit
+    #[arg(long)]
+    install_builtins: bool,
+
+    /// Force overwrite when used with --install-builtins
+    #[arg(long, requires = "install_builtins")]
+    force: bool,
+
     /// Activate a profile (overrides ORCS_PROFILE env var)
     #[arg(long)]
     profile: Option<String>,
@@ -69,6 +82,7 @@ struct CliConfigResolver {
     debug: bool,
     verbose: bool,
     session_path: Option<PathBuf>,
+    builtins_dir: Option<PathBuf>,
     profile: Option<String>,
 }
 
@@ -86,6 +100,7 @@ impl CliConfigResolver {
             debug: args.debug,
             verbose: args.verbose,
             session_path: args.session_path.clone(),
+            builtins_dir: args.builtins_dir.clone(),
             profile: args.profile.clone(),
         }
     }
@@ -110,6 +125,9 @@ impl ConfigResolver for CliConfigResolver {
         }
         if let Some(ref p) = self.session_path {
             config.paths.session_dir = Some(p.clone());
+        }
+        if let Some(ref p) = self.builtins_dir {
+            config.components.builtins_dir = p.clone();
         }
 
         Ok(config)
@@ -136,6 +154,32 @@ async fn main() -> Result<()> {
         path = %resolver.project_root.display(),
         "Project root"
     );
+
+    // Handle --install-builtins before full app startup
+    if args.install_builtins {
+        let config = resolver
+            .resolve()
+            .map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
+        let builtins_base = config.components.resolved_builtins_dir();
+        let target = orcs_app::builtins::versioned_dir(&builtins_base);
+
+        if args.force {
+            info!(path = %target.display(), "Force-installing builtins");
+            let written = orcs_app::builtins::force_expand(&builtins_base)
+                .map_err(|e| anyhow::anyhow!("Failed to install builtins: {e}"))?;
+            info!("Installed {} file(s) to {}", written.len(), target.display());
+        } else {
+            info!(path = %target.display(), "Installing builtins (skip if exists)");
+            let written = orcs_app::builtins::ensure_expanded(&builtins_base)
+                .map_err(|e| anyhow::anyhow!("Failed to install builtins: {e}"))?;
+            if written.is_empty() {
+                info!("Builtins already installed at {}", target.display());
+            } else {
+                info!("Installed {} file(s) to {}", written.len(), target.display());
+            }
+        }
+        return Ok(());
+    }
 
     // Create sandbox from project root
     let sandbox = Arc::new(
@@ -183,15 +227,16 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("system time should be after epoch")
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::create_dir_all(&temp).expect("should create temp dir");
         CliConfigResolver {
             project_root: temp,
             debug,
             verbose,
             session_path,
+            builtins_dir: None,
             profile: None,
         }
     }
@@ -268,6 +313,9 @@ mod tests {
             project: None,
             resume: None,
             session_path: None,
+            builtins_dir: None,
+            install_builtins: false,
+            force: false,
             profile: None,
             command: vec![],
         };
@@ -276,6 +324,7 @@ mod tests {
         assert!(!resolver.debug);
         assert!(!resolver.verbose);
         assert!(resolver.session_path.is_none());
+        assert!(resolver.builtins_dir.is_none());
         // project defaults to cwd
         assert!(resolver.project_root.exists());
     }
@@ -288,6 +337,9 @@ mod tests {
             project: Some(PathBuf::from("/tmp")),
             resume: Some("sess-123".into()),
             session_path: Some(PathBuf::from("/sessions")),
+            builtins_dir: Some(PathBuf::from("/custom/builtins")),
+            install_builtins: false,
+            force: false,
             profile: Some("rust-dev".into()),
             command: vec!["run".into()],
         };
@@ -297,5 +349,28 @@ mod tests {
         assert!(resolver.verbose);
         assert_eq!(resolver.project_root, PathBuf::from("/tmp"));
         assert_eq!(resolver.session_path, Some(PathBuf::from("/sessions")));
+        assert_eq!(
+            resolver.builtins_dir,
+            Some(PathBuf::from("/custom/builtins"))
+        );
+    }
+
+    #[test]
+    fn resolve_builtins_dir_override() {
+        let mut resolver = resolver_with(false, false, None);
+        let custom = PathBuf::from("/custom/builtins");
+        resolver.builtins_dir = Some(custom.clone());
+
+        let config = resolver.resolve().expect("resolve should succeed");
+        assert_eq!(config.components.builtins_dir, custom);
+    }
+
+    #[test]
+    fn resolve_builtins_dir_default_when_unset() {
+        let resolver = resolver_with(false, false, None);
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        let default = OrcsConfig::default();
+        assert_eq!(config.components.builtins_dir, default.components.builtins_dir);
     }
 }
