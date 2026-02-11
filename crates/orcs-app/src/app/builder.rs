@@ -9,8 +9,7 @@ use orcs_runtime::auth::{DefaultGrantStore, DefaultPolicy, GrantPolicy, Permissi
 use orcs_runtime::session::SessionStore;
 use orcs_runtime::LuaChildLoader;
 use orcs_runtime::{
-    ChannelConfig, ConfigResolver, IOPort, LocalFileStore, OrcsEngine, Session, SessionAsset,
-    World,
+    ChannelConfig, ConfigResolver, IOPort, LocalFileStore, OrcsEngine, Session, SessionAsset, World,
 };
 use orcs_types::{Principal, PrincipalId};
 use std::collections::HashMap;
@@ -173,8 +172,7 @@ impl OrcsAppBuilder {
         if config.scripts.auto_load {
             let script_dirs = config.scripts.resolve_dirs(Some(sandbox.root()));
             if !script_dirs.is_empty() {
-                let script_loader =
-                    ScriptLoader::new(Arc::clone(&sandbox)).with_paths(script_dirs);
+                let script_loader = ScriptLoader::new(Arc::clone(&sandbox)).with_paths(script_dirs);
                 let result = script_loader.load_all();
 
                 let loaded_count = result.loaded_count();

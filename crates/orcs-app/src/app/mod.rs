@@ -697,7 +697,9 @@ mod tests {
             .expect("builder should succeed with SessionResolver");
 
             let id = app.session_id().to_string();
-            app.save_session().await.expect("save session should succeed");
+            app.save_session()
+                .await
+                .expect("save session should succeed");
             id
         };
 
