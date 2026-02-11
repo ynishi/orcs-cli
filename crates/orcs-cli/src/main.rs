@@ -167,7 +167,11 @@ async fn main() -> Result<()> {
             info!(path = %target.display(), "Force-installing builtins");
             let written = orcs_app::builtins::force_expand(&builtins_base)
                 .map_err(|e| anyhow::anyhow!("Failed to install builtins: {e}"))?;
-            info!("Installed {} file(s) to {}", written.len(), target.display());
+            info!(
+                "Installed {} file(s) to {}",
+                written.len(),
+                target.display()
+            );
         } else {
             info!(path = %target.display(), "Installing builtins (skip if exists)");
             let written = orcs_app::builtins::ensure_expanded(&builtins_base)
@@ -175,7 +179,11 @@ async fn main() -> Result<()> {
             if written.is_empty() {
                 info!("Builtins already installed at {}", target.display());
             } else {
-                info!("Installed {} file(s) to {}", written.len(), target.display());
+                info!(
+                    "Installed {} file(s) to {}",
+                    written.len(),
+                    target.display()
+                );
             }
         }
         return Ok(());
@@ -244,7 +252,7 @@ mod tests {
     #[test]
     fn resolve_defaults_no_overrides() {
         let resolver = resolver_with(false, false, None);
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.debug);
         assert!(!config.ui.verbose);
@@ -254,7 +262,7 @@ mod tests {
     #[test]
     fn resolve_debug_override() {
         let resolver = resolver_with(true, false, None);
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(config.debug);
         assert!(!config.ui.verbose);
@@ -263,7 +271,7 @@ mod tests {
     #[test]
     fn resolve_verbose_override() {
         let resolver = resolver_with(false, true, None);
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.debug);
         assert!(config.ui.verbose);
@@ -273,7 +281,7 @@ mod tests {
     fn resolve_session_path_override() {
         let path = PathBuf::from("/custom/sessions");
         let resolver = resolver_with(false, false, Some(path.clone()));
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.paths.session_dir, Some(path));
     }
@@ -282,7 +290,7 @@ mod tests {
     fn resolve_all_overrides() {
         let path = PathBuf::from("/all/overrides");
         let resolver = resolver_with(true, true, Some(path.clone()));
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(config.debug);
         assert!(config.ui.verbose);
@@ -296,7 +304,7 @@ mod tests {
     #[test]
     fn false_flags_preserve_loader_values() {
         let resolver = resolver_with(false, false, None);
-        let config = resolver.resolve().unwrap();
+        let config = resolver.resolve().expect("resolve should succeed");
 
         // Loader returns defaults (false) and CLI doesn't override.
         // Key point: no accidental `config.debug = false` forced write.
@@ -371,6 +379,9 @@ mod tests {
         let config = resolver.resolve().expect("resolve should succeed");
 
         let default = OrcsConfig::default();
-        assert_eq!(config.components.builtins_dir, default.components.builtins_dir);
+        assert_eq!(
+            config.components.builtins_dir,
+            default.components.builtins_dir
+        );
     }
 }

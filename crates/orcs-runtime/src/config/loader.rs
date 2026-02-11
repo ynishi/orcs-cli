@@ -594,6 +594,7 @@ default = "profile-model"
             scripts_auto_load: Some(false),
             model: Some("override-model".into()),
             session_path: Some(PathBuf::from("/custom/sessions")),
+            builtins_dir: None,
             profile: None,
         };
 

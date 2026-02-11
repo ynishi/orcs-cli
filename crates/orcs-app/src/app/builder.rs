@@ -294,9 +294,7 @@ impl OrcsAppBuilder {
             };
 
             // Look up initial snapshot for this component (session resume)
-            let initial_snapshot = session_asset
-                .get_snapshot(&component_id.fqn())
-                .cloned();
+            let initial_snapshot = session_asset.get_snapshot(&component_id.fqn()).cloned();
 
             if initial_snapshot.is_some() {
                 tracing::info!(

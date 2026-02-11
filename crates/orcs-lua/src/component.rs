@@ -587,17 +587,18 @@ impl Component for LuaComponent {
             return Err(SnapshotError::NotSupported(self.id.fqn()));
         };
 
-        let lua = self.lua.lock().map_err(|e| {
-            SnapshotError::InvalidData(format!("lua mutex poisoned: {e}"))
-        })?;
+        let lua = self
+            .lua
+            .lock()
+            .map_err(|e| SnapshotError::InvalidData(format!("lua mutex poisoned: {e}")))?;
 
-        let snapshot_fn: Function = lua.registry_value(snapshot_key).map_err(|e| {
-            SnapshotError::InvalidData(format!("snapshot callback not found: {e}"))
-        })?;
+        let snapshot_fn: Function = lua
+            .registry_value(snapshot_key)
+            .map_err(|e| SnapshotError::InvalidData(format!("snapshot callback not found: {e}")))?;
 
-        let lua_result: LuaValue = snapshot_fn.call(()).map_err(|e| {
-            SnapshotError::InvalidData(format!("snapshot callback failed: {e}"))
-        })?;
+        let lua_result: LuaValue = snapshot_fn
+            .call(())
+            .map_err(|e| SnapshotError::InvalidData(format!("snapshot callback failed: {e}")))?;
 
         let json_value = lua_value_to_json(&lua_result);
         ComponentSnapshot::from_state(self.id.fqn(), &json_value)
@@ -610,24 +611,25 @@ impl Component for LuaComponent {
 
         snapshot.validate(&self.id.fqn())?;
 
-        let lua = self.lua.lock().map_err(|e| {
-            SnapshotError::InvalidData(format!("lua mutex poisoned: {e}"))
-        })?;
+        let lua = self
+            .lua
+            .lock()
+            .map_err(|e| SnapshotError::InvalidData(format!("lua mutex poisoned: {e}")))?;
 
-        let restore_fn: Function = lua.registry_value(restore_key).map_err(|e| {
-            SnapshotError::InvalidData(format!("restore callback not found: {e}"))
-        })?;
+        let restore_fn: Function = lua
+            .registry_value(restore_key)
+            .map_err(|e| SnapshotError::InvalidData(format!("restore callback not found: {e}")))?;
 
         let lua_value = json_to_lua_value(&lua, &snapshot.state).map_err(|e| {
             SnapshotError::InvalidData(format!("failed to convert snapshot to lua: {e}"))
         })?;
 
-        restore_fn.call::<()>(lua_value).map_err(|e| {
-            SnapshotError::RestoreFailed {
+        restore_fn
+            .call::<()>(lua_value)
+            .map_err(|e| SnapshotError::RestoreFailed {
                 component: self.id.fqn(),
                 reason: format!("restore callback failed: {e}"),
-            }
-        })?;
+            })?;
 
         Ok(())
     }
@@ -687,14 +689,10 @@ fn lua_value_to_json(value: &LuaValue) -> JsonValue {
         LuaValue::Nil => JsonValue::Null,
         LuaValue::Boolean(b) => JsonValue::Bool(*b),
         LuaValue::Integer(i) => JsonValue::Number((*i).into()),
-        LuaValue::Number(n) => {
-            serde_json::Number::from_f64(*n)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
-        }
-        LuaValue::String(s) => {
-            JsonValue::String(s.to_string_lossy().to_string())
-        }
+        LuaValue::Number(n) => serde_json::Number::from_f64(*n)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        LuaValue::String(s) => JsonValue::String(s.to_string_lossy().to_string()),
         LuaValue::Table(table) => {
             // Detect array vs object: check if sequential integer keys starting at 1
             let len = table.raw_len();
@@ -703,9 +701,7 @@ fn lua_value_to_json(value: &LuaValue) -> JsonValue {
                     .clone()
                     .pairs::<i64, LuaValue>()
                     .enumerate()
-                    .all(|(idx, pair)| {
-                        pair.map(|(k, _)| k == (idx as i64 + 1)).unwrap_or(false)
-                    });
+                    .all(|(idx, pair)| pair.map(|(k, _)| k == (idx as i64 + 1)).unwrap_or(false));
 
             if is_array {
                 let arr: Vec<JsonValue> = table
@@ -717,7 +713,11 @@ fn lua_value_to_json(value: &LuaValue) -> JsonValue {
                 JsonValue::Array(arr)
             } else {
                 let mut map = serde_json::Map::new();
-                if let Ok(pairs) = table.clone().pairs::<LuaValue, LuaValue>().collect::<Result<Vec<_>, _>>() {
+                if let Ok(pairs) = table
+                    .clone()
+                    .pairs::<LuaValue, LuaValue>()
+                    .collect::<Result<Vec<_>, _>>()
+                {
                     for (k, v) in pairs {
                         let key = match &k {
                             LuaValue::String(s) => s.to_string_lossy().to_string(),

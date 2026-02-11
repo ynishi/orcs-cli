@@ -65,7 +65,10 @@ fn handle_request() {
     let result = component.on_request(&req);
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), JsonValue::String("echoed".into()));
+    assert_eq!(
+        result.expect("echo request should succeed"),
+        JsonValue::String("echoed".into())
+    );
 }
 
 #[test]
@@ -231,7 +234,9 @@ mod exec_tests {
         let result = component.on_request(&req).expect("should succeed");
 
         assert!(!result["ok"].as_bool().unwrap_or(true));
-        let stderr = result["stderr"].as_str().unwrap();
+        let stderr = result["stderr"]
+            .as_str()
+            .expect("stderr should be a string");
         assert!(
             stderr.contains("exec denied"),
             "expected 'exec denied', got: {stderr}"
@@ -246,7 +251,10 @@ mod exec_tests {
         let data = component.on_request(&req).expect("should succeed");
 
         assert!(data["ok"].as_bool().unwrap_or(false));
-        assert!(data["stdout"].as_str().unwrap().contains("hello world"));
+        assert!(data["stdout"]
+            .as_str()
+            .expect("stdout should be a string")
+            .contains("hello world"));
         assert_eq!(data["code"].as_i64(), Some(0));
     }
 
@@ -268,7 +276,10 @@ mod exec_tests {
         let req = create_test_request("test", JsonValue::Null);
         let data = component.on_request(&req).expect("should succeed");
 
-        assert!(data["stderr"].as_str().unwrap().contains("error output"));
+        assert!(data["stderr"]
+            .as_str()
+            .expect("stderr should be a string")
+            .contains("error output"));
     }
 
     #[tokio::test]
@@ -283,7 +294,10 @@ mod exec_tests {
 
         let data = result.expect("should succeed");
         assert!(data["ok"].as_bool().unwrap_or(false));
-        assert!(data["stdout"].as_str().unwrap().contains("async test"));
+        assert!(data["stdout"]
+            .as_str()
+            .expect("stdout should be a string")
+            .contains("async test"));
     }
 
     #[test]
@@ -310,7 +324,10 @@ mod exec_tests {
         let req = create_test_request("test", JsonValue::Null);
         let data = component.on_request(&req).expect("should succeed");
 
-        assert!(data["stdout"].as_str().unwrap().contains("quotes"));
+        assert!(data["stdout"]
+            .as_str()
+            .expect("stdout should be a string")
+            .contains("quotes"));
     }
 }
 
@@ -776,11 +793,9 @@ mod snapshot_tests {
 
         let mut component =
             LuaComponent::from_script(script, test_sandbox()).expect("should load script");
-        let snapshot = ComponentSnapshot::from_state(
-            "lua::no-restore",
-            &serde_json::json!({"key": "value"}),
-        )
-        .expect("should create snapshot");
+        let snapshot =
+            ComponentSnapshot::from_state("lua::no-restore", &serde_json::json!({"key": "value"}))
+                .expect("should create snapshot");
 
         let result = component.restore(&snapshot);
         assert!(result.is_err());
@@ -836,7 +851,10 @@ mod snapshot_tests {
         // Take snapshot
         let snapshot = comp1.snapshot().expect("snapshot should succeed");
         assert_eq!(snapshot.component_fqn, "lua::snap-test");
-        assert!(!snapshot.state.is_null(), "snapshot state should not be null");
+        assert!(
+            !snapshot.state.is_null(),
+            "snapshot state should not be null"
+        );
 
         // Create new component, restore
         let mut comp2 =
@@ -895,11 +913,9 @@ mod snapshot_tests {
             LuaComponent::from_script(script, test_sandbox()).expect("should load script");
 
         // Add items
-        let add_req =
-            create_test_request("add", serde_json::json!({"item": "alpha"}));
+        let add_req = create_test_request("add", serde_json::json!({"item": "alpha"}));
         comp1.on_request(&add_req).expect("add should succeed");
-        let add_req =
-            create_test_request("add", serde_json::json!({"item": "beta"}));
+        let add_req = create_test_request("add", serde_json::json!({"item": "beta"}));
         comp1.on_request(&add_req).expect("add should succeed");
 
         // Snapshot
@@ -936,11 +952,9 @@ mod snapshot_tests {
             LuaComponent::from_script(script, test_sandbox()).expect("should load script");
 
         // Create snapshot with wrong FQN
-        let wrong_snapshot = ComponentSnapshot::from_state(
-            "lua::wrong-component",
-            &serde_json::json!({}),
-        )
-        .expect("should create snapshot");
+        let wrong_snapshot =
+            ComponentSnapshot::from_state("lua::wrong-component", &serde_json::json!({}))
+                .expect("should create snapshot");
 
         let result = component.restore(&wrong_snapshot);
         assert!(result.is_err(), "restore with wrong FQN should fail");
