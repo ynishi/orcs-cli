@@ -52,6 +52,7 @@ return {
         local history_context = ""
         if orcs.board_recent then
             local ok, entries = pcall(orcs.board_recent, 10)
+            orcs.log("debug", "llm-worker: board_recent returned " .. (ok and tostring(#(entries or {})) or "error") .. " entries")
             if ok and entries and #entries > 0 then
                 local lines = { "\n\n## Recent Conversation" }
                 for _, entry in ipairs(entries) do
@@ -177,6 +178,7 @@ local function dispatch_rpc(route, body)
             target = route.target,
             message = body,
         })
+        orcs.log("debug", "dispatch_rpc: emitted route_response event for " .. route.target)
         return {
             success = true,
             data = {
@@ -205,6 +207,7 @@ local function dispatch_child(route, body)
             target = route.target,
             message = body,
         })
+        orcs.log("debug", "dispatch_child: emitted route_response event for " .. route.target)
         return {
             success = true,
             data = {
@@ -231,6 +234,7 @@ local function dispatch_llm(message)
             response = response,
             source = data.source or "llm-worker",
         })
+        orcs.log("debug", "dispatch_llm: emitted llm_response event")
         return {
             success = true,
             data = {
