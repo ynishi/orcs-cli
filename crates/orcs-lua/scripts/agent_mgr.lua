@@ -48,16 +48,36 @@ return {
             end
         end
 
-        -- 3. Build prompt with context
+        -- 3. Fetch recent conversation history from EventBoard
+        local history_context = ""
+        if orcs.board_recent then
+            local ok, entries = pcall(orcs.board_recent, 10)
+            if ok and entries and #entries > 0 then
+                local lines = { "\n\n## Recent Conversation" }
+                for _, entry in ipairs(entries) do
+                    local payload = entry.payload or {}
+                    local text = payload.message or payload.content or payload.response
+                    if text and type(text) == "string" and text ~= "" then
+                        local src = entry.source or "unknown"
+                        lines[#lines + 1] = string.format("- [%s] %s", src, text:sub(1, 200))
+                    end
+                end
+                if #lines > 1 then
+                    history_context = table.concat(lines, "\n")
+                end
+            end
+        end
+
+        -- 4. Build prompt with context
         local prompt = message
-        if skill_context ~= "" or tool_desc ~= "" then
-            prompt = message .. skill_context .. tool_desc
-            orcs.log("debug", "llm-worker: context added (skills=" .. skill_count .. ", tools=" .. #tool_desc .. " chars)")
+        if skill_context ~= "" or tool_desc ~= "" or history_context ~= "" then
+            prompt = message .. history_context .. skill_context .. tool_desc
+            orcs.log("debug", "llm-worker: context added (history=" .. #history_context .. ", skills=" .. skill_count .. ", tools=" .. #tool_desc .. " chars)")
         else
             orcs.log("debug", "llm-worker: no additional context")
         end
 
-        -- 4. Call Claude Code CLI (headless)
+        -- 5. Call Claude Code CLI (headless)
         local llm_resp = orcs.llm(prompt)
         if llm_resp and llm_resp.ok then
             return {
