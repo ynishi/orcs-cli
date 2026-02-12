@@ -152,6 +152,11 @@ end
 local function dispatch_rpc(route, body)
     local resp = orcs.request(route.target, "input", { message = body })
     if resp and resp.success then
+        orcs.emit_event("Extension", "route_response", {
+            route_type = "rpc",
+            target = route.target,
+            message = body,
+        })
         return {
             success = true,
             data = {
@@ -175,6 +180,11 @@ local function dispatch_child(route, body)
         if type(response) == "table" then
             response = orcs.json_encode(response)
         end
+        orcs.emit_event("Extension", "route_response", {
+            route_type = "child",
+            target = route.target,
+            message = body,
+        })
         return {
             success = true,
             data = {
@@ -196,6 +206,11 @@ local function dispatch_llm(message)
         local data = result.result or {}
         local response = data.response or "no response"
         orcs.output(response)
+        orcs.emit_event("Extension", "llm_response", {
+            message = message,
+            response = response,
+            source = data.source or "llm-worker",
+        })
         return {
             success = true,
             data = {
