@@ -169,7 +169,7 @@ end
 --- Execute a child-worker route.
 local function dispatch_child(route, body)
     local result = orcs.send_to_child(route.target, { message = body, operation = "input", payload = { message = body } })
-    if result.ok then
+    if result and result.ok then
         local data = result.result or {}
         local response = data.response or data.result
         if type(response) == "table" then
@@ -192,7 +192,7 @@ end
 --- Default route: send to llm-worker.
 local function dispatch_llm(message)
     local result = orcs.send_to_child("llm-worker", { message = message })
-    if result.ok then
+    if result and result.ok then
         local data = result.result or {}
         local response = data.response or "no response"
         orcs.output(response)
