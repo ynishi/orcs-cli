@@ -48,26 +48,10 @@ return {
             end
         end
 
-        -- 3. Fetch recent conversation history from EventBoard
-        local history_context = ""
-        if orcs.board_recent then
-            local ok, entries = pcall(orcs.board_recent, 10)
-            orcs.log("debug", "llm-worker: board_recent returned " .. (ok and tostring(#(entries or {})) or "error") .. " entries")
-            if ok and entries and #entries > 0 then
-                local lines = { "\n\n## Recent Conversation" }
-                for _, entry in ipairs(entries) do
-                    local payload = entry.payload or {}
-                    local text = payload.message or payload.content or payload.response
-                    if text and type(text) == "string" and text ~= "" then
-                        local src = entry.source or "unknown"
-                        lines[#lines + 1] = string.format("- [%s] %s", src, text:sub(1, 200))
-                    end
-                end
-                if #lines > 1 then
-                    history_context = table.concat(lines, "\n")
-                end
-            end
-        end
+        -- 3. Use conversation history passed from parent (agent_mgr)
+        -- board_recent is an emitter function unavailable to child workers,
+        -- so the parent fetches it and passes via input.history_context.
+        local history_context = input.history_context or ""
 
         -- 4. Build prompt with context
         local prompt = message
@@ -222,9 +206,42 @@ local function dispatch_child(route, body)
     end
 end
 
+--- Fetch recent conversation history from EventBoard.
+--- Called in parent (agent_mgr) because board_recent is an emitter function
+--- unavailable to child workers.
+local function fetch_history_context()
+    if not orcs.board_recent then
+        return ""
+    end
+    local ok, entries = pcall(orcs.board_recent, 10)
+    orcs.log("debug", "board_recent returned " .. (ok and tostring(#(entries or {})) or "error") .. " entries")
+    if not ok or not entries or #entries == 0 then
+        return ""
+    end
+    local lines = { "\n\n## Recent Conversation" }
+    for _, entry in ipairs(entries) do
+        local payload = entry.payload or {}
+        local text = payload.message or payload.content or payload.response
+        if text and type(text) == "string" and text ~= "" then
+            local src = entry.source or "unknown"
+            lines[#lines + 1] = string.format("- [%s] %s", src, text:sub(1, 200))
+        end
+    end
+    if #lines > 1 then
+        return table.concat(lines, "\n")
+    end
+    return ""
+end
+
 --- Default route: send to llm-worker.
 local function dispatch_llm(message)
-    local result = orcs.send_to_child("llm-worker", { message = message })
+    -- Gather history in parent context (emitter function, unavailable to children)
+    local history_context = fetch_history_context()
+
+    local result = orcs.send_to_child("llm-worker", {
+        message = message,
+        history_context = history_context,
+    })
     if result and result.ok then
         local data = result.result or {}
         local response = data.response or "no response"
