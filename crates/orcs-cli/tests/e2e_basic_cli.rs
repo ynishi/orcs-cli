@@ -15,6 +15,16 @@ fn orcs_cmd() -> assert_cmd::Command {
     cmd
 }
 
+/// Helper: build a Command with fresh builtins in a tempdir.
+/// Returns (command, _guard) — keep the guard alive for the test's duration.
+fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
+    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
+    cmd.timeout(Duration::from_secs(10));
+    cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
+    (cmd, tmp)
+}
+
 // ─── Startup / Shutdown ────────────────────────────────────────────
 
 #[test]
@@ -57,6 +67,26 @@ fn components_initialize() {
         .stdout(contains("builtin::tool"));
 }
 
+#[test]
+fn profile_manager_initializes() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.arg("-d")
+        .write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("profile::profile_manager"))
+        .stdout(contains("ProfileManager initialized"));
+}
+
+#[test]
+fn agent_mgr_ready_with_workers() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("[AgentMgr] Ready (workers: llm, skill)"));
+}
+
 // ─── Help Command ──────────────────────────────────────────────────
 
 #[test]
@@ -81,6 +111,16 @@ fn at_shell_routes_to_shell() {
         .assert()
         .success()
         .stdout(contains("Routed @shell to channel"));
+}
+
+#[test]
+fn at_profile_manager_routes() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.arg("-d")
+        .write_stdin("@profile_manager list\nq\n")
+        .assert()
+        .success()
+        .stdout(contains("Routed @profile_manager to channel"));
 }
 
 #[test]

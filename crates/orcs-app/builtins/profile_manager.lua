@@ -434,4 +434,35 @@ return {
         -- ProfileManager has no approval flow; Approve/Reject pass through.
         return "Handled"
     end,
+
+    snapshot = function()
+        return {
+            active_profile = active_profile,
+        }
+    end,
+
+    restore = function(state)
+        if not state then return end
+
+        -- Re-discover profiles so cache is populated
+        discover_profiles()
+
+        -- Restore active profile by re-applying it
+        if state.active_profile then
+            local def, err = load_profile(state.active_profile)
+            if def then
+                distribute_component_settings(def)
+                active_profile = def.profile and def.profile.name or state.active_profile
+                active_def = def
+                orcs.log("info", string.format(
+                    "ProfileManager restored profile '%s'", active_profile
+                ))
+            else
+                orcs.log("warn", string.format(
+                    "ProfileManager: could not restore profile '%s': %s",
+                    state.active_profile, err or "unknown"
+                ))
+            end
+        end
+    end,
 }
