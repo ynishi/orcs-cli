@@ -87,6 +87,50 @@ fn agent_mgr_ready_with_workers() {
         .stdout(contains("[AgentMgr] Ready (workers: llm, skill)"));
 }
 
+// ─── Worker Spawning ─────────────────────────────────────────────
+
+#[test]
+fn agent_mgr_spawns_workers() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.arg("-d")
+        .write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("spawned llm-worker"))
+        .stdout(contains("spawned skill-worker"));
+}
+
+// ─── Component Routes ───────────────────────────────────────────
+
+#[test]
+fn all_component_routes_registered() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.arg("-d")
+        .write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("Component routes registered"))
+        .stdout(contains("agent_mgr"))
+        .stdout(contains("profile_manager"))
+        .stdout(contains("skill_manager"))
+        .stdout(contains("shell"))
+        .stdout(contains("tool"));
+}
+
+// ─── Shutdown ───────────────────────────────────────────────────
+
+#[test]
+fn clean_shutdown_logs() {
+    let (mut cmd, _guard) = orcs_cmd_fresh();
+    cmd.arg("-d")
+        .write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("agent_mgr shutdown"))
+        .stdout(contains("ProfileManager shutdown"))
+        .stdout(contains("Shutting down"));
+}
+
 // ─── Help Command ──────────────────────────────────────────────────
 
 #[test]
