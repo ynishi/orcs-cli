@@ -128,6 +128,10 @@ return {
 }
 ]]
 
+-- === Constants ===
+
+local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
+
 -- === Routing ===
 
 --- Route table: prefix → { target_type, target }
@@ -200,7 +204,7 @@ local function dispatch_child(route, body)
             },
         }
     else
-        local err = result.error or "unknown"
+        local err = (result and result.error) or "unknown"
         orcs.output("[AgentMgr] @" .. route.target .. " error: " .. err, "error")
         return { success = false, error = err }
     end
@@ -213,7 +217,7 @@ local function fetch_history_context()
     if not orcs.board_recent then
         return ""
     end
-    local ok, entries = pcall(orcs.board_recent, 10)
+    local ok, entries = pcall(orcs.board_recent, HISTORY_LIMIT)
     orcs.log("debug", "board_recent returned " .. (ok and tostring(#(entries or {})) or "error") .. " entries")
     if not ok or not entries or #entries == 0 then
         return ""
@@ -261,7 +265,7 @@ local function dispatch_llm(message)
             },
         }
     else
-        local err = result.error or "unknown"
+        local err = (result and result.error) or "unknown"
         orcs.output("[AgentMgr] Error: " .. err, "error")
         return { success = false, error = err }
     end

@@ -3,27 +3,11 @@
 //! Tests the binary's stdin/stdout interface by spawning real subprocesses.
 //! tracing output goes to stdout; eprintln (errors) goes to stderr.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::{orcs_cmd, orcs_cmd_fresh};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
-use std::time::Duration;
-
-/// Helper: build a Command for the `orcs` binary with a default timeout.
-fn orcs_cmd() -> assert_cmd::Command {
-    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
-    cmd.timeout(Duration::from_secs(10));
-    cmd
-}
-
-/// Helper: build a Command with fresh builtins in a tempdir.
-/// Returns (command, _guard) — keep the guard alive for the test's duration.
-fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
-    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
-    cmd.timeout(Duration::from_secs(10));
-    cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
-    (cmd, tmp)
-}
 
 // ─── Startup / Shutdown ────────────────────────────────────────────
 

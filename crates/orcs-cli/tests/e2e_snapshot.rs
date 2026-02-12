@@ -3,50 +3,11 @@
 //! Tests the full cycle: pause (snapshot collection + save) → resume (restore).
 //! Requires builtins to be expanded with snapshot support.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::{extract_session_id, orcs_cmd, orcs_cmd_fresh_snapshot, orcs_cmd_with_builtins};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
-use std::time::Duration;
-
-/// Helper: build a Command for the `orcs` binary with a default timeout.
-fn orcs_cmd() -> assert_cmd::Command {
-    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
-    cmd.timeout(Duration::from_secs(15));
-    cmd
-}
-
-/// Helper: build a Command with fresh builtins in a tempdir.
-/// Returns (command, _guard) — keep the guard alive for the test's duration.
-fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
-    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
-    cmd.timeout(Duration::from_secs(15));
-    cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
-    (cmd, tmp)
-}
-
-/// Helper: build a Command using a shared builtins dir (for multi-step tests).
-fn orcs_cmd_with_builtins(dir: &str) -> assert_cmd::Command {
-    let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
-    cmd.timeout(Duration::from_secs(15));
-    cmd.args(["--builtins-dir", dir]);
-    cmd
-}
-
-/// Extract session ID from stdout containing "Session saved: <UUID>".
-fn extract_session_id(stdout: &str) -> Option<String> {
-    for line in stdout.lines() {
-        if let Some(pos) = line.find("Session saved: ") {
-            let id_start = pos + "Session saved: ".len();
-            let id = line[id_start..].trim();
-            // Validate UUID format (8-4-4-4-12)
-            if id.len() >= 36 {
-                return Some(id[..36].to_string());
-            }
-        }
-    }
-    None
-}
 
 // ─── --install-builtins ──────────────────────────────────────────
 
@@ -119,7 +80,7 @@ fn force_requires_install_builtins() {
 
 #[test]
 fn pause_collects_snapshots() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
     cmd.arg("-d")
         .write_stdin("p\n")
         .assert()
@@ -131,7 +92,7 @@ fn pause_collects_snapshots() {
 
 #[test]
 fn pause_captures_skill_manager_snapshot() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
     cmd.arg("-d").write_stdin("p\n").assert().success().stdout(
         contains("skill::skill_manager").and(contains("has_snapshot").and(contains("true"))),
     );
@@ -139,7 +100,7 @@ fn pause_captures_skill_manager_snapshot() {
 
 #[test]
 fn pause_captures_profile_manager_snapshot() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
     cmd.arg("-d").write_stdin("p\n").assert().success().stdout(
         contains("profile::profile_manager").and(contains("has_snapshot").and(contains("true"))),
     );
