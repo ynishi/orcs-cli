@@ -7,6 +7,7 @@
 //! - `orcs.board_recent(n)` — query shared Board
 //! - `orcs.request(target, operation, payload, opts?)` — Component-to-Component RPC
 
+use super::truncate_utf8;
 use crate::error::LuaError;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
 use orcs_component::Emitter;
@@ -21,8 +22,13 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     // orcs.output(msg) - emit output event via emitter
     let emitter_clone = Arc::clone(&emitter);
     let output_fn = lua.create_function(move |_, msg: String| {
-        if let Ok(em) = emitter_clone.lock() {
-            em.emit_output(&msg);
+        match emitter_clone.lock() {
+            Ok(em) => em.emit_output(&msg),
+            Err(e) => tracing::warn!(
+                "orcs.output: emitter lock poisoned, message dropped: {} (err: {})",
+                truncate_utf8(&msg, 100),
+                e
+            ),
         }
         Ok(())
     })?;
@@ -31,8 +37,13 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     // orcs.output_with_level(msg, level) - emit output with level
     let emitter_clone2 = Arc::clone(&emitter);
     let output_level_fn = lua.create_function(move |_, (msg, level): (String, String)| {
-        if let Ok(em) = emitter_clone2.lock() {
-            em.emit_output_with_level(&msg, &level);
+        match emitter_clone2.lock() {
+            Ok(em) => em.emit_output_with_level(&msg, &level),
+            Err(e) => tracing::warn!(
+                "orcs.output_with_level: emitter lock poisoned, message dropped: {} (err: {})",
+                truncate_utf8(&msg, 100),
+                e
+            ),
         }
         Ok(())
     })?;

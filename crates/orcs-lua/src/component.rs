@@ -5,6 +5,18 @@
 mod ctx_fns;
 mod emitter_fns;
 
+/// Truncate a string to at most `max_bytes`, respecting UTF-8 char boundaries.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 use crate::error::LuaError;
 use crate::lua_env::LuaEnv;
 use crate::types::{
@@ -207,15 +219,18 @@ impl LuaComponent {
         {
             let orcs_table: Table = lua.globals().get("orcs")?;
             let output_noop = lua.create_function(|_, msg: String| {
-                tracing::debug!("[lua] orcs.output called without emitter: {}", msg);
+                tracing::warn!(
+                    "[lua] orcs.output called without emitter (noop): {}",
+                    truncate_utf8(&msg, 100)
+                );
                 Ok(())
             })?;
             orcs_table.set("output", output_noop)?;
 
             let output_level_noop = lua.create_function(|_, (msg, _level): (String, String)| {
-                tracing::debug!(
-                    "[lua] orcs.output_with_level called without emitter: {}",
-                    msg
+                tracing::warn!(
+                    "[lua] orcs.output_with_level called without emitter (noop): {}",
+                    truncate_utf8(&msg, 100)
                 );
                 Ok(())
             })?;
@@ -643,6 +658,11 @@ impl Component for LuaComponent {
             if let Err(e) = emitter_fns::register(&lua, emitter_arc) {
                 tracing::warn!("Failed to register emitter functions: {}", e);
             }
+        } else {
+            tracing::warn!(
+                component = %self.id.fqn(),
+                "set_emitter: Lua lock failed — noop orcs.output remains active"
+            );
         }
     }
 
