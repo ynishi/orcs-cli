@@ -136,23 +136,26 @@ impl ConsoleRenderer {
     }
 
     /// Renders styled text to the console.
+    ///
+    /// Normal output goes to stdout (with flush); warnings and errors go to stderr.
     fn render_styled_text(&self, text: &str, style: OutputStyle) {
+        use std::io::Write;
         match style {
-            OutputStyle::Normal => {
-                eprintln!("{}", text);
-            }
-            OutputStyle::Info => {
-                tracing::info!("{}", text);
+            OutputStyle::Normal | OutputStyle::Info => {
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "{}", text);
+                let _ = out.flush();
             }
             OutputStyle::Warn => {
-                tracing::warn!("{}", text);
+                eprintln!("[WARN] {}", text);
             }
             OutputStyle::Error => {
-                tracing::error!("{}", text);
+                eprintln!("[ERROR] {}", text);
             }
             OutputStyle::Success => {
-                // Green text using ANSI escape code
-                eprintln!("\x1B[32m{}\x1B[0m", text);
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "\x1B[32m{}\x1B[0m", text);
+                let _ = out.flush();
             }
             OutputStyle::Debug => {
                 if self.verbose {

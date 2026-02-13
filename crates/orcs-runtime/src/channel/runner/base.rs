@@ -1682,13 +1682,16 @@ mod tests {
             source: ComponentId::builtin("test"),
             payload: serde_json::json!({"test": true}),
         };
-        handle.inject(event).await.unwrap();
+        handle
+            .inject(event)
+            .await
+            .expect("inject echo event into runner");
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
+            .expect("send cancel signal");
 
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
@@ -1713,7 +1716,9 @@ mod tests {
 
         tokio::task::yield_now().await;
 
-        signal_tx.send(Signal::veto(Principal::System)).unwrap();
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto signal");
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         assert!(result.is_ok());
@@ -1841,7 +1846,10 @@ mod tests {
             source: ComponentId::builtin("test"),
             payload: serde_json::json!({"trigger": true}),
         };
-        handle.inject(event).await.unwrap();
+        handle
+            .inject(event)
+            .await
+            .expect("inject event into emitting runner");
 
         // Wait for processing
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1855,7 +1863,7 @@ mod tests {
         // Stop runner
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
+            .expect("send cancel signal to emitting runner");
 
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
@@ -2065,7 +2073,10 @@ mod tests {
         .with_target(target);
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle.send_request(req, reply_tx).await.unwrap();
+        handle
+            .send_request(req, reply_tx)
+            .await
+            .expect("send RPC request to runner");
 
         // Should receive the echoed payload back
         let result = tokio::time::timeout(std::time::Duration::from_millis(200), reply_rx)
@@ -2073,12 +2084,15 @@ mod tests {
             .expect("reply should arrive within timeout")
             .expect("reply channel should not be dropped");
 
-        assert_eq!(result.unwrap(), Value::String("rpc_payload".into()));
+        assert_eq!(
+            result.expect("RPC response should be Ok"),
+            Value::String("rpc_payload".into())
+        );
 
         // Cleanup
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
+            .expect("send cancel signal after RPC test");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         teardown(manager_task, world_tx).await;
     }
@@ -2131,7 +2145,10 @@ mod tests {
             .with_target(target);
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle.send_request(req, reply_tx).await.unwrap();
+        handle
+            .send_request(req, reply_tx)
+            .await
+            .expect("send RPC request to failing runner");
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(200), reply_rx)
             .await
@@ -2139,14 +2156,248 @@ mod tests {
             .expect("channel should not be dropped");
 
         assert!(result.is_err(), "should return Err for component failure");
+        let err_msg = result.expect_err("expected Err variant for component failure");
         assert!(
-            result.unwrap_err().contains("deliberate test failure"),
-            "error message should contain original error"
+            err_msg.contains("deliberate test failure"),
+            "error message should contain original error, got: {err_msg}"
         );
 
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
+            .expect("send cancel signal after failing RPC test");
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+        teardown(manager_task, world_tx).await;
+    }
+
+    // === Output Channel Routing Tests ===
+    //
+    // Verify that when `with_output_channel(output_tx)` is configured on the
+    // ChannelRunnerBuilder, Output events emitted by the Component's emitter
+    // are routed to the output channel (ClientRunner/IOPort path) rather than
+    // the runner's own event channel.
+
+    #[tokio::test]
+    async fn emitter_output_routes_to_output_channel_via_builder() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        /// Component that emits output via its emitter during on_request.
+        struct OutputRoutingComponent {
+            id: ComponentId,
+            emitter: Option<Box<dyn orcs_component::Emitter>>,
+            call_count: StdArc<AtomicUsize>,
+        }
+
+        impl OutputRoutingComponent {
+            fn new(call_count: StdArc<AtomicUsize>) -> Self {
+                Self {
+                    id: ComponentId::builtin("output-routing"),
+                    emitter: None,
+                    call_count,
+                }
+            }
+        }
+
+        impl Component for OutputRoutingComponent {
+            fn id(&self) -> &ComponentId {
+                &self.id
+            }
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+            fn subscriptions(&self) -> &[EventCategory] {
+                &[EventCategory::Echo]
+            }
+            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(emitter) = &self.emitter {
+                    emitter.emit_output("routed output message");
+                }
+                Ok(serde_json::json!({"success": true}))
+            }
+            fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+                if signal.is_veto() {
+                    SignalResponse::Abort
+                } else {
+                    SignalResponse::Handled
+                }
+            }
+            fn abort(&mut self) {}
+            fn set_emitter(&mut self, emitter: Box<dyn orcs_component::Emitter>) {
+                self.emitter = Some(emitter);
+            }
+        }
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let call_count = StdArc::new(AtomicUsize::new(0));
+        let component = Box::new(OutputRoutingComponent::new(StdArc::clone(&call_count)));
+
+        // Create a separate output channel to receive routed Output events
+        let (output_tx, mut output_rx) = OutputSender::channel(64);
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) =
+            ChannelRunner::builder(primary, world_tx.clone(), world, signal_rx, component)
+                .with_emitter(signal_tx.clone())
+                .with_output_channel(output_tx)
+                .build();
+
+        let runner_task = tokio::spawn(runner.run());
+
+        // Inject an event to trigger on_request → emit_output
+        let event = Event {
+            category: EventCategory::Echo,
+            operation: "test".to_string(),
+            source: ComponentId::builtin("test"),
+            payload: serde_json::json!({"trigger": true}),
+        };
+        handle.inject(event).await.expect("inject event");
+
+        // Wait for processing
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the component was called
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 1,
+            "Component should have received the event"
+        );
+
+        // Verify the Output event arrived on the output channel
+        let output_event = output_rx
+            .try_recv()
+            .expect("Output event should arrive on output channel");
+        assert_eq!(
+            output_event.category,
+            EventCategory::Output,
+            "Event category should be Output"
+        );
+        assert_eq!(
+            output_event.operation, "display",
+            "Event operation should be 'display'"
+        );
+        assert_eq!(
+            output_event.payload["message"], "routed output message",
+            "Event payload message should match what the component emitted"
+        );
+        assert_eq!(
+            output_event.payload["level"], "info",
+            "Event payload level should be 'info'"
+        );
+
+        // Cleanup
+        signal_tx
+            .send(Signal::cancel(primary, Principal::System))
+            .expect("send cancel");
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn emitter_output_records_to_board_and_routes_to_output_channel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        struct BoardOutputComponent {
+            id: ComponentId,
+            emitter: Option<Box<dyn orcs_component::Emitter>>,
+            call_count: StdArc<AtomicUsize>,
+        }
+
+        impl BoardOutputComponent {
+            fn new(call_count: StdArc<AtomicUsize>) -> Self {
+                Self {
+                    id: ComponentId::builtin("board-output"),
+                    emitter: None,
+                    call_count,
+                }
+            }
+        }
+
+        impl Component for BoardOutputComponent {
+            fn id(&self) -> &ComponentId {
+                &self.id
+            }
+            fn status(&self) -> Status {
+                Status::Idle
+            }
+            fn subscriptions(&self) -> &[EventCategory] {
+                &[EventCategory::Echo]
+            }
+            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(emitter) = &self.emitter {
+                    emitter.emit_output("board and io message");
+                }
+                Ok(serde_json::json!({"success": true}))
+            }
+            fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+                if signal.is_veto() {
+                    SignalResponse::Abort
+                } else {
+                    SignalResponse::Handled
+                }
+            }
+            fn abort(&mut self) {}
+            fn set_emitter(&mut self, emitter: Box<dyn orcs_component::Emitter>) {
+                self.emitter = Some(emitter);
+            }
+        }
+
+        let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
+
+        let call_count = StdArc::new(AtomicUsize::new(0));
+        let component = Box::new(BoardOutputComponent::new(StdArc::clone(&call_count)));
+
+        let (output_tx, mut output_rx) = OutputSender::channel(64);
+        let board = crate::board::shared_board();
+
+        let signal_rx = signal_tx.subscribe();
+        let (runner, handle) =
+            ChannelRunner::builder(primary, world_tx.clone(), world, signal_rx, component)
+                .with_emitter(signal_tx.clone())
+                .with_output_channel(output_tx)
+                .with_board(Arc::clone(&board))
+                .build();
+
+        let runner_task = tokio::spawn(runner.run());
+
+        // Inject event to trigger on_request → emit_output
+        let event = Event {
+            category: EventCategory::Echo,
+            operation: "test".to_string(),
+            source: ComponentId::builtin("test"),
+            payload: serde_json::json!({"trigger": true}),
+        };
+        handle.inject(event).await.expect("inject event");
+
+        // Wait for processing
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify component was called
+        assert!(call_count.load(Ordering::SeqCst) >= 1);
+
+        // Verify Output event on output channel
+        let output_event = output_rx
+            .try_recv()
+            .expect("Output event should arrive on output channel");
+        assert_eq!(output_event.payload["message"], "board and io message");
+
+        // Verify Board also recorded the entry
+        let b = board
+            .read()
+            .expect("Board read lock should not be poisoned");
+        assert!(b.len() >= 1, "Board should have at least 1 entry");
+        let entries = b.recent(1);
+        assert_eq!(
+            entries[0].payload["message"], "board and io message",
+            "Board entry should match the emitted message"
+        );
+
+        // Cleanup
+        signal_tx
+            .send(Signal::cancel(primary, Principal::System))
+            .expect("send cancel");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         teardown(manager_task, world_tx).await;
     }

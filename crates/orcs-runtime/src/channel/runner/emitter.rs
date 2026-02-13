@@ -239,8 +239,22 @@ impl EventEmitter {
     /// This is the internal method used by emit_output variants.
     fn emit_to_output(&self, event: Event) -> bool {
         if let Some(output_tx) = &self.output_tx {
-            output_tx.try_send_direct(event).is_ok()
+            match output_tx.try_send_direct(event) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        source = %self.source_id.fqn(),
+                        "emit_to_output: output_tx send failed (channel full or closed): {}",
+                        e
+                    );
+                    false
+                }
+            }
         } else {
+            tracing::warn!(
+                source = %self.source_id.fqn(),
+                "emit_to_output: output_tx is None, falling back to own channel"
+            );
             self.emit(event)
         }
     }
@@ -693,5 +707,93 @@ mod tests {
         let boxed: Box<dyn Emitter> = Box::new(emitter);
         let recent = boxed.board_recent(10);
         assert!(recent.is_empty());
+    }
+
+    // === output_channel routing tests ===
+
+    fn setup_with_output_channel() -> (
+        EventEmitter,
+        OutputReceiver,
+        OutputReceiver,
+        broadcast::Receiver<Signal>,
+    ) {
+        let (channel_tx, channel_rx) = OutputSender::channel(64);
+        let (output_tx, output_rx) = OutputSender::channel(64);
+        let (signal_tx, signal_rx) = broadcast::channel(64);
+        let source_id = ComponentId::builtin("test-output-routing");
+
+        let emitter =
+            EventEmitter::new(channel_tx, signal_tx, source_id).with_output_channel(output_tx);
+        (emitter, channel_rx, output_rx, signal_rx)
+    }
+
+    #[test]
+    fn emit_output_routes_to_output_channel() {
+        let (emitter, mut channel_rx, mut output_rx, _signal_rx) = setup_with_output_channel();
+
+        emitter.emit_output("Hello via output channel!");
+
+        // Output event should arrive on output_rx (IO channel)
+        let received = output_rx
+            .try_recv()
+            .expect("Output event should arrive on output channel");
+        assert_eq!(received.category, EventCategory::Output);
+        assert_eq!(received.operation, "display");
+        assert_eq!(received.payload["message"], "Hello via output channel!");
+        assert_eq!(received.payload["level"], "info");
+
+        // Own channel should NOT receive the Output event
+        assert!(
+            channel_rx.try_recv().is_err(),
+            "Own channel should NOT receive Output event when output_channel is configured"
+        );
+    }
+
+    #[test]
+    fn emit_output_with_level_routes_to_output_channel() {
+        let (emitter, mut channel_rx, mut output_rx, _signal_rx) = setup_with_output_channel();
+
+        emitter.emit_output_with_level("Warning!", "warn");
+
+        let received = output_rx
+            .try_recv()
+            .expect("Output event should arrive on output channel");
+        assert_eq!(received.category, EventCategory::Output);
+        assert_eq!(received.payload["message"], "Warning!");
+        assert_eq!(received.payload["level"], "warn");
+
+        assert!(
+            channel_rx.try_recv().is_err(),
+            "Own channel should NOT receive Output event when output_channel is configured"
+        );
+    }
+
+    #[test]
+    fn emit_output_with_output_channel_also_records_to_board() {
+        let (channel_tx, _channel_rx) = OutputSender::channel(64);
+        let (output_tx, mut output_rx) = OutputSender::channel(64);
+        let (signal_tx, _signal_rx) = broadcast::channel(64);
+        let source_id = ComponentId::builtin("test-board-routing");
+        let board = crate::board::shared_board();
+
+        let emitter = EventEmitter::new(channel_tx, signal_tx, source_id)
+            .with_output_channel(output_tx)
+            .with_board(board.clone());
+
+        emitter.emit_output("Board + IO test");
+
+        // Should arrive on output_rx
+        let received = output_rx
+            .try_recv()
+            .expect("Output event should arrive on output channel");
+        assert_eq!(received.payload["message"], "Board + IO test");
+
+        // Should also be recorded on Board
+        let b = board
+            .read()
+            .expect("Board read lock should not be poisoned");
+        assert_eq!(b.len(), 1, "Board should have exactly 1 entry");
+        let entries = b.recent(1);
+        assert_eq!(entries[0].payload["message"], "Board + IO test");
     }
 }

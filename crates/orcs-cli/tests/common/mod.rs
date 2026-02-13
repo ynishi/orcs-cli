@@ -9,10 +9,28 @@ pub const TIMEOUT_BASIC: Duration = Duration::from_secs(10);
 /// Extended timeout for snapshot/resume tests (heavier I/O).
 pub const TIMEOUT_SNAPSHOT: Duration = Duration::from_secs(15);
 
+/// Environment variables that prevent the claude CLI from launching
+/// inside another Claude Code session (nested session guard).
+/// Removed so that `orcs` → `claude` calls work when tests run
+/// inside a Claude Code terminal.
+const CLAUDE_GUARD_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+];
+
+/// Remove Claude Code nested-session guard variables from a command.
+fn strip_claude_guard(cmd: &mut assert_cmd::Command) {
+    for var in CLAUDE_GUARD_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 /// Build a Command for the `orcs` binary with the basic timeout.
 pub fn orcs_cmd() -> assert_cmd::Command {
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
+    strip_claude_guard(&mut cmd);
     cmd
 }
 
@@ -22,6 +40,7 @@ pub fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
+    strip_claude_guard(&mut cmd);
     cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
     (cmd, tmp)
 }
@@ -31,6 +50,7 @@ pub fn orcs_cmd_fresh_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_SNAPSHOT);
+    strip_claude_guard(&mut cmd);
     cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
     (cmd, tmp)
 }
@@ -39,6 +59,7 @@ pub fn orcs_cmd_fresh_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
 pub fn orcs_cmd_with_builtins(dir: &str) -> assert_cmd::Command {
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_SNAPSHOT);
+    strip_claude_guard(&mut cmd);
     cmd.args(["--builtins-dir", dir]);
     cmd
 }

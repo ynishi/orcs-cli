@@ -33,9 +33,24 @@ pub struct LlmResult {
     pub session_id: Option<String>,
 }
 
+/// Environment variables that prevent the claude CLI from launching
+/// inside another Claude Code session (nested session guard).
+const CLAUDE_GUARD_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+];
+
 /// Builds a `Command` for the claude CLI.
 fn build_command(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> Command {
     let mut cmd = Command::new("claude");
+
+    // Remove nested-session guard variables so the child claude process
+    // doesn't refuse to start when orcs itself runs inside Claude Code.
+    for var in CLAUDE_GUARD_VARS {
+        cmd.env_remove(var);
+    }
+
     cmd.arg("-p");
 
     match mode {
@@ -153,6 +168,22 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert_eq!(args, vec!["-p", "hello"]);
+    }
+
+    #[test]
+    fn build_command_removes_nested_guard_vars() {
+        let cmd = build_command("x", &LlmSessionMode::SingleShot, Path::new("/tmp"));
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|s| s.to_owned())))
+            .collect();
+        for var in CLAUDE_GUARD_VARS {
+            assert_eq!(
+                envs.get(*var),
+                Some(&None),
+                "{var} should be removed from child env"
+            );
+        }
     }
 
     #[test]

@@ -77,7 +77,6 @@ return {
             return {
                 success = false,
                 error = err,
-                data = { source = "llm-worker" },
             }
         end
     end,
@@ -248,6 +247,12 @@ local function dispatch_llm(message)
     })
     if result and result.ok then
         local data = result.result or {}
+        -- Worker returns {response=..., source=...} on success,
+        -- {error=..., source=...} on failure.
+        if data.error then
+            orcs.output_with_level("[AgentMgr] Error: " .. data.error, "error")
+            return { success = false, error = data.error }
+        end
         local response = data.response or "no response"
         orcs.output(response)
         orcs.emit_event("Extension", "llm_response", {
@@ -266,7 +271,7 @@ local function dispatch_llm(message)
         }
     else
         local err = (result and result.error) or "unknown"
-        orcs.output("[AgentMgr] Error: " .. err, "error")
+        orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
         return { success = false, error = err }
     end
 end

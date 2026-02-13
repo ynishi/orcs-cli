@@ -130,7 +130,17 @@ impl FromLua for LuaResponse {
     fn from_lua(value: Value, lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::Table(table) => {
-                let success: bool = table.get("success").unwrap_or(true);
+                // Determine success flag.
+                // mlua converts Lua nil → Ok(false) for bool, so unwrap_or(true)
+                // never fires when the key is absent. Check the raw Value instead.
+                let success = match table.get::<Value>("success") {
+                    Ok(Value::Boolean(b)) => b,
+                    Ok(Value::Nil) => {
+                        // Key absent → infer from error field presence.
+                        table.get::<String>("error").is_err()
+                    }
+                    _ => true,
+                };
                 let data = table
                     .get::<Value>("data")
                     .ok()
@@ -550,6 +560,69 @@ mod tests {
         table.raw_set(2, "b").unwrap();
         let result = lua_to_json(Value::Table(table), &lua).unwrap();
         assert_eq!(result, serde_json::json!(["a", "b"]));
+    }
+
+    // === LuaResponse tests ===
+
+    #[test]
+    fn lua_response_explicit_success() {
+        let lua = Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set("success", true).expect("set success");
+        table
+            .set("data", lua.create_table().expect("inner table"))
+            .expect("set data");
+        let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
+        assert!(resp.success);
+        assert!(resp.data.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn lua_response_explicit_failure() {
+        let lua = Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set("success", false).expect("set success");
+        table.set("error", "boom").expect("set error");
+        let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
+        assert!(!resp.success);
+        assert_eq!(resp.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn lua_response_missing_success_with_error_infers_false() {
+        // Worker returns { error = "...", source = "..." } without success field.
+        // Previously: nil→false via mlua bool conversion made this accidentally work,
+        // but the `unwrap_or(true)` was unreachable. Now: inferred from error field.
+        let lua = Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set("error", "llm call failed").expect("set error");
+        table.set("source", "llm-worker").expect("set source");
+        let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
+        assert!(
+            !resp.success,
+            "should infer failure from error field presence"
+        );
+        assert_eq!(resp.error.as_deref(), Some("llm call failed"));
+    }
+
+    #[test]
+    fn lua_response_missing_success_without_error_infers_true() {
+        // Worker returns { response = "...", source = "..." } without success field.
+        let lua = Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set("response", "hello").expect("set response");
+        table.set("source", "llm-worker").expect("set source");
+        let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
+        assert!(resp.success, "should infer success when no error field");
+    }
+
+    #[test]
+    fn lua_response_nil_is_success() {
+        let lua = Lua::new();
+        let resp = LuaResponse::from_lua(Value::Nil, &lua).expect("parse nil response");
+        assert!(resp.success);
+        assert!(resp.data.is_none());
     }
 
     #[test]
