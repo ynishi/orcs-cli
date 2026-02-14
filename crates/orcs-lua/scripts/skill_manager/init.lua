@@ -144,6 +144,118 @@ local function handle_select(payload)
     return { success = true, data = entries, count = #entries }
 end
 
+-- Recommend skills for a user intent using lightweight LLM judgment.
+-- Returns 0-5 skills with name + description, filtered by relevance.
+--
+-- payload:
+--   intent  (string)  — user's message / intent
+--   context (string)  — recent conversation context (optional)
+--   limit   (number)  — max skills to return (default 5)
+--   model   (string)  — LLM model for judgment (default haiku)
+local function handle_recommend(payload)
+    if not payload or not payload.intent then
+        return { success = false, error = "payload.intent is required" }
+    end
+
+    local intent = payload.intent
+    local context = payload.context or ""
+    local limit = payload.limit or 5
+
+    -- Gather all active skills (L1 catalog entries)
+    local all_skills = catalog:active_skills()
+    if #all_skills == 0 then
+        return { success = true, data = {}, count = 0 }
+    end
+
+    -- Build skill catalog for LLM prompt
+    local skill_lines = {}
+    for i, s in ipairs(all_skills) do
+        local desc = s.description or ""
+        -- Truncate description to ~60 words for prompt efficiency
+        if #desc > 300 then
+            desc = desc:sub(1, 300) .. "..."
+        end
+        skill_lines[i] = string.format("%d. %s — %s", i, s.name, desc)
+    end
+    local skill_list = table.concat(skill_lines, "\n")
+
+    -- Build LLM prompt for skill selection (table.concat to avoid % escaping issues)
+    local prompt_parts = {
+        "You are a skill recommender. Given a user's intent and available skills, select the most relevant skills.",
+        "",
+        "## User Intent",
+        intent,
+    }
+    if context ~= "" then
+        prompt_parts[#prompt_parts + 1] = ""
+        prompt_parts[#prompt_parts + 1] = "## Recent Context"
+        prompt_parts[#prompt_parts + 1] = context
+    end
+    prompt_parts[#prompt_parts + 1] = ""
+    prompt_parts[#prompt_parts + 1] = "## Available Skills (" .. #all_skills .. " total)"
+    prompt_parts[#prompt_parts + 1] = skill_list
+    prompt_parts[#prompt_parts + 1] = ""
+    prompt_parts[#prompt_parts + 1] = "## Instructions"
+    prompt_parts[#prompt_parts + 1] = "- Select 0-" .. limit .. " skills that are directly relevant to the user's intent."
+    prompt_parts[#prompt_parts + 1] = "- If no skill is relevant, return an empty list."
+    prompt_parts[#prompt_parts + 1] = '- Return ONLY a JSON array of skill names (strings). Example: ["skill-a", "skill-b"]'
+    prompt_parts[#prompt_parts + 1] = "- If none are relevant, return: []"
+    prompt_parts[#prompt_parts + 1] = "- No explanation needed, just the JSON array."
+    local prompt = table.concat(prompt_parts, "\n")
+
+    -- Call lightweight LLM (haiku by default)
+    local model = payload.model or "claude-haiku-4-5-20251001"
+    local llm_resp = orcs.llm(prompt, { model = model })
+
+    if not llm_resp or not llm_resp.ok then
+        -- Fallback to keyword-based select if LLM fails
+        orcs.log("warn", "SkillManager recommend: LLM failed, falling back to keyword select")
+        local entries = registry:select(intent, limit)
+        return { success = true, data = entries, count = #entries, fallback = true }
+    end
+
+    -- Parse LLM response: expect JSON array of skill names
+    local content = llm_resp.content or ""
+    -- Strip markdown code blocks (```json ... ```) that LLMs sometimes wrap around output
+    local stripped = content:gsub("```json%s*", ""):gsub("```%s*", "")
+    -- Greedy match: first '[' to last ']' — safe because LLM is asked to return only a JSON array
+    local json_str = stripped:match("%[.*%]")
+    if not json_str then
+        orcs.log("warn", "SkillManager recommend: could not parse LLM response, fallback")
+        local entries = registry:select(intent, limit)
+        return { success = true, data = entries, count = #entries, fallback = true }
+    end
+
+    -- Parse the JSON array of names
+    local ok, names = pcall(orcs.json_parse, json_str)
+    if not ok or type(names) ~= "table" then
+        orcs.log("warn", "SkillManager recommend: JSON parse failed, fallback")
+        local entries = registry:select(intent, limit)
+        return { success = true, data = entries, count = #entries, fallback = true }
+    end
+
+    -- Resolve names to catalog entries (with description)
+    local recommended = {}
+    for _, name in ipairs(names) do
+        if #recommended >= limit then break end
+        local skill = registry:get(name)
+        if skill then
+            table.insert(recommended, {
+                name = skill.name,
+                description = skill.description or "",
+                token_estimate = skill.token_estimate,
+            })
+        end
+    end
+
+    orcs.log("info", string.format(
+        "SkillManager recommend: intent=%s → %d skills (of %d total)",
+        intent:sub(1, 50), #recommended, #all_skills
+    ))
+
+    return { success = true, data = recommended, count = #recommended }
+end
+
 -- Render catalog string (within budget)
 local function handle_catalog(payload)
     local text, stats = catalog:render_catalog(payload)
@@ -278,6 +390,7 @@ local handlers = {
     unregister = handle_unregister,
     -- Selection
     select     = handle_select,
+    recommend  = handle_recommend,
     -- Activation / Disclosure
     activate   = handle_activate,
     deactivate = handle_deactivate,
@@ -302,7 +415,11 @@ local handlers = {
 return {
     id = "skill_manager",
     namespace = "skill",
-    subscriptions = { "Extension" },
+    -- All skill_manager operations are RPC-based (direct events).
+    -- No broadcast Extension events are needed, so no Extension subscription.
+    -- To subscribe to specific Extension operations, use table form:
+    --   { category = "Extension", operations = {"route_response"} }
+    subscriptions = {},
     elevated = true,
 
     init = function()

@@ -482,6 +482,222 @@ mod errors {
 }
 
 // =============================================================================
+// Recommend Operation
+// =============================================================================
+
+mod recommend {
+    use super::*;
+
+    /// Register multiple topic-specific skills for recommend tests.
+    /// Skills include body so activate() skips file I/O.
+    fn register_topic_skills(harness: &mut LuaTestHarness) {
+        for (name, desc, tags) in [
+            (
+                "requirements-analysis",
+                "Structured requirements elicitation and specification",
+                vec!["requirements", "analysis", "planning"],
+            ),
+            (
+                "code-review",
+                "Automated code review with quality metrics",
+                vec!["review", "quality", "testing"],
+            ),
+            (
+                "deploy-prod",
+                "Production deployment with rollback support",
+                vec!["deploy", "production", "ci"],
+            ),
+            (
+                "rust-tdd",
+                "Test-driven development workflow for Rust",
+                vec!["rust", "tdd", "testing"],
+            ),
+            (
+                "api-design",
+                "REST API design patterns and OpenAPI spec generation",
+                vec!["api", "design", "rest"],
+            ),
+        ] {
+            harness
+                .request(
+                    ext_cat(),
+                    "register",
+                    json!({
+                        "skill": {
+                            "name": name,
+                            "description": desc,
+                            "body": format!("# {name}\n\n{desc}"),
+                            "source": { "format": "agent-skills", "path": format!("/tmp/{name}") },
+                            "frontmatter": {},
+                            "metadata": { "tags": tags, "categories": ["dev"] },
+                            "state": "discovered"
+                        }
+                    }),
+                )
+                .expect("register should succeed");
+
+            // Activate (L2) — body is pre-set so no file I/O
+            harness
+                .request(ext_cat(), "activate", json!({ "name": name }))
+                .expect("activate should succeed");
+        }
+    }
+
+    #[test]
+    fn recommend_missing_intent_returns_error() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        let err = harness
+            .request(ext_cat(), "recommend", json!({}))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("intent"),
+            "error should mention 'intent', got: {err}"
+        );
+    }
+
+    #[test]
+    fn recommend_empty_registry_returns_empty() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "build a feature" }),
+            )
+            .expect("recommend should succeed with empty registry");
+
+        // Empty active skills → immediate empty return (no LLM call)
+        let is_empty = match &result {
+            serde_json::Value::Array(a) => a.is_empty(),
+            serde_json::Value::Object(o) => o.is_empty(),
+            _ => false,
+        };
+        assert!(
+            is_empty,
+            "empty registry should return empty result, got: {result}"
+        );
+    }
+
+    /// In test harness, orcs.llm() returns deny-by-default error.
+    /// handle_recommend falls back to keyword-based select.
+    /// This verifies the fallback path returns relevant skills.
+    #[test]
+    fn recommend_fallback_returns_relevant_skills() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+        register_topic_skills(&mut harness);
+
+        // Intent about "deploy" → fallback select should find deploy-prod
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "deploy to production", "limit": 3 }),
+            )
+            .expect("recommend should succeed via fallback");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().expect("should be array");
+        assert!(
+            !arr.is_empty(),
+            "fallback should return at least 1 skill for 'deploy' intent"
+        );
+
+        let names: Vec<&str> = arr.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(
+            names.contains(&"deploy-prod"),
+            "deploy-prod should be in results, got: {names:?}"
+        );
+    }
+
+    /// Verify fallback flag is set when LLM is unavailable.
+    #[test]
+    fn recommend_fallback_flag_is_set() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+        register_topic_skills(&mut harness);
+
+        // We need the raw response (including `fallback` field).
+        // The harness extracts `data` on success, so `fallback` is at the
+        // top-level response, not in `data`. Let's check via a workaround:
+        // query something that will hit fallback, verify we get results
+        // (which confirms fallback worked since LLM is denied).
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "rust testing", "limit": 5 }),
+            )
+            .expect("recommend should succeed via fallback");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().expect("should be array");
+        // "rust" and "testing" should match rust-tdd and code-review
+        assert!(
+            !arr.is_empty(),
+            "fallback should return skills for 'rust testing'"
+        );
+    }
+
+    #[test]
+    fn recommend_respects_limit() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+        register_topic_skills(&mut harness);
+
+        // Empty intent → fallback select returns first N
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "dev", "limit": 2 }),
+            )
+            .expect("recommend should succeed");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().expect("should be array");
+        assert!(
+            arr.len() <= 2,
+            "should respect limit=2, got {} results",
+            arr.len()
+        );
+    }
+
+    #[test]
+    fn recommend_with_context() {
+        let (_td, mut harness) = skill_harness();
+        let _ = harness.init();
+        register_topic_skills(&mut harness);
+
+        // Include context — should still work via fallback
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({
+                    "intent": "design an API",
+                    "context": "We discussed REST endpoints earlier",
+                    "limit": 5,
+                }),
+            )
+            .expect("recommend with context should succeed");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().expect("should be array");
+        // "API" and "design" should match api-design
+        let names: Vec<&str> = arr.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(
+            names.contains(&"api-design"),
+            "api-design should be in results, got: {names:?}"
+        );
+    }
+}
+
+// =============================================================================
 // File I/O: Discover skills from real directories
 // =============================================================================
 

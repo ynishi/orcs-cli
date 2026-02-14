@@ -592,6 +592,7 @@ fn register_context_functions(
     // Capability-checked override: requires Capability::LLM.
     //
     // opts (optional table):
+    //   { model = "claude-haiku-4-5-20251001" } → specify model
     //   { new_session = true }    → start tracked session (returns session_id)
     //   { resume = "<uuid>" }    → continue existing session
     //   (none)                    → single-shot (backward compatible)
@@ -615,7 +616,9 @@ fn register_context_functions(
         drop(ctx);
 
         let mode = crate::llm_command::parse_session_mode(opts.as_ref())?;
-        let llm_result = crate::llm_command::execute_llm(&prompt, &mode, &llm_sandbox_root);
+        let model = crate::llm_command::parse_model(opts.as_ref())?;
+        let llm_result =
+            crate::llm_command::execute_llm(&prompt, &mode, model.as_deref(), &llm_sandbox_root);
         crate::llm_command::result_to_lua_table(lua, &llm_result)
     })?;
     orcs_table.set("llm", llm_fn)?;

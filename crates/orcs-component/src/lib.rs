@@ -251,8 +251,8 @@ pub use package::{
 // Re-export error types
 pub use error::ComponentError;
 
-// Re-export EventCategory for convenience
-pub use orcs_event::EventCategory;
+// Re-export EventCategory and SubscriptionEntry for convenience
+pub use orcs_event::{EventCategory, SubscriptionEntry};
 
 #[cfg(test)]
 mod tests {

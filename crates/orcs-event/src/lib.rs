@@ -182,7 +182,7 @@ mod error;
 mod request;
 mod signal;
 
-pub use category::EventCategory;
+pub use category::{EventCategory, SubscriptionEntry};
 pub use error::EventError;
 pub use request::{Request, RequestArgs, DEFAULT_TIMEOUT_MS};
 pub use signal::{Signal, SignalKind, SignalResponse};

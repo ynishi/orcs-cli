@@ -40,6 +40,85 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+/// A subscription entry with optional operation-level filtering.
+///
+/// Wraps an [`EventCategory`] with an optional set of accepted operations.
+/// This enables fine-grained subscription control: components can subscribe
+/// to a category and only receive events for specific operations.
+///
+/// # Examples
+///
+/// ```
+/// use orcs_event::{EventCategory, SubscriptionEntry};
+///
+/// // Accept all operations for Echo category
+/// let entry = SubscriptionEntry::all(EventCategory::Echo);
+/// assert!(entry.matches(&EventCategory::Echo, "any_op"));
+///
+/// // Accept only specific operations for Extension category
+/// let ext = EventCategory::extension("lua", "Extension");
+/// let entry = SubscriptionEntry::with_operations(
+///     ext.clone(),
+///     ["route_response".to_string()],
+/// );
+/// assert!(entry.matches(&ext, "route_response"));
+/// assert!(!entry.matches(&ext, "llm_response"));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionEntry {
+    /// The event category to subscribe to.
+    pub category: EventCategory,
+    /// Optional set of accepted operations within this category.
+    /// `None` means all operations are accepted (wildcard).
+    pub operations: Option<HashSet<String>>,
+}
+
+impl SubscriptionEntry {
+    /// Create a subscription accepting all operations for a category.
+    #[must_use]
+    pub fn all(category: EventCategory) -> Self {
+        Self {
+            category,
+            operations: None,
+        }
+    }
+
+    /// Create a subscription accepting specific operations only.
+    #[must_use]
+    pub fn with_operations(
+        category: EventCategory,
+        operations: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            category,
+            operations: Some(operations.into_iter().collect()),
+        }
+    }
+
+    /// Check if an event matches this subscription entry.
+    ///
+    /// Returns `true` if:
+    /// - The category matches, AND
+    /// - Either `operations` is `None` (wildcard), or the operation is in the set.
+    #[must_use]
+    pub fn matches(&self, category: &EventCategory, operation: &str) -> bool {
+        if self.category != *category {
+            return false;
+        }
+        match &self.operations {
+            None => true,
+            Some(ops) => ops.contains(operation),
+        }
+    }
+
+    /// Returns the category of this entry.
+    #[must_use]
+    pub fn category(&self) -> &EventCategory {
+        &self.category
+    }
+}
 
 /// Event category for subscription-based routing.
 ///
@@ -258,5 +337,41 @@ mod tests {
         let json = r#"{"Extension":{"namespace":"ns","kind":"k"}}"#;
         let cat: EventCategory = serde_json::from_str(json).unwrap();
         assert_eq!(cat, EventCategory::extension("ns", "k"));
+    }
+
+    // === SubscriptionEntry tests ===
+
+    #[test]
+    fn subscription_entry_all_matches_any_operation() {
+        let entry = SubscriptionEntry::all(EventCategory::Echo);
+        assert!(entry.matches(&EventCategory::Echo, "echo"));
+        assert!(entry.matches(&EventCategory::Echo, "anything"));
+        assert!(!entry.matches(&EventCategory::Hil, "echo"));
+    }
+
+    #[test]
+    fn subscription_entry_with_operations_filters() {
+        let ext = EventCategory::extension("lua", "Extension");
+        let entry = SubscriptionEntry::with_operations(
+            ext.clone(),
+            ["route_response".to_string(), "skill_update".to_string()],
+        );
+        assert!(entry.matches(&ext, "route_response"));
+        assert!(entry.matches(&ext, "skill_update"));
+        assert!(!entry.matches(&ext, "llm_response"));
+        assert!(!entry.matches(&EventCategory::Echo, "route_response"));
+    }
+
+    #[test]
+    fn subscription_entry_empty_operations_rejects_all() {
+        let entry =
+            SubscriptionEntry::with_operations(EventCategory::Echo, std::iter::empty::<String>());
+        assert!(!entry.matches(&EventCategory::Echo, "echo"));
+    }
+
+    #[test]
+    fn subscription_entry_category_accessor() {
+        let entry = SubscriptionEntry::all(EventCategory::Hil);
+        assert_eq!(entry.category(), &EventCategory::Hil);
     }
 }

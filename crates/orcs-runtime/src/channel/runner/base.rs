@@ -47,7 +47,7 @@ use crate::engine::SharedChannelHandles;
 use orcs_component::{
     AsyncChildContext, ChildContext, Component, ComponentLoader, ComponentSnapshot, SnapshotError,
 };
-use orcs_event::{EventCategory, Request, Signal};
+use orcs_event::{EventCategory, Request, Signal, SubscriptionEntry};
 use orcs_hook::SharedHookRegistry;
 use orcs_types::ChannelId;
 use serde::{Deserialize, Serialize};
@@ -340,12 +340,13 @@ pub struct ChannelRunner {
     world: Arc<RwLock<World>>,
     /// Bound Component (1:1 relationship).
     component: Arc<Mutex<Box<dyn Component>>>,
-    /// Cached event subscriptions from Component.
+    /// Cached subscription entries from Component.
     ///
     /// Populated at build time to avoid locking Component on every event.
-    /// Broadcast events whose category is not in this list are silently skipped.
+    /// Broadcast events whose category (and optionally operation) do not
+    /// match any entry are silently skipped.
     /// Direct events bypass this filter entirely.
-    subscriptions: Vec<EventCategory>,
+    subscriptions: Vec<SubscriptionEntry>,
     /// Queue for events received while paused.
     paused_queue: PausedEventQueue,
     /// Child spawner for managing spawned children (optional).
@@ -804,8 +805,14 @@ impl ChannelRunner {
 
         // Subscription filter first: drop broadcast events we don't subscribe to.
         // This runs BEFORE the pause check so unsubscribed events never enter the queue.
-        if !is_direct && !self.subscriptions.contains(&event.category) {
-            debug!(category = ?event.category, "skipping event (not subscribed)");
+        // Checks both category AND operation (if operation filter is set).
+        if !is_direct
+            && !self
+                .subscriptions
+                .iter()
+                .any(|s| s.matches(&event.category, &event.operation))
+        {
+            debug!(category = ?event.category, operation = %event.operation, "skipping event (not subscribed)");
             return true;
         }
 
@@ -822,16 +829,10 @@ impl ChannelRunner {
 
     /// Processes a single event by delivering it to the Component.
     ///
-    /// For broadcast events (`is_direct == false`), the subscription filter
-    /// is applied — events whose category is not subscribed are skipped.
-    /// For direct events (`is_direct == true`), the filter is bypassed.
-    async fn process_event(&self, event: Event, is_direct: bool) {
-        // Subscription filter: skip broadcast events for categories we don't subscribe to
-        if !is_direct && !self.subscriptions.contains(&event.category) {
-            debug!(category = ?event.category, "skipping event (not subscribed)");
-            return;
-        }
-
+    /// Subscription filtering is already applied by `handle_event()` before
+    /// this method is called. Direct events and paused-queue drains bypass
+    /// the filter by design.
+    async fn process_event(&self, event: Event, _is_direct: bool) {
         // --- Pre-dispatch hook ---
         let pre_payload = serde_json::json!({
             "category": format!("{:?}", event.category),
@@ -1490,8 +1491,9 @@ impl ChannelRunnerBuilder {
             None
         };
 
-        // Cache subscriptions from Component to avoid locking on every event
-        let subscriptions = self.component.subscriptions().to_vec();
+        // Cache subscription entries from Component to avoid locking on every event.
+        // Uses subscription_entries() which includes operation-level filtering.
+        let subscriptions = self.component.subscription_entries();
 
         // Create request channel if enabled
         let (request_tx, request_rx) = if self.enable_request_channel {

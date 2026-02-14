@@ -193,6 +193,35 @@ pub trait Component: Send + Sync {
         &[EventCategory::Lifecycle]
     }
 
+    /// Returns subscription entries with optional operation-level filtering.
+    ///
+    /// This method enables fine-grained subscription control. Components can
+    /// declare not only which categories they subscribe to, but also which
+    /// operations within those categories they accept.
+    ///
+    /// The default implementation wraps [`subscriptions()`](Self::subscriptions)
+    /// with wildcard operations (all operations accepted per category).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn subscription_entries(&self) -> Vec<SubscriptionEntry> {
+    ///     vec![
+    ///         SubscriptionEntry::all(EventCategory::UserInput),
+    ///         SubscriptionEntry::with_operations(
+    ///             EventCategory::extension("lua", "Extension"),
+    ///             ["route_response".to_string()],
+    ///         ),
+    ///     ]
+    /// }
+    /// ```
+    fn subscription_entries(&self) -> Vec<orcs_event::SubscriptionEntry> {
+        self.subscriptions()
+            .iter()
+            .map(|c| orcs_event::SubscriptionEntry::all(c.clone()))
+            .collect()
+    }
+
     /// Returns the current execution status.
     ///
     /// Called by the engine to monitor component health.

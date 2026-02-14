@@ -25,7 +25,7 @@ use crate::types::{
 use mlua::{Function, IntoLua, Lua, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
     ChildContext, Component, ComponentError, ComponentLoader, ComponentSnapshot, Emitter,
-    EventCategory, RuntimeHints, SnapshotError, SpawnError, Status,
+    EventCategory, RuntimeHints, SnapshotError, SpawnError, Status, SubscriptionEntry,
 };
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_runtime::sandbox::SandboxPolicy;
@@ -67,8 +67,10 @@ pub struct LuaComponent {
     lua: Mutex<Lua>,
     /// Component identifier.
     id: ComponentId,
-    /// Subscribed event categories.
+    /// Subscribed event categories (for Component::subscriptions()).
     subscriptions: Vec<EventCategory>,
+    /// Subscription entries with optional operation filters (for Component::subscription_entries()).
+    subscription_entries: Vec<SubscriptionEntry>,
     /// Current status.
     status: Status,
     /// Registry key for on_request callback.
@@ -252,16 +254,58 @@ impl LuaComponent {
             .unwrap_or_else(|_| "lua".to_string());
         let id = ComponentId::new(namespace, &id_str);
 
-        // Extract subscriptions
+        // Extract subscriptions (supports both string and table entries)
+        //
+        // String form (all operations):
+        //   subscriptions = { "Echo", "UserInput" }
+        //
+        // Table form (specific operations):
+        //   subscriptions = {
+        //       "UserInput",
+        //       { category = "Extension", operations = {"route_response"} },
+        //   }
         let subs_table: Table = component_table
             .get("subscriptions")
             .map_err(|_| LuaError::MissingCallback("subscriptions".to_string()))?;
 
         let mut subscriptions = Vec::new();
-        for pair in subs_table.pairs::<i64, String>() {
-            let (_, cat_str) = pair.map_err(|e| LuaError::TypeError(e.to_string()))?;
-            if let Some(cat) = parse_event_category(&cat_str) {
-                subscriptions.push(cat);
+        let mut subscription_entries = Vec::new();
+        for pair in subs_table.pairs::<i64, LuaValue>() {
+            let (_, value) = pair.map_err(|e| LuaError::TypeError(e.to_string()))?;
+            match &value {
+                LuaValue::String(s) => {
+                    let cat_str = s.to_str().map_err(|e| LuaError::TypeError(e.to_string()))?;
+                    if let Some(cat) = parse_event_category(&cat_str) {
+                        subscriptions.push(cat.clone());
+                        subscription_entries.push(SubscriptionEntry::all(cat));
+                    }
+                }
+                LuaValue::Table(tbl) => {
+                    // Table form: { category = "Extension", operations = {"op1", "op2"} }
+                    let cat_str: String = tbl.get("category").map_err(|e| {
+                        LuaError::TypeError(format!(
+                            "subscription table must have 'category' field: {e}"
+                        ))
+                    })?;
+                    if let Some(cat) = parse_event_category(&cat_str) {
+                        subscriptions.push(cat.clone());
+                        // Parse optional operations list
+                        let ops_table: Option<Table> = tbl.get("operations").ok();
+                        if let Some(ops) = ops_table {
+                            let mut op_names = Vec::new();
+                            for (_, op) in ops.pairs::<i64, String>().flatten() {
+                                op_names.push(op);
+                            }
+                            subscription_entries
+                                .push(SubscriptionEntry::with_operations(cat, op_names));
+                        } else {
+                            subscription_entries.push(SubscriptionEntry::all(cat));
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!("subscription entry must be a string or table, ignoring");
+                }
             }
         }
 
@@ -314,6 +358,7 @@ impl LuaComponent {
             lua: Mutex::new(lua),
             id,
             subscriptions,
+            subscription_entries,
             status: Status::Idle,
             on_request_key,
             on_signal_key,
@@ -464,6 +509,10 @@ impl Component for LuaComponent {
 
     fn subscriptions(&self) -> &[EventCategory] {
         &self.subscriptions
+    }
+
+    fn subscription_entries(&self) -> Vec<SubscriptionEntry> {
+        self.subscription_entries.clone()
     }
 
     fn runtime_hints(&self) -> RuntimeHints {

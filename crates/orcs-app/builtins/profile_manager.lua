@@ -392,7 +392,10 @@ local handlers = {
 return {
     id = "profile_manager",
     namespace = "profile",
-    subscriptions = { "Extension" },
+    -- All profile_manager operations are RPC-based (direct events).
+    -- To subscribe to specific Extension operations, use table form:
+    --   { category = "Extension", operations = {"some_op"} }
+    subscriptions = {},
     elevated = true,
     output_to_io = true,
 

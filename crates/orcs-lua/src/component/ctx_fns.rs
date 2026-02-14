@@ -109,8 +109,9 @@ pub(super) fn register(
     // Requires Capability::LLM.
     //
     // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
-    //   opts.new_session = true  → start tracked session
-    //   opts.resume = "<uuid>"   → continue existing session
+    //   opts.model = "model-id"   → specify model (e.g. haiku)
+    //   opts.new_session = true   → start tracked session
+    //   opts.resume = "<uuid>"    → continue existing session
     {
         let ctx_clone = Arc::clone(&ctx);
         let llm_sandbox_root = sandbox_root.clone();
@@ -129,7 +130,13 @@ pub(super) fn register(
             drop(ctx_guard);
 
             let mode = crate::llm_command::parse_session_mode(opts.as_ref())?;
-            let llm_result = crate::llm_command::execute_llm(&prompt, &mode, &llm_sandbox_root);
+            let model = crate::llm_command::parse_model(opts.as_ref())?;
+            let llm_result = crate::llm_command::execute_llm(
+                &prompt,
+                &mode,
+                model.as_deref(),
+                &llm_sandbox_root,
+            );
             crate::llm_command::result_to_lua_table(lua, &llm_result)
         })?;
         orcs_table.set("llm", llm_fn)?;

@@ -15,27 +15,33 @@ return {
 
     run = function(input)
         local message = input.message or ""
+        local history_context = input.history_context or ""
 
-        -- 1. Select relevant skills for this message
-        local skill_context = ""
+        -- 1. Recommend relevant skills via LLM-powered selection
+        --    Uses lightweight model (haiku) to filter all skills → 0-5 relevant ones.
+        local recommendation = ""
         local skill_count = 0
-        local select_resp = orcs.request("skill::skill_manager", "select", {
-            query = message,
+        local rec_resp = orcs.request("skill::skill_manager", "recommend", {
+            intent = message,
+            context = history_context,
             limit = 5,
         })
-        if select_resp and select_resp.success and select_resp.data then
-            local skills = select_resp.data
+        if rec_resp and rec_resp.success and rec_resp.data then
+            local skills = rec_resp.data
             if type(skills) == "table" and #skills > 0 then
                 skill_count = #skills
-                local lines = { "\n\n## Relevant Skills" }
+                local lines = {}
                 for _, s in ipairs(skills) do
                     local line = "- **" .. (s.name or "?") .. "**"
-                    if s.description then
+                    if s.description and s.description ~= "" then
                         line = line .. ": " .. s.description
                     end
                     lines[#lines + 1] = line
                 end
-                skill_context = table.concat(lines, "\n")
+                recommendation = "\n[System Recommendation]\n"
+                    .. "The following skills are relevant to this task. "
+                    .. "Consider using them to assist the user:\n"
+                    .. table.concat(lines, "\n")
             end
         end
 
@@ -48,21 +54,31 @@ return {
             end
         end
 
-        -- 3. Use conversation history passed from parent (agent_mgr)
-        -- board_recent is an emitter function unavailable to child workers,
-        -- so the parent fetches it and passes via input.history_context.
-        local history_context = input.history_context or ""
-
-        -- 4. Build prompt with context
-        local prompt = message
-        if skill_context ~= "" or tool_desc ~= "" or history_context ~= "" then
-            prompt = message .. history_context .. skill_context .. tool_desc
-            orcs.log("debug", "llm-worker: context added (history=" .. #history_context .. ", skills=" .. skill_count .. ", tools=" .. #tool_desc .. " chars)")
+        -- 3. Build prompt: UserIntent + SystemRecommendation placed together
+        --    Recommendation is placed immediately after user intent so the
+        --    agent naturally considers recommended skills in context.
+        local prompt
+        if recommendation ~= "" then
+            -- Intent + Recommendation together (close proximity)
+            prompt = message .. "\n" .. recommendation
         else
-            orcs.log("debug", "llm-worker: no additional context")
+            prompt = message
         end
 
-        -- 5. Call Claude Code CLI (headless)
+        -- Append supplementary context (history, tools) after the core pair
+        if history_context ~= "" then
+            prompt = prompt .. "\n\n## Recent Conversation\n" .. history_context
+        end
+        if tool_desc ~= "" then
+            prompt = prompt .. tool_desc
+        end
+
+        orcs.log("debug", string.format(
+            "llm-worker: prompt built (skills=%d, history=%d, tools=%d chars)",
+            skill_count, #history_context, #tool_desc
+        ))
+
+        -- 4. Call Claude Code CLI (headless)
         local llm_resp = orcs.llm(prompt)
         if llm_resp and llm_resp.ok then
             return {

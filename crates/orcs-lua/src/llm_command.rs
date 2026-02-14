@@ -42,7 +42,7 @@ const CLAUDE_GUARD_VARS: &[&str] = &[
 ];
 
 /// Builds a `Command` for the claude CLI.
-fn build_command(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> Command {
+fn build_command(prompt: &str, mode: &LlmSessionMode, model: Option<&str>, cwd: &Path) -> Command {
     let mut cmd = Command::new("claude");
 
     // Remove nested-session guard variables so the child claude process
@@ -52,6 +52,10 @@ fn build_command(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> Command {
     }
 
     cmd.arg("-p");
+
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
 
     match mode {
         LlmSessionMode::SingleShot => {}
@@ -69,8 +73,13 @@ fn build_command(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> Command {
 }
 
 /// Executes a claude CLI call and returns the result.
-pub fn execute_llm(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> LlmResult {
-    let mut cmd = build_command(prompt, mode, cwd);
+pub fn execute_llm(
+    prompt: &str,
+    mode: &LlmSessionMode,
+    model: Option<&str>,
+    cwd: &Path,
+) -> LlmResult {
+    let mut cmd = build_command(prompt, mode, model, cwd);
 
     match cmd.output() {
         Ok(out) if out.status.success() => {
@@ -104,6 +113,20 @@ pub fn execute_llm(prompt: &str, mode: &LlmSessionMode, cwd: &Path) -> LlmResult
             error: Some(format!("failed to spawn claude: {e}")),
             session_id: None,
         },
+    }
+}
+
+/// Parses the model from an optional Lua options table.
+///
+/// Returns `None` if no model is specified (uses CLI default).
+pub fn parse_model(opts: Option<&mlua::Table>) -> Result<Option<String>, mlua::Error> {
+    let Some(opts) = opts else {
+        return Ok(None);
+    };
+    match opts.get::<String>("model") {
+        Ok(m) if !m.is_empty() => Ok(Some(m)),
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
     }
 }
 
@@ -162,7 +185,12 @@ mod tests {
 
     #[test]
     fn build_command_single_shot() {
-        let cmd = build_command("hello", &LlmSessionMode::SingleShot, Path::new("/tmp"));
+        let cmd = build_command(
+            "hello",
+            &LlmSessionMode::SingleShot,
+            None,
+            Path::new("/tmp"),
+        );
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -171,8 +199,26 @@ mod tests {
     }
 
     #[test]
+    fn build_command_with_model() {
+        let cmd = build_command(
+            "hello",
+            &LlmSessionMode::SingleShot,
+            Some("claude-haiku-4-5-20251001"),
+            Path::new("/tmp"),
+        );
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["-p", "--model", "claude-haiku-4-5-20251001", "hello"]
+        );
+    }
+
+    #[test]
     fn build_command_removes_nested_guard_vars() {
-        let cmd = build_command("x", &LlmSessionMode::SingleShot, Path::new("/tmp"));
+        let cmd = build_command("x", &LlmSessionMode::SingleShot, None, Path::new("/tmp"));
         let envs: std::collections::HashMap<_, _> = cmd
             .get_envs()
             .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|s| s.to_owned())))
@@ -192,6 +238,7 @@ mod tests {
         let cmd = build_command(
             "test",
             &LlmSessionMode::NewSession(uuid.clone()),
+            None,
             Path::new("/tmp"),
         );
         let args: Vec<_> = cmd
@@ -207,6 +254,7 @@ mod tests {
         let cmd = build_command(
             "test",
             &LlmSessionMode::Resume(uuid.clone()),
+            None,
             Path::new("/tmp"),
         );
         let args: Vec<_> = cmd
@@ -268,6 +316,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_model_none() {
+        let model = parse_model(None).expect("should parse None");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parse_model_with_value() {
+        let lua = mlua::Lua::new();
+        let opts = lua.create_table().expect("create table");
+        opts.set("model", "claude-haiku-4-5-20251001")
+            .expect("set model");
+        let model = parse_model(Some(&opts)).expect("should parse model");
+        assert_eq!(model, Some("claude-haiku-4-5-20251001".to_string()));
+    }
+
+    #[test]
+    fn parse_model_empty_string_returns_none() {
+        let lua = mlua::Lua::new();
+        let opts = lua.create_table().expect("create table");
+        opts.set("model", "").expect("set model");
+        let model = parse_model(Some(&opts)).expect("should parse empty model");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parse_model_missing_key_returns_none() {
+        let lua = mlua::Lua::new();
+        let opts = lua.create_table().expect("create table");
+        opts.set("new_session", true).expect("set other key");
+        let model = parse_model(Some(&opts)).expect("should parse without model key");
+        assert_eq!(model, None);
+    }
+
+    #[test]
     fn parse_mode_empty_table_is_single_shot() {
         let lua = mlua::Lua::new();
         let opts = lua.create_table().expect("create table");
@@ -308,13 +390,23 @@ mod tests {
         // Step 1: new session — introduce name
         let uuid = uuid::Uuid::new_v4().to_string();
         let mode_new = LlmSessionMode::NewSession(uuid.clone());
-        let r1 = execute_llm("My name is ORCSTest42. Reply only: OK", &mode_new, &cwd);
+        let r1 = execute_llm(
+            "My name is ORCSTest42. Reply only: OK",
+            &mode_new,
+            None,
+            &cwd,
+        );
         assert!(r1.ok, "Step 1 failed: {:?}", r1.error);
         assert_eq!(r1.session_id.as_deref(), Some(uuid.as_str()));
 
         // Step 2: resume — ask for name back
         let mode_resume = LlmSessionMode::Resume(uuid.clone());
-        let r2 = execute_llm("What is my name? Reply only the name.", &mode_resume, &cwd);
+        let r2 = execute_llm(
+            "What is my name? Reply only the name.",
+            &mode_resume,
+            None,
+            &cwd,
+        );
         assert!(r2.ok, "Step 2 failed: {:?}", r2.error);
         let content = r2.content.expect("should have content");
 
