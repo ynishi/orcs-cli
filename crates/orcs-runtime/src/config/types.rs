@@ -4,6 +4,7 @@
 
 use orcs_hook::HooksConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Main configuration structure.
@@ -340,6 +341,23 @@ pub struct ComponentsConfig {
     ///
     /// Supports `~` expansion. Defaults to `~/.orcs/builtins`.
     pub builtins_dir: PathBuf,
+
+    /// Per-component settings, keyed by component name.
+    ///
+    /// Values are passed to `Component::init(config)` at startup.
+    /// Each key maps to an arbitrary JSON object.
+    ///
+    /// # Example (TOML)
+    ///
+    /// ```toml
+    /// [components.settings.skill_manager]
+    /// recommend_skill = true
+    ///
+    /// [components.settings.agent_mgr]
+    /// max_history = 20
+    /// ```
+    #[serde(default)]
+    pub settings: HashMap<String, serde_json::Value>,
 }
 
 impl Default for ComponentsConfig {
@@ -355,6 +373,7 @@ impl Default for ComponentsConfig {
             experimental: vec!["life_game".into()],
             paths: vec![PathBuf::from("~/.orcs/components")],
             builtins_dir: PathBuf::from("~/.orcs/builtins"),
+            settings: HashMap::new(),
         }
     }
 }
@@ -385,6 +404,15 @@ impl ComponentsConfig {
         }
     }
 
+    /// Returns the settings for a specific component, or an empty JSON object.
+    #[must_use]
+    pub fn component_settings(&self, name: &str) -> serde_json::Value {
+        self.settings
+            .get(name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+    }
+
     fn merge(&mut self, other: &Self) {
         let default = Self::default();
 
@@ -399,6 +427,10 @@ impl ComponentsConfig {
         }
         if other.builtins_dir != default.builtins_dir {
             self.builtins_dir = other.builtins_dir.clone();
+        }
+        // Settings: merge per-component (other overwrites keys present in self)
+        for (key, value) in &other.settings {
+            self.settings.insert(key.clone(), value.clone());
         }
     }
 }
@@ -768,5 +800,101 @@ experimental = ["custom_exp", "another_exp"]
         };
         base.merge(&overlay);
         assert_eq!(base.experimental, vec!["custom_exp"]);
+    }
+
+    // === ComponentsConfig settings tests ===
+
+    #[test]
+    fn components_settings_default_empty() {
+        let config = ComponentsConfig::default();
+        assert!(config.settings.is_empty());
+    }
+
+    #[test]
+    fn components_settings_lookup_missing_returns_empty_object() {
+        let config = ComponentsConfig::default();
+        let settings = config.component_settings("nonexistent");
+        assert_eq!(settings, serde_json::json!({}));
+    }
+
+    #[test]
+    fn components_settings_lookup_existing() {
+        let mut config = ComponentsConfig::default();
+        config.settings.insert(
+            "skill_manager".into(),
+            serde_json::json!({ "recommend_skill": true }),
+        );
+        let settings = config.component_settings("skill_manager");
+        assert_eq!(settings, serde_json::json!({ "recommend_skill": true }));
+    }
+
+    #[test]
+    fn components_settings_toml_parse() {
+        let toml = r#"
+[components.settings.skill_manager]
+recommend_skill = false
+
+[components.settings.agent_mgr]
+max_history = 20
+"#;
+        let config = OrcsConfig::from_toml(toml).expect("should parse settings");
+        assert_eq!(
+            config.components.component_settings("skill_manager"),
+            serde_json::json!({ "recommend_skill": false })
+        );
+        assert_eq!(
+            config.components.component_settings("agent_mgr"),
+            serde_json::json!({ "max_history": 20 })
+        );
+        // Unknown component returns empty
+        assert_eq!(
+            config.components.component_settings("unknown"),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn components_settings_merge_per_key() {
+        let mut base = ComponentsConfig::default();
+        base.settings.insert(
+            "skill_manager".into(),
+            serde_json::json!({ "recommend_skill": true }),
+        );
+        base.settings
+            .insert("agent_mgr".into(), serde_json::json!({ "max_history": 10 }));
+
+        let mut overlay = ComponentsConfig::default();
+        // Override skill_manager, leave agent_mgr untouched
+        overlay.settings.insert(
+            "skill_manager".into(),
+            serde_json::json!({ "recommend_skill": false }),
+        );
+
+        base.merge(&overlay);
+
+        assert_eq!(
+            base.component_settings("skill_manager"),
+            serde_json::json!({ "recommend_skill": false }),
+        );
+        // agent_mgr preserved from base
+        assert_eq!(
+            base.component_settings("agent_mgr"),
+            serde_json::json!({ "max_history": 10 }),
+        );
+    }
+
+    #[test]
+    fn components_settings_toml_roundtrip() {
+        let mut config = OrcsConfig::default();
+        config.components.settings.insert(
+            "skill_manager".into(),
+            serde_json::json!({ "recommend_skill": true }),
+        );
+        let toml = config.to_toml().expect("should serialize");
+        let restored = OrcsConfig::from_toml(&toml).expect("should deserialize");
+        assert_eq!(
+            restored.components.component_settings("skill_manager"),
+            serde_json::json!({ "recommend_skill": true })
+        );
     }
 }

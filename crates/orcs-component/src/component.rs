@@ -290,16 +290,18 @@ pub trait Component: Send + Sync {
     /// - Any pending responses should be dropped
     fn abort(&mut self);
 
-    /// Initialize the component.
+    /// Initialize the component with optional configuration.
     ///
     /// Called once before the component receives any requests.
-    /// Default implementation does nothing.
+    /// The `config` parameter contains per-component settings from
+    /// `[components.settings.<name>]` in the config file.
+    /// Default implementation ignores the config.
     ///
     /// # Errors
     ///
     /// Return `Err` if initialization fails.
     /// The component will not be registered with the EventBus.
-    fn init(&mut self) -> Result<(), ComponentError> {
+    fn init(&mut self, _config: &serde_json::Value) -> Result<(), ComponentError> {
         Ok(())
     }
 
@@ -544,7 +546,8 @@ mod tests {
     #[test]
     fn component_init_default() {
         let mut comp = MockComponent::new("test");
-        assert!(comp.init().is_ok());
+        let empty = serde_json::Value::Object(serde_json::Map::new());
+        assert!(comp.init(&empty).is_ok());
     }
 
     #[test]

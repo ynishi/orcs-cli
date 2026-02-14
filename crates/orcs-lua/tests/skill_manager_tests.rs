@@ -695,6 +695,60 @@ mod recommend {
             "api-design should be in results, got: {names:?}"
         );
     }
+
+    #[test]
+    fn recommend_disabled_by_config_falls_back_to_select() {
+        let (_td, mut harness) = skill_harness();
+        // Init with recommend_skill = false
+        harness
+            .init_with_config(&json!({ "recommend_skill": false }))
+            .expect("init with config should succeed");
+        register_topic_skills(&mut harness);
+
+        // recommend should still succeed via keyword fallback
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "deploy to production", "limit": 3 }),
+            )
+            .expect("recommend should succeed via fallback");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+        let arr = result.as_array().expect("should be array");
+        assert!(
+            !arr.is_empty(),
+            "fallback select should return skills for 'deploy' intent"
+        );
+    }
+
+    #[test]
+    fn recommend_enabled_by_default_without_config() {
+        let (_td, mut harness) = skill_harness();
+        // Init with empty config (default behavior)
+        harness
+            .init_with_config(&json!({}))
+            .expect("init with empty config should succeed");
+        register_topic_skills(&mut harness);
+
+        // recommend should work (LLM fails in test → falls back to keyword)
+        let result = harness
+            .request(
+                ext_cat(),
+                "recommend",
+                json!({ "intent": "deploy", "limit": 3 }),
+            )
+            .expect("recommend should succeed");
+
+        assert!(result.is_array(), "expected array, got: {result}");
+    }
+
+    #[test]
+    fn init_with_nil_config_works() {
+        let (_td, mut harness) = skill_harness();
+        // Init without config (nil → same as no config)
+        harness.init().expect("init without config should succeed");
+    }
 }
 
 // =============================================================================

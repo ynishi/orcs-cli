@@ -496,10 +496,12 @@ mod manager_component {
 
     #[test]
     fn manager_init_and_shutdown() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox()).unwrap();
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox())
+            .expect("should load manager script");
 
         // Init
-        let init_result = component.init();
+        let empty_config = serde_json::Value::Object(serde_json::Map::new());
+        let init_result = component.init(&empty_config);
         assert!(init_result.is_ok());
 
         // Shutdown (no error expected)

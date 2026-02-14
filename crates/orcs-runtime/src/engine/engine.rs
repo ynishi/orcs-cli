@@ -613,8 +613,17 @@ impl OrcsEngine {
         checker: Arc<dyn crate::auth::PermissionChecker>,
         grants: Arc<dyn orcs_auth::GrantPolicy>,
     ) -> ChannelHandle {
+        let empty_config = serde_json::Value::Object(serde_json::Map::new());
         self.spawn_runner_full_auth_with_snapshot(
-            channel_id, component, output_tx, lua_loader, session, checker, grants, None,
+            channel_id,
+            component,
+            output_tx,
+            lua_loader,
+            session,
+            checker,
+            grants,
+            None,
+            empty_config,
         )
     }
 
@@ -633,6 +642,7 @@ impl OrcsEngine {
         checker: Arc<dyn crate::auth::PermissionChecker>,
         grants: Arc<dyn orcs_auth::GrantPolicy>,
         initial_snapshot: Option<ComponentSnapshot>,
+        component_config: serde_json::Value,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
@@ -652,7 +662,8 @@ impl OrcsEngine {
         .with_session_arc(session)
         .with_checker(checker)
         .with_grants(grants)
-        .with_request_channel();
+        .with_request_channel()
+        .with_component_config(component_config);
 
         // Route Output events to IO channel if specified
         if let Some(tx) = output_tx {
@@ -974,7 +985,7 @@ mod tests {
             None
         }
 
-        fn init(&mut self) -> Result<(), ComponentError> {
+        fn init(&mut self, _config: &serde_json::Value) -> Result<(), ComponentError> {
             Ok(())
         }
 

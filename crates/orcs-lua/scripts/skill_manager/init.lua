@@ -12,6 +12,9 @@ local SkillCatalog  = require("skill_catalog")
 local registry = nil
 local catalog = nil
 
+-- Component settings (populated from config in init())
+local component_settings = {}
+
 -- === Request Handlers ===
 
 -- List all skills (L1 catalog entries)
@@ -153,6 +156,15 @@ end
 --   limit   (number)  — max skills to return (default 5)
 --   model   (string)  — LLM model for judgment (default haiku)
 local function handle_recommend(payload)
+    -- Check if recommend is disabled via config
+    if component_settings.recommend_skill == false then
+        -- Fallback to keyword select when LLM-based recommend is disabled
+        local intent = payload and payload.intent or ""
+        local limit = payload and payload.limit or 5
+        local entries = registry:select(intent, limit)
+        return { success = true, data = entries, count = #entries, fallback = true }
+    end
+
     if not payload or not payload.intent then
         return { success = false, error = "payload.intent is required" }
     end
@@ -422,7 +434,13 @@ return {
     subscriptions = {},
     elevated = true,
 
-    init = function()
+    init = function(cfg)
+        -- Store component settings from [components.settings.skill_manager]
+        if cfg and type(cfg) == "table" then
+            component_settings = cfg
+            orcs.log("debug", "SkillManager: received config: " .. orcs.json_encode(cfg))
+        end
+
         -- If restore() was already called, registry is set; skip re-init
         if registry then
             orcs.log("info", string.format(

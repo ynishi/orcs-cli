@@ -185,13 +185,22 @@ impl LuaTestHarness {
         self.inner.component_mut().reload()
     }
 
-    /// Calls `init()` on the component.
+    /// Calls `init()` on the component with an empty config.
     ///
     /// # Errors
     ///
     /// Returns the component's initialization error if any.
     pub fn init(&mut self) -> Result<(), ComponentError> {
         self.inner.init()
+    }
+
+    /// Calls `init()` on the component with the given config.
+    ///
+    /// # Errors
+    ///
+    /// Returns the component's initialization error if any.
+    pub fn init_with_config(&mut self, config: &serde_json::Value) -> Result<(), ComponentError> {
+        self.inner.init_with_config(config)
     }
 
     /// Sends a request to the component.

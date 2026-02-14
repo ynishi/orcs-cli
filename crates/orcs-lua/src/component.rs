@@ -22,7 +22,7 @@ use crate::lua_env::LuaEnv;
 use crate::types::{
     parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
 };
-use mlua::{Function, IntoLua, Lua, RegistryKey, Table, Value as LuaValue};
+use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
     ChildContext, Component, ComponentError, ComponentLoader, ComponentSnapshot, Emitter,
     EventCategory, RuntimeHints, SnapshotError, SpawnError, Status, SubscriptionEntry,
@@ -605,8 +605,8 @@ impl Component for LuaComponent {
         self.status = Status::Aborted;
     }
 
-    #[tracing::instrument(skip(self), fields(component = %self.id.fqn()))]
-    fn init(&mut self) -> Result<(), ComponentError> {
+    #[tracing::instrument(skip(self, config), fields(component = %self.id.fqn()))]
+    fn init(&mut self, config: &serde_json::Value) -> Result<(), ComponentError> {
         let Some(init_key) = &self.init_key else {
             return Ok(());
         };
@@ -621,7 +621,19 @@ impl Component for LuaComponent {
             ComponentError::ExecutionFailed("lua init callback not found".to_string())
         })?;
 
-        init_fn.call::<()>(()).map_err(|e| {
+        // Convert JSON config to Lua value; pass nil if null or empty object
+        let lua_config = if config.is_null()
+            || (config.is_object() && config.as_object().is_none_or(serde_json::Map::is_empty))
+        {
+            mlua::Value::Nil
+        } else {
+            lua.to_value(config).map_err(|e| {
+                tracing::debug!("Failed to convert config to Lua: {}", e);
+                ComponentError::ExecutionFailed("config conversion failed".to_string())
+            })?
+        };
+
+        init_fn.call::<()>(lua_config).map_err(|e| {
             tracing::debug!("Lua init error: {}", e);
             ComponentError::ExecutionFailed("lua init callback failed".to_string())
         })?;

@@ -367,6 +367,8 @@ pub struct ChannelRunner {
     component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
     /// Shared hook registry for lifecycle hook dispatch.
     hook_registry: Option<SharedHookRegistry>,
+    /// Per-component configuration from `[components.settings.<name>]`.
+    component_config: serde_json::Value,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -593,7 +595,7 @@ impl ChannelRunner {
                 serde_json::json!({ "component": comp.id().fqn() }),
             );
 
-            if let Err(e) = comp.init() {
+            if let Err(e) = comp.init(&self.component_config) {
                 warn!(error = %e, "component init failed");
             }
 
@@ -1077,6 +1079,8 @@ pub struct ChannelRunnerBuilder {
     component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
     /// Shared hook registry for lifecycle hook dispatch.
     hook_registry: Option<SharedHookRegistry>,
+    /// Per-component configuration from config file.
+    component_config: serde_json::Value,
 }
 
 impl ChannelRunnerBuilder {
@@ -1109,6 +1113,7 @@ impl ChannelRunnerBuilder {
             enable_request_channel: false,
             component_channel_map: None,
             hook_registry: None,
+            component_config: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 
@@ -1285,6 +1290,15 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_hook_registry(mut self, registry: SharedHookRegistry) -> Self {
         self.hook_registry = Some(registry);
+        self
+    }
+
+    /// Sets per-component configuration passed to `Component::init()`.
+    ///
+    /// The value comes from `[components.settings.<name>]` in the config file.
+    #[must_use]
+    pub fn with_component_config(mut self, config: serde_json::Value) -> Self {
+        self.component_config = config;
         self
     }
 
@@ -1520,6 +1534,7 @@ impl ChannelRunnerBuilder {
             shared_handles: rpc_handles,
             component_channel_map: rpc_map,
             hook_registry: self.hook_registry,
+            component_config: self.component_config,
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

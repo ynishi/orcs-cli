@@ -203,7 +203,8 @@ fn life_game_init_and_shutdown() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
 
-    let init_result = component.init();
+    let empty_config = serde_json::Value::Object(serde_json::Map::new());
+    let init_result = component.init(&empty_config);
     assert!(
         init_result.is_ok(),
         "init() failed: {:?}",

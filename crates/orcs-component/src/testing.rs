@@ -195,13 +195,23 @@ impl<C: Component> ComponentTestHarness<C> {
         &mut self.component
     }
 
-    /// Calls `init()` on the component.
+    /// Calls `init()` on the component with an empty config.
     ///
     /// # Errors
     ///
     /// Returns the component's initialization error if any.
     pub fn init(&mut self) -> Result<(), ComponentError> {
-        self.component.init()
+        self.component
+            .init(&serde_json::Value::Object(serde_json::Map::new()))
+    }
+
+    /// Calls `init()` on the component with the given config.
+    ///
+    /// # Errors
+    ///
+    /// Returns the component's initialization error if any.
+    pub fn init_with_config(&mut self, config: &serde_json::Value) -> Result<(), ComponentError> {
+        self.component.init(config)
     }
 
     /// Sends a request to the component and logs the result.

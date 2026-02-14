@@ -303,6 +303,9 @@ impl OrcsAppBuilder {
                 );
             }
 
+            // Per-component settings from [components.settings.<name>]
+            let component_config = config.components.component_settings(name);
+
             engine.spawn_runner_full_auth_with_snapshot(
                 channel_id,
                 Box::new(component),
@@ -312,6 +315,7 @@ impl OrcsAppBuilder {
                 Arc::clone(&auth_checker),
                 grants,
                 initial_snapshot,
+                component_config,
             );
 
             let short_name = component_id.name.clone();
