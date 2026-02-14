@@ -367,6 +367,7 @@ impl Default for ComponentsConfig {
                 "agent_mgr".into(),
                 "skill_manager".into(),
                 "profile_manager".into(),
+                "foundation_manager".into(),
                 "shell".into(),
                 "tool".into(),
             ],

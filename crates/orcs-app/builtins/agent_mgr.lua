@@ -6,10 +6,15 @@
 --     ├── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
 --     └── skill-worker  — skill queries via RPC to skill_manager
 --
+-- Foundation segments (from agent.md via foundation_manager):
+--   system — always at top (identity/core rules)
+--   task   — before history (project context)
+--   guard  — before user message (output constraints)
+--
 -- Prompt placement strategies (configurable via [components.settings.agent_mgr]):
---   top    — [System] [History] [UserInput]
---   both   — [System] [History] [System] [UserInput]  (default)
---   bottom — [History] [UserInput] [System]
+--   top    — [f:system] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
+--   both   — [f:system] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]  (default)
+--   bottom — [f:system] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
 
 -- === Worker Scripts ===
 
@@ -23,6 +28,19 @@ return {
         local message = input.message or ""
         local history_context = input.history_context or ""
         local placement = input.prompt_placement or "both"
+
+        -- 0. Fetch foundation segments (system/task/guard from agent.md)
+        local f_system = ""
+        local f_task = ""
+        local f_guard = ""
+        local f_resp = orcs.request("foundation::foundation_manager", "get_all", {})
+        if f_resp and f_resp.success and f_resp.data then
+            f_system = f_resp.data.system or ""
+            f_task = f_resp.data.task or ""
+            f_guard = f_resp.data.guard or ""
+        else
+            orcs.log("debug", "llm-worker: foundation segments unavailable, proceeding without")
+        end
 
         -- 1. Gather system parts: skill recommendations + tool descriptions
         local recommendation = ""
@@ -76,33 +94,51 @@ return {
         end
 
         -- 4. Assemble prompt based on placement strategy
+        --
+        -- Foundation segments have fixed positions:
+        --   f_system → always at top (identity/core rules)
+        --   f_task   → before history (project context)
+        --   f_guard  → just before user message (output constraints)
+        --
+        -- Placement strategy controls skill/tool block (system_full) position only.
         local sections = {}
 
+        -- Foundation:system — always top
+        if f_system ~= "" then sections[#sections + 1] = f_system end
+
         if placement == "top" then
-            -- [System] [History] [UserInput]
+            -- [f:system] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
+            if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
+            if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
 
         elseif placement == "bottom" then
-            -- [History] [UserInput] [System]
+            -- [f:system] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+            if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
+            if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
             if system_full ~= "" then sections[#sections + 1] = system_full end
 
         else
-            -- "both" (default): [System] [History] [System] [UserInput]
+            -- "both" (default):
+            -- [f:system] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
+            if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
             if system_full ~= "" then sections[#sections + 1] = system_full end
+            if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
         end
 
         local prompt = table.concat(sections, "\n\n")
 
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d chars)",
-            placement, skill_count, #history_context, #tool_desc
+            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d chars)",
+            placement, skill_count, #history_context, #tool_desc,
+            #f_system, #f_task, #f_guard
         ))
 
         -- 5. Call Claude Code CLI (headless)
@@ -185,10 +221,11 @@ local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 --- Route table: prefix → { target_type, target }
 --- target_type is "rpc" (orcs.request to a component) or "child" (send_to_child).
 local routes = {
-    shell   = { type = "rpc",   target = "builtin::shell" },
-    skill   = { type = "child", target = "skill-worker" },
-    profile = { type = "rpc",   target = "profile::profile_manager" },
-    tool    = { type = "rpc",   target = "builtin::tool" },
+    shell      = { type = "rpc",   target = "builtin::shell" },
+    skill      = { type = "child", target = "skill-worker" },
+    profile    = { type = "rpc",   target = "profile::profile_manager" },
+    tool       = { type = "rpc",   target = "builtin::tool" },
+    foundation = { type = "rpc",   target = "foundation::foundation_manager" },
 }
 
 --- Parse @prefix from message. Returns (prefix, rest) or (nil, original).
