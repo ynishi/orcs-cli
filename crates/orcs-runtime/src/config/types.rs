@@ -311,6 +311,7 @@ impl ScriptsConfig {
 /// ```toml
 /// [components]
 /// load = ["agent_mgr", "skill_manager", "profile_manager", "shell", "tool"]
+/// experimental = ["life_game"]
 /// paths = ["~/.orcs/components"]
 /// builtins_dir = "~/.orcs/builtins"
 /// ```
@@ -322,6 +323,13 @@ pub struct ComponentsConfig {
     /// Each name is resolved via `ScriptLoader` from `paths` (user-first)
     /// then from the versioned builtins directory.
     pub load: Vec<String>,
+
+    /// Experimental component names.
+    ///
+    /// These are only loaded when the `--experimental` CLI flag or
+    /// `ORCS_EXPERIMENTAL=true` environment variable is set.
+    /// They are appended to `load` at config resolution time.
+    pub experimental: Vec<String>,
 
     /// User component search directories (priority order, searched first).
     ///
@@ -344,6 +352,7 @@ impl Default for ComponentsConfig {
                 "shell".into(),
                 "tool".into(),
             ],
+            experimental: vec!["life_game".into()],
             paths: vec![PathBuf::from("~/.orcs/components")],
             builtins_dir: PathBuf::from("~/.orcs/builtins"),
         }
@@ -365,11 +374,25 @@ impl ComponentsConfig {
         self.paths.iter().map(|p| expand_tilde(p)).collect()
     }
 
+    /// Appends experimental component names to `load`, deduplicating.
+    ///
+    /// Called by config resolvers when `--experimental` or `ORCS_EXPERIMENTAL=true` is set.
+    pub fn activate_experimental(&mut self) {
+        for name in &self.experimental {
+            if !self.load.contains(name) {
+                self.load.push(name.clone());
+            }
+        }
+    }
+
     fn merge(&mut self, other: &Self) {
         let default = Self::default();
 
         if other.load != default.load {
             self.load = other.load.clone();
+        }
+        if other.experimental != default.experimental {
+            self.experimental = other.experimental.clone();
         }
         if other.paths != default.paths {
             self.paths = other.paths.clone();
@@ -662,5 +685,88 @@ enabled = true
 
         assert_eq!(base.hooks.hooks.len(), 1);
         assert_eq!(base.hooks.hooks[0].id.as_deref(), Some("h1"));
+    }
+
+    // === ComponentsConfig experimental tests ===
+
+    #[test]
+    fn components_default_has_experimental() {
+        let config = ComponentsConfig::default();
+        assert_eq!(config.experimental, vec!["life_game"]);
+        assert!(!config.load.contains(&"life_game".to_string()));
+    }
+
+    #[test]
+    fn activate_experimental_appends_to_load() {
+        let mut config = ComponentsConfig::default();
+        config.activate_experimental();
+
+        assert!(config.load.contains(&"life_game".to_string()));
+        // Original load items preserved
+        assert!(config.load.contains(&"agent_mgr".to_string()));
+    }
+
+    #[test]
+    fn activate_experimental_deduplicates() {
+        let mut config = ComponentsConfig::default();
+        // Manually add life_game to load first
+        config.load.push("life_game".into());
+        let len_before = config.load.len();
+
+        config.activate_experimental();
+
+        // No duplicate added
+        assert_eq!(config.load.len(), len_before);
+    }
+
+    #[test]
+    fn activate_experimental_custom_list() {
+        let mut config = ComponentsConfig::default();
+        config.experimental = vec!["foo".into(), "bar".into()];
+        config.activate_experimental();
+
+        assert!(config.load.contains(&"foo".to_string()));
+        assert!(config.load.contains(&"bar".to_string()));
+        // Default experimental not present (was overridden)
+        assert!(!config.load.contains(&"life_game".to_string()));
+    }
+
+    #[test]
+    fn components_experimental_toml_roundtrip() {
+        let config = ComponentsConfig::default();
+        let orcs = OrcsConfig {
+            components: config,
+            ..Default::default()
+        };
+        let toml = orcs.to_toml().expect("should serialize");
+        let restored = OrcsConfig::from_toml(&toml).expect("should deserialize");
+        assert_eq!(
+            orcs.components.experimental,
+            restored.components.experimental
+        );
+    }
+
+    #[test]
+    fn components_experimental_toml_parse() {
+        let toml = r#"
+[components]
+experimental = ["custom_exp", "another_exp"]
+"#;
+        let config = OrcsConfig::from_toml(toml).expect("should parse");
+        assert_eq!(
+            config.components.experimental,
+            vec!["custom_exp", "another_exp"]
+        );
+    }
+
+    #[test]
+    fn components_merge_experimental() {
+        let mut base = ComponentsConfig::default();
+        let overlay = ComponentsConfig {
+            experimental: vec!["custom_exp".into()],
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert_eq!(base.experimental, vec!["custom_exp"]);
     }
 }

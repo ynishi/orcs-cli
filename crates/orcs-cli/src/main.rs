@@ -18,6 +18,7 @@
 //! - `ORCS_AUTO_APPROVE`: Auto-approve all requests (dangerous)
 //! - `ORCS_SESSION_PATH`: Custom session storage path
 //! - `ORCS_BUILTINS_DIR`: Override builtin components directory
+//! - `ORCS_EXPERIMENTAL`: Enable experimental components (`true`/`false`)
 
 use anyhow::Result;
 use clap::Parser;
@@ -68,6 +69,10 @@ struct Args {
     #[arg(long)]
     profile: Option<String>,
 
+    /// Enable experimental components (also: ORCS_EXPERIMENTAL)
+    #[arg(long)]
+    experimental: bool,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -81,6 +86,7 @@ struct CliConfigResolver {
     project_root: PathBuf,
     debug: bool,
     verbose: bool,
+    experimental: bool,
     session_path: Option<PathBuf>,
     builtins_dir: Option<PathBuf>,
     profile: Option<String>,
@@ -99,6 +105,7 @@ impl CliConfigResolver {
             project_root,
             debug: args.debug,
             verbose: args.verbose,
+            experimental: args.experimental,
             session_path: args.session_path.clone(),
             builtins_dir: args.builtins_dir.clone(),
             profile: args.profile.clone(),
@@ -128,6 +135,9 @@ impl ConfigResolver for CliConfigResolver {
         }
         if let Some(ref p) = self.builtins_dir {
             config.components.builtins_dir = p.clone();
+        }
+        if self.experimental {
+            config.components.activate_experimental();
         }
 
         Ok(config)
@@ -243,6 +253,7 @@ mod tests {
             project_root: temp,
             debug,
             verbose,
+            experimental: false,
             session_path,
             builtins_dir: None,
             profile: None,
@@ -325,12 +336,14 @@ mod tests {
             install_builtins: false,
             force: false,
             profile: None,
+            experimental: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
 
         assert!(!resolver.debug);
         assert!(!resolver.verbose);
+        assert!(!resolver.experimental);
         assert!(resolver.session_path.is_none());
         assert!(resolver.builtins_dir.is_none());
         // project defaults to cwd
@@ -349,12 +362,14 @@ mod tests {
             install_builtins: false,
             force: false,
             profile: Some("rust-dev".into()),
+            experimental: true,
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);
 
         assert!(resolver.debug);
         assert!(resolver.verbose);
+        assert!(resolver.experimental);
         assert_eq!(resolver.project_root, PathBuf::from("/tmp"));
         assert_eq!(resolver.session_path, Some(PathBuf::from("/sessions")));
         assert_eq!(
@@ -383,5 +398,22 @@ mod tests {
             config.components.builtins_dir,
             default.components.builtins_dir
         );
+    }
+
+    #[test]
+    fn resolve_experimental_adds_components() {
+        let mut resolver = resolver_with(false, false, None);
+        resolver.experimental = true;
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert!(config.components.load.contains(&"life_game".to_string()));
+    }
+
+    #[test]
+    fn resolve_no_experimental_by_default() {
+        let resolver = resolver_with(false, false, None);
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert!(!config.components.load.contains(&"life_game".to_string()));
     }
 }

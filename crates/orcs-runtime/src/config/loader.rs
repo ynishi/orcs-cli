@@ -48,6 +48,8 @@ pub struct EnvOverrides {
     pub color: Option<bool>,
     /// `ORCS_SCRIPTS_AUTO_LOAD`
     pub scripts_auto_load: Option<bool>,
+    /// `ORCS_EXPERIMENTAL` - enable experimental components
+    pub experimental: Option<bool>,
     /// `ORCS_MODEL`
     pub model: Option<String>,
     /// `ORCS_SESSION_PATH`
@@ -74,6 +76,7 @@ impl EnvOverrides {
             verbose: read_env_bool("ORCS_VERBOSE")?,
             color: read_env_bool("ORCS_COLOR")?,
             scripts_auto_load: read_env_bool("ORCS_SCRIPTS_AUTO_LOAD")?,
+            experimental: read_env_bool("ORCS_EXPERIMENTAL")?,
             model: read_env_string("ORCS_MODEL"),
             session_path: read_env_string("ORCS_SESSION_PATH").map(PathBuf::from),
             builtins_dir: read_env_string("ORCS_BUILTINS_DIR").map(PathBuf::from),
@@ -352,6 +355,9 @@ impl ConfigLoader {
         if let Some(ref v) = ov.builtins_dir {
             config.components.builtins_dir = v.clone();
         }
+        if let Some(true) = ov.experimental {
+            config.components.activate_experimental();
+        }
     }
 }
 
@@ -592,6 +598,7 @@ default = "profile-model"
             verbose: Some(true),
             color: Some(false),
             scripts_auto_load: Some(false),
+            experimental: None,
             model: Some("override-model".into()),
             session_path: Some(PathBuf::from("/custom/sessions")),
             builtins_dir: None,
@@ -739,5 +746,47 @@ default = "explicit-model"
             .unwrap();
 
         assert_eq!(config, OrcsConfig::default());
+    }
+
+    #[test]
+    fn env_experimental_activates_components() {
+        let overrides = EnvOverrides {
+            experimental: Some(true),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .load()
+            .unwrap();
+
+        // life_game should now be in load
+        assert!(config.components.load.contains(&"life_game".to_string()));
+    }
+
+    #[test]
+    fn env_experimental_false_does_not_activate() {
+        let overrides = EnvOverrides {
+            experimental: Some(false),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .load()
+            .unwrap();
+
+        // life_game should NOT be in load
+        assert!(!config.components.load.contains(&"life_game".to_string()));
+    }
+
+    #[test]
+    fn env_overrides_default_experimental_is_none() {
+        let ov = EnvOverrides::default();
+        assert!(ov.experimental.is_none());
     }
 }
