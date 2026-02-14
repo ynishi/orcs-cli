@@ -352,6 +352,15 @@ impl ChildSpawner {
         &self.output_tx
     }
 
+    /// Returns a clone of the child's Arc for out-of-lock execution.
+    ///
+    /// Used by `send_to_children_batch` to collect child references while
+    /// briefly holding the spawner lock, then release it before running.
+    #[must_use]
+    pub fn get_child_arc(&self, id: &str) -> Option<Arc<Mutex<Box<dyn RunnableChild>>>> {
+        self.children.get(id).map(|m| Arc::clone(&m.child))
+    }
+
     /// Runs a child by ID with the given input.
     ///
     /// # Arguments
@@ -625,5 +634,51 @@ mod tests {
 
         assert_eq!(boxed.id(), "async-boxed");
         assert_eq!(boxed.status(), Status::Idle);
+    }
+
+    // --- get_child_arc tests ---
+
+    #[test]
+    fn get_child_arc_returns_some_for_existing_child() {
+        let mut spawner = setup();
+        let config = ChildConfig::new("worker-1");
+        let worker = Box::new(TestWorker::new("worker-1"));
+        spawner
+            .spawn(config, worker)
+            .expect("spawn worker for get_child_arc test");
+
+        let arc = spawner.get_child_arc("worker-1");
+        assert!(arc.is_some(), "should return Some for existing child");
+    }
+
+    #[test]
+    fn get_child_arc_returns_none_for_missing_child() {
+        let spawner = setup();
+        let arc = spawner.get_child_arc("nonexistent");
+        assert!(arc.is_none(), "should return None for missing child");
+    }
+
+    #[test]
+    fn get_child_arc_shares_state_with_managed_child() {
+        let mut spawner = setup();
+        let config = ChildConfig::new("worker-1");
+        let worker = Box::new(TestWorker::new("worker-1"));
+        spawner
+            .spawn(config, worker)
+            .expect("spawn worker for shared state test");
+
+        let arc = spawner.get_child_arc("worker-1").expect("get arc");
+        // Run via arc
+        {
+            let mut child = arc.lock().expect("lock child arc");
+            let result = child.run(json!({"via": "arc"}));
+            assert!(result.is_ok(), "should run successfully via arc");
+        }
+        // Run via spawner — same child, should still work
+        let result = spawner.run_child("worker-1", json!({"via": "spawner"}));
+        assert!(
+            result.is_ok(),
+            "should run successfully via spawner after arc use"
+        );
     }
 }

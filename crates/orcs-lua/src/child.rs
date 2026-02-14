@@ -863,6 +863,79 @@ fn register_context_functions(
         })?;
     orcs_table.set("send_to_child", send_to_child_fn)?;
 
+    // orcs.send_to_children_batch(ids, inputs) -> [ { ok, result?, error? }, ... ]
+    //
+    // ids:    Lua table (array) of child ID strings
+    // inputs: Lua table (array) of input values (same length as ids)
+    //
+    // Returns a Lua table (array) of result tables, one per child,
+    // in the same order as the input arrays.
+    let send_batch_fn = lua.create_function(|lua, (ids, inputs): (mlua::Table, mlua::Table)| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+        // Convert Lua arrays to Vec<(String, Value)>
+        let mut requests = Vec::new();
+        let ids_len = ids.len()? as usize;
+        let inputs_len = inputs.len()? as usize;
+        if ids_len != inputs_len {
+            return Err(mlua::Error::RuntimeError(format!(
+                "ids length ({}) != inputs length ({})",
+                ids_len, inputs_len
+            )));
+        }
+
+        for i in 1..=ids_len {
+            let id: String = ids.get(i)?;
+            let input_val: mlua::Value = inputs.get(i)?;
+            let json_input = crate::types::lua_to_json(input_val, lua)?;
+            requests.push((id, json_input));
+        }
+
+        // Execute batch (parallel under the hood)
+        let results = ctx.send_to_children_batch(requests);
+        drop(ctx);
+
+        // Convert results to Lua table array
+        let results_table = lua.create_table()?;
+        for (i, (_id, result)) in results.into_iter().enumerate() {
+            let entry = lua.create_table()?;
+            match result {
+                Ok(child_result) => {
+                    entry.set("ok", true)?;
+                    match child_result {
+                        orcs_component::ChildResult::Ok(data) => {
+                            let lua_data = crate::types::serde_json_to_lua(&data, lua)?;
+                            entry.set("result", lua_data)?;
+                        }
+                        orcs_component::ChildResult::Err(e) => {
+                            entry.set("ok", false)?;
+                            entry.set("error", e.to_string())?;
+                        }
+                        orcs_component::ChildResult::Aborted => {
+                            entry.set("ok", false)?;
+                            entry.set("error", "child aborted")?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    entry.set("ok", false)?;
+                    entry.set("error", e.to_string())?;
+                }
+            }
+            results_table.set(i + 1, entry)?; // Lua 1-indexed
+        }
+
+        Ok(results_table)
+    })?;
+    orcs_table.set("send_to_children_batch", send_batch_fn)?;
+
     Ok(())
 }
 
@@ -1416,6 +1489,88 @@ mod tests {
             if let ChildResult::Ok(data) = result {
                 // MockContext returns {"mock": true}
                 assert_eq!(data["result"]["mock"], true);
+            }
+        }
+
+        #[test]
+        fn send_to_children_batch_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "batch-sender",
+                    run = function(input)
+                        local ids = {"worker-1", "worker-1"}
+                        local inputs = {
+                            { message = "hello" },
+                            { message = "world" },
+                        }
+                        local results = orcs.send_to_children_batch(ids, inputs)
+                        if not results then
+                            return { success = false, error = "nil results" }
+                        end
+                        return {
+                            success = true,
+                            data = {
+                                count = #results,
+                                first_ok = results[1] and results[1].ok,
+                                second_ok = results[2] and results[2].ok,
+                            },
+                        }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create batch-sender");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "batch-sender should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["count"], 2, "should return 2 results");
+                assert_eq!(data["first_ok"], true, "first result should be ok");
+                assert_eq!(data["second_ok"], true, "second result should be ok");
+            }
+        }
+
+        #[test]
+        fn send_to_children_batch_length_mismatch_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "mismatch-sender",
+                    run = function(input)
+                        -- This should error: ids has 2 elements, inputs has 1
+                        orcs.send_to_children_batch({"a", "b"}, {{x=1}})
+                        return { success = true }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create mismatch-sender");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            // The length mismatch RuntimeError should propagate through Lua
+            // and cause the run callback to fail.
+            assert!(
+                result.is_err(),
+                "run should fail when batch ids/inputs length mismatch"
+            );
+            if let ChildResult::Err(err) = result {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("length"),
+                    "error should mention length mismatch, got: {}",
+                    msg
+                );
             }
         }
 

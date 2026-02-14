@@ -665,6 +665,83 @@ impl ChildContext for ChildContextImpl {
         spawner.run_child(child_id, input)
     }
 
+    fn send_to_children_batch(
+        &self,
+        requests: Vec<(String, serde_json::Value)>,
+    ) -> Vec<(String, Result<ChildResult, RunError>)> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Lock spawner briefly to collect Arc refs, then release.
+        type ChildArc = Arc<Mutex<Box<dyn orcs_component::RunnableChild>>>;
+        let child_arcs: Vec<(String, Option<ChildArc>)> = {
+            let spawner = match self.spawner.lock() {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("spawner lock failed: {}", e);
+                    return requests
+                        .into_iter()
+                        .map(|(id, _)| (id, Err(RunError::ExecutionFailed(msg.clone()))))
+                        .collect();
+                }
+            };
+            requests
+                .iter()
+                .map(|(id, _)| (id.clone(), spawner.get_child_arc(id)))
+                .collect()
+        };
+        // spawner lock released here
+
+        // 2. Run all children in parallel using OS threads.
+        std::thread::scope(|s| {
+            let handles: Vec<_> = child_arcs
+                .into_iter()
+                .zip(requests)
+                .map(|((id, child_opt), (_, input))| {
+                    s.spawn(move || match child_opt {
+                        None => (
+                            id.clone(),
+                            Err(RunError::ExecutionFailed(format!(
+                                "child not found: {}",
+                                id
+                            ))),
+                        ),
+                        Some(child_arc) => {
+                            let mut guard = match child_arc.lock() {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    return (
+                                        id,
+                                        Err(RunError::ExecutionFailed(format!(
+                                            "child lock failed: {}",
+                                            e
+                                        ))),
+                                    );
+                                }
+                            };
+                            let result = guard.run(input);
+                            drop(guard);
+                            (id, Ok(result))
+                        }
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        (
+                            String::from("<panic>"),
+                            Err(RunError::ExecutionFailed("child thread panicked".into())),
+                        )
+                    })
+                })
+                .collect()
+        })
+    }
+
     fn spawn_runner_from_script(
         &self,
         script: &str,
@@ -1021,6 +1098,94 @@ mod tests {
         let cloned: Box<dyn AsyncChildContext> = AsyncChildContext::clone_box(&ctx);
 
         assert_eq!(AsyncChildContext::parent_id(cloned.as_ref()), "test-parent");
+    }
+
+    // --- send_to_children_batch tests ---
+
+    #[test]
+    fn batch_send_empty_returns_empty() {
+        let (ctx, _) = setup();
+        let results = ChildContext::send_to_children_batch(&ctx, vec![]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn batch_send_single_child() {
+        let (ctx, _) = setup();
+
+        // Spawn a child
+        let config = ChildConfig::new("batch-worker-1");
+        ChildContext::spawn_child(&ctx, config).expect("spawn batch-worker-1");
+
+        let requests = vec![("batch-worker-1".to_string(), serde_json::json!({"x": 1}))];
+        let results = ChildContext::send_to_children_batch(&ctx, requests);
+
+        assert_eq!(results.len(), 1);
+        let (id, result) = &results[0];
+        assert_eq!(id, "batch-worker-1");
+        let child_result = result.as_ref().expect("should succeed");
+        assert!(child_result.is_ok(), "child should return Ok");
+    }
+
+    #[test]
+    fn batch_send_multiple_children_parallel() {
+        let (ctx, _) = setup();
+
+        // Spawn 5 children
+        for i in 0..5 {
+            let config = ChildConfig::new(format!("par-worker-{}", i));
+            ChildContext::spawn_child(&ctx, config)
+                .unwrap_or_else(|e| panic!("spawn par-worker-{}: {}", i, e));
+        }
+
+        let requests: Vec<_> = (0..5)
+            .map(|i| (format!("par-worker-{}", i), serde_json::json!({"index": i})))
+            .collect();
+
+        let results = ChildContext::send_to_children_batch(&ctx, requests);
+
+        assert_eq!(results.len(), 5);
+        for (id, result) in &results {
+            let child_result = result
+                .as_ref()
+                .unwrap_or_else(|e| panic!("{} should succeed: {}", id, e));
+            assert!(child_result.is_ok(), "{} should return Ok", id);
+            if let ChildResult::Ok(data) = child_result {
+                assert!(data.get("index").is_some(), "{} should echo input", id);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_send_with_missing_child_returns_error() {
+        let (ctx, _) = setup();
+
+        // Spawn only worker-0
+        let config = ChildConfig::new("exists");
+        ChildContext::spawn_child(&ctx, config).expect("spawn exists");
+
+        let requests = vec![
+            ("exists".to_string(), serde_json::json!({"a": 1})),
+            ("missing".to_string(), serde_json::json!({"b": 2})),
+        ];
+        let results = ChildContext::send_to_children_batch(&ctx, requests);
+
+        assert_eq!(results.len(), 2);
+
+        // First should succeed
+        assert!(results[0].1.is_ok(), "existing child should succeed");
+
+        // Second should fail
+        assert!(results[1].1.is_err(), "missing child should return error");
+        let err = results[1]
+            .1
+            .as_ref()
+            .expect_err("expected Err for missing child");
+        assert!(
+            err.to_string().contains("not found"),
+            "error should mention 'not found', got: {}",
+            err
+        );
     }
 
     // --- CommandCheckResult tests (Phase 3D) ---

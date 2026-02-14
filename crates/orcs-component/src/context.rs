@@ -419,6 +419,36 @@ pub trait ChildContext: Send + Sync + Debug {
         input: serde_json::Value,
     ) -> Result<ChildResult, RunError>;
 
+    /// Sends input to multiple children in parallel and returns all results.
+    ///
+    /// Each `(child_id, input)` pair is executed concurrently using OS threads.
+    /// The spawner lock is held only briefly to collect child references, then
+    /// released before execution begins.
+    ///
+    /// # Arguments
+    ///
+    /// * `requests` - Vec of `(child_id, input)` pairs
+    ///
+    /// # Returns
+    ///
+    /// Vec of `(child_id, Result<ChildResult, RunError>)` in the same order.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to sequential `send_to_child` calls.
+    fn send_to_children_batch(
+        &self,
+        requests: Vec<(String, serde_json::Value)>,
+    ) -> Vec<(String, Result<ChildResult, RunError>)> {
+        requests
+            .into_iter()
+            .map(|(id, input)| {
+                let result = self.send_to_child(&id, input);
+                (id, result)
+            })
+            .collect()
+    }
+
     /// Spawns a Component as a separate ChannelRunner from a script.
     ///
     /// This creates a new Channel in the World and spawns a ChannelRunner
