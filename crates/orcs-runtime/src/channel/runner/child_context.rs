@@ -838,6 +838,74 @@ impl ChildContext for ChildContextImpl {
         })
     }
 
+    fn request_batch(
+        &self,
+        requests: Vec<(String, String, serde_json::Value, Option<u64>)>,
+    ) -> Vec<Result<serde_json::Value, String>> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        let map = match self.component_channel_map.as_ref() {
+            Some(m) => m,
+            None => {
+                return requests
+                    .iter()
+                    .map(|_| Err("component_channel_map not configured for RPC".into()))
+                    .collect();
+            }
+        };
+        let handles = match self.shared_handles.as_ref() {
+            Some(h) => h,
+            None => {
+                return requests
+                    .iter()
+                    .map(|_| Err("shared_handles not configured for RPC".into()))
+                    .collect();
+            }
+        };
+
+        let source_id = ComponentId::child(&self.parent_id);
+        let source_channel = self.channel_id.unwrap_or_else(ChannelId::new);
+
+        // Spawn all RPC requests as concurrent tasks, then join.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let join_handles: Vec<_> = requests
+                    .into_iter()
+                    .map(|(target, op, payload, timeout_ms)| {
+                        let timeout = timeout_ms.unwrap_or(orcs_event::DEFAULT_TIMEOUT_MS);
+                        let src_id = source_id.clone();
+                        let map = Arc::clone(map);
+                        let handles = Arc::clone(handles);
+                        tokio::spawn(async move {
+                            super::rpc::resolve_and_send_rpc(super::rpc::RpcParams {
+                                component_channel_map: &map,
+                                shared_handles: &handles,
+                                target_fqn: &target,
+                                operation: &op,
+                                source_id: src_id,
+                                source_channel,
+                                payload,
+                                timeout_ms: timeout,
+                            })
+                            .await
+                        })
+                    })
+                    .collect();
+
+                let mut results = Vec::with_capacity(join_handles.len());
+                for jh in join_handles {
+                    results.push(
+                        jh.await
+                            .unwrap_or_else(|e| Err(format!("rpc task failed: {e}"))),
+                    );
+                }
+                results
+            })
+        })
+    }
+
     fn extension(&self, key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
         match key {
             "hook_registry" => self
@@ -1186,6 +1254,47 @@ mod tests {
             "error should mention 'not found', got: {}",
             err
         );
+    }
+
+    // --- request_batch tests ---
+
+    #[test]
+    fn request_batch_empty_returns_empty() {
+        let (ctx, _) = setup();
+        let results = ChildContext::request_batch(&ctx, vec![]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn request_batch_without_rpc_returns_errors() {
+        let (ctx, _) = setup();
+        // No RPC support configured → uses trait default → calls request() → "not configured"
+        let requests = vec![
+            (
+                "comp-a".to_string(),
+                "ping".to_string(),
+                serde_json::json!({}),
+                None,
+            ),
+            (
+                "comp-b".to_string(),
+                "ping".to_string(),
+                serde_json::json!({}),
+                None,
+            ),
+        ];
+        let results = ChildContext::request_batch(&ctx, requests);
+
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            assert!(result.is_err(), "should fail without RPC configured");
+            let err = result.as_ref().expect_err("expected error");
+            assert!(
+                err.contains("not configured"),
+                "error should mention not configured, got: {}",
+                err
+            );
+        }
     }
 
     // --- CommandCheckResult tests (Phase 3D) ---

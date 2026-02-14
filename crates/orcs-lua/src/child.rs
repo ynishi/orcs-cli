@@ -820,6 +820,65 @@ fn register_context_functions(
         )?;
     orcs_table.set("request", request_fn)?;
 
+    // orcs.request_batch(requests) -> [ { success, data?, error? }, ... ]
+    //
+    // requests: Lua table (array) of { target, operation, payload, timeout_ms? }
+    //
+    // All RPC calls execute concurrently (tokio::spawn under the hood).
+    // Results are returned in the same order as the input array.
+    let request_batch_fn = lua.create_function(|lua, requests: mlua::Table| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper
+            .0
+            .lock()
+            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+        // Convert Lua array to Vec<(target, operation, payload, timeout_ms)>
+        let len = requests.len()? as usize;
+        let mut batch = Vec::with_capacity(len);
+        for i in 1..=len {
+            let entry: mlua::Table = requests.get(i)?;
+            let target: String = entry.get("target").map_err(|_| {
+                mlua::Error::RuntimeError(format!("requests[{}].target required", i))
+            })?;
+            let operation: String = entry.get("operation").map_err(|_| {
+                mlua::Error::RuntimeError(format!("requests[{}].operation required", i))
+            })?;
+            let payload_val: mlua::Value = entry.get("payload").unwrap_or(mlua::Value::Nil);
+            let json_payload = crate::types::lua_to_json(payload_val, lua)?;
+            let timeout_ms: Option<u64> = entry.get("timeout_ms").ok();
+            batch.push((target, operation, json_payload, timeout_ms));
+        }
+
+        // Execute batch (concurrent under the hood)
+        let results = ctx.request_batch(batch);
+        drop(ctx);
+
+        // Convert results to Lua table array
+        let results_table = lua.create_table()?;
+        for (i, result) in results.into_iter().enumerate() {
+            let entry = lua.create_table()?;
+            match result {
+                Ok(value) => {
+                    entry.set("success", true)?;
+                    let lua_data = lua.to_value(&value)?;
+                    entry.set("data", lua_data)?;
+                }
+                Err(err) => {
+                    entry.set("success", false)?;
+                    entry.set("error", err)?;
+                }
+            }
+            results_table.set(i + 1, entry)?; // Lua 1-indexed
+        }
+
+        Ok(results_table)
+    })?;
+    orcs_table.set("request_batch", request_batch_fn)?;
+
     // orcs.send_to_child(child_id, message) -> { ok, result?, error? }
     let send_to_child_fn =
         lua.create_function(|lua, (child_id, message): (String, mlua::Value)| {
@@ -1569,6 +1628,128 @@ mod tests {
                 assert!(
                     msg.contains("length"),
                     "error should mention length mismatch, got: {}",
+                    msg
+                );
+            }
+        }
+
+        #[test]
+        fn request_batch_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "rpc-batcher",
+                    run = function(input)
+                        local results = orcs.request_batch({
+                            { target = "comp-a", operation = "ping", payload = {} },
+                            { target = "comp-b", operation = "ping", payload = { x = 1 } },
+                        })
+                        if not results then
+                            return { success = false, error = "nil results" }
+                        end
+                        return {
+                            success = true,
+                            data = {
+                                count = #results,
+                                -- MockContext returns error (RPC not supported)
+                                first_success = results[1] and results[1].success,
+                                second_success = results[2] and results[2].success,
+                                first_error = results[1] and results[1].error or "",
+                            },
+                        }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create rpc-batcher");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "rpc-batcher should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["count"], 2, "should return 2 results");
+                // MockContext default: "request not supported by this context"
+                assert_eq!(
+                    data["first_success"], false,
+                    "first should fail (no RPC in mock)"
+                );
+                assert_eq!(
+                    data["second_success"], false,
+                    "second should fail (no RPC in mock)"
+                );
+                let err = data["first_error"].as_str().unwrap_or("");
+                assert!(
+                    err.contains("not supported"),
+                    "error should mention not supported, got: {}",
+                    err
+                );
+            }
+        }
+
+        #[test]
+        fn request_batch_empty_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "empty-batcher",
+                    run = function(input)
+                        local results = orcs.request_batch({})
+                        return {
+                            success = true,
+                            data = { count = #results },
+                        }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create empty-batcher");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "empty-batcher should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["count"], 0, "empty batch should return 0 results");
+            }
+        }
+
+        #[test]
+        fn request_batch_missing_target_errors_via_lua() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "bad-batcher",
+                    run = function(input)
+                        -- Missing 'target' field should error
+                        orcs.request_batch({
+                            { operation = "ping", payload = {} },
+                        })
+                        return { success = true }
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create bad-batcher");
+
+            let ctx = MockContext::new("parent");
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_err(), "should fail when target is missing");
+            if let ChildResult::Err(err) = result {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("target"),
+                    "error should mention target, got: {}",
                     msg
                 );
             }

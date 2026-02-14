@@ -573,6 +573,24 @@ pub trait ChildContext: Send + Sync + Debug {
         Err("request not supported by this context".into())
     }
 
+    /// Sends multiple RPC requests in parallel and returns all results.
+    ///
+    /// Each request is a tuple of `(target_fqn, operation, payload, timeout_ms)`.
+    /// Results are returned in the same order as the input.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to sequential `request()` calls.
+    fn request_batch(
+        &self,
+        requests: Vec<(String, String, serde_json::Value, Option<u64>)>,
+    ) -> Vec<Result<serde_json::Value, String>> {
+        requests
+            .into_iter()
+            .map(|(target, op, payload, timeout)| self.request(&target, &op, payload, timeout))
+            .collect()
+    }
+
     /// Returns a type-erased runtime extension by key.
     ///
     /// Enables runtime-layer constructs (e.g., hook registries) to pass
