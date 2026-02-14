@@ -374,6 +374,21 @@ impl LuaComponent {
         })
     }
 
+    /// Provides closure-based access to the internal Lua state.
+    ///
+    /// Intended for test mock injection (e.g. overriding `orcs.llm()`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua mutex is poisoned.
+    pub(crate) fn with_lua<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Lua) -> R,
+    {
+        let lua = self.lua.lock().expect("lua mutex poisoned in with_lua");
+        f(&lua)
+    }
+
     /// Returns the script path if loaded from file.
     #[must_use]
     pub fn script_path(&self) -> Option<&str> {

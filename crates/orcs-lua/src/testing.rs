@@ -46,14 +46,16 @@
 //! ```
 
 use crate::{LuaComponent, LuaError};
+use mlua::LuaSerdeExt;
 use orcs_component::testing::{ComponentTestHarness, RequestRecord, SignalRecord};
 use orcs_component::{Component, ComponentError, EventCategory, Status};
 use orcs_event::SignalResponse;
 use orcs_runtime::sandbox::SandboxPolicy;
 use orcs_types::ComponentId;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Test harness for Lua-based components.
 ///
@@ -295,6 +297,118 @@ impl LuaTestHarness {
     pub fn subscriptions(&self) -> &[EventCategory] {
         self.component().subscriptions()
     }
+
+    /// Injects a mock `orcs.llm()` that captures prompts and returns mock responses.
+    ///
+    /// Each call to `orcs.llm()` in Lua will:
+    /// 1. Push the prompt string into the captured list
+    /// 2. Return `{ok = true, content = <next_response>}` from the queue
+    ///    (or `"mock response"` if queue is exhausted)
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to captured prompts for assertion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_llm_mock(&self, responses: Vec<String>) -> Arc<Mutex<Vec<String>>> {
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            let mock_fn = lua
+                .create_function(move |lua, prompt: String| {
+                    captured_clone.lock().expect("captured mutex").push(prompt);
+
+                    let mut resps = responses.lock().expect("responses mutex");
+                    let content = resps
+                        .pop_front()
+                        .unwrap_or_else(|| "mock response".to_string());
+
+                    let result = lua.create_table()?;
+                    result.set("ok", true)?;
+                    result.set("content", content)?;
+                    Ok(result)
+                })
+                .expect("create mock llm function");
+
+            orcs.set("llm", mock_fn).expect("set mock orcs.llm");
+        });
+
+        captured
+    }
+
+    /// Injects a mock `orcs.request()` that returns a fixed response for a target.
+    ///
+    /// When Lua calls `orcs.request(target, op, payload)`, the mock checks
+    /// if a response is registered for `target`; if so, returns it.
+    /// Otherwise returns `{success = false, error = "mock: no handler"}`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_request_mock(&self, handlers: Vec<(String, Value)>) {
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            let handlers = Arc::new(handlers);
+
+            let mock_fn = lua
+                .create_function(
+                    move |lua, (target, _op, _payload): (String, String, mlua::Value)| {
+                        let result = lua.create_table()?;
+
+                        for (pattern, response) in handlers.iter() {
+                            if target == pattern.as_str() {
+                                result.set("success", true)?;
+                                let lua_val = lua.to_value(response)?;
+                                result.set("data", lua_val)?;
+                                return Ok(result);
+                            }
+                        }
+
+                        result.set("success", false)?;
+                        result.set("error", format!("mock: no handler for {target}"))?;
+                        Ok(result)
+                    },
+                )
+                .expect("create mock request function");
+
+            orcs.set("request", mock_fn).expect("set mock orcs.request");
+        });
+    }
+
+    /// Injects a mock `orcs.tool_descriptions()` that returns a fixed string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_tool_descriptions_mock(&self, descriptions: &str) {
+        let desc: Arc<String> = Arc::new(descriptions.to_string());
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            let mock_fn = lua
+                .create_function(move |_lua, ()| Ok((*desc).clone()))
+                .expect("create mock tool_descriptions function");
+
+            orcs.set("tool_descriptions", mock_fn)
+                .expect("set mock orcs.tool_descriptions");
+        });
+    }
 }
 
 #[cfg(test)]
@@ -472,5 +586,193 @@ mod tests {
 
         let result = LuaTestHarness::from_script(script, test_sandbox());
         assert!(result.is_err());
+    }
+
+    // Script that calls orcs.llm() and returns the result via on_request
+    const LLM_CALLER_SCRIPT: &str = r#"
+        return {
+            id = "llm-caller",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                local resp = orcs.llm(req.payload.prompt or "default prompt")
+                if resp and resp.ok then
+                    return { success = true, data = { content = resp.content } }
+                end
+                return { success = false, error = "llm failed" }
+            end,
+            on_signal = function(sig)
+                return "Handled"
+            end,
+        }
+    "#;
+
+    // Script that calls orcs.request() and returns the result
+    const REQUEST_CALLER_SCRIPT: &str = r#"
+        return {
+            id = "request-caller",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                local target = req.payload.target or ""
+                local op = req.payload.op or "status"
+                local resp = orcs.request(target, op, {})
+                if resp and resp.success then
+                    return { success = true, data = resp.data }
+                end
+                return { success = false, error = resp and resp.error or "request failed" }
+            end,
+            on_signal = function(sig)
+                return "Handled"
+            end,
+        }
+    "#;
+
+    // Script that calls orcs.tool_descriptions() and returns the result
+    const TOOL_DESC_CALLER_SCRIPT: &str = r#"
+        return {
+            id = "tool-desc-caller",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                local desc = orcs.tool_descriptions()
+                return { success = true, data = { descriptions = desc } }
+            end,
+            on_signal = function(sig)
+                return "Handled"
+            end,
+        }
+    "#;
+
+    #[test]
+    fn inject_llm_mock_captures_prompt_and_returns_response() {
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+            .expect("llm-caller script should load");
+
+        let captured = harness.inject_llm_mock(vec!["first reply".to_string()]);
+
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "call_llm",
+                serde_json::json!({"prompt": "hello LLM"}),
+            )
+            .expect("request should succeed");
+
+        // Verify prompt was captured
+        let prompts = captured.lock().expect("captured mutex");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0], "hello LLM");
+
+        // Verify response content
+        assert_eq!(result["content"], "first reply");
+    }
+
+    #[test]
+    fn inject_llm_mock_falls_back_when_queue_exhausted() {
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+            .expect("llm-caller script should load");
+
+        let captured = harness.inject_llm_mock(vec![]); // empty queue
+
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "call_llm",
+                serde_json::json!({"prompt": "test"}),
+            )
+            .expect("request should succeed");
+
+        let prompts = captured.lock().expect("captured mutex");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(result["content"], "mock response");
+    }
+
+    #[test]
+    fn inject_llm_mock_returns_responses_in_order() {
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+            .expect("llm-caller script should load");
+
+        let captured = harness.inject_llm_mock(vec!["first".to_string(), "second".to_string()]);
+
+        let r1 = harness
+            .request(
+                EventCategory::Echo,
+                "x",
+                serde_json::json!({"prompt": "p1"}),
+            )
+            .expect("first request");
+        let r2 = harness
+            .request(
+                EventCategory::Echo,
+                "x",
+                serde_json::json!({"prompt": "p2"}),
+            )
+            .expect("second request");
+        let r3 = harness
+            .request(
+                EventCategory::Echo,
+                "x",
+                serde_json::json!({"prompt": "p3"}),
+            )
+            .expect("third request (fallback)");
+
+        assert_eq!(r1["content"], "first");
+        assert_eq!(r2["content"], "second");
+        assert_eq!(r3["content"], "mock response");
+
+        let prompts = captured.lock().expect("captured mutex");
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(prompts[0], "p1");
+        assert_eq!(prompts[1], "p2");
+        assert_eq!(prompts[2], "p3");
+    }
+
+    #[test]
+    fn inject_request_mock_returns_matching_handler() {
+        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_sandbox())
+            .expect("request-caller script should load");
+
+        harness.inject_request_mock(vec![(
+            "skill::skill_manager".to_string(),
+            serde_json::json!({"skills": ["coding"]}),
+        )]);
+
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "call_req",
+                serde_json::json!({"target": "skill::skill_manager", "op": "list"}),
+            )
+            .expect("request should succeed");
+
+        assert_eq!(result["skills"][0], "coding");
+    }
+
+    #[test]
+    fn inject_request_mock_returns_error_for_unregistered_target() {
+        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_sandbox())
+            .expect("request-caller script should load");
+
+        harness.inject_request_mock(vec![]); // no handlers
+
+        let result = harness.request(
+            EventCategory::Echo,
+            "call_req",
+            serde_json::json!({"target": "unknown::component"}),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn inject_tool_descriptions_mock_returns_fixed_string() {
+        let mut harness = LuaTestHarness::from_script(TOOL_DESC_CALLER_SCRIPT, test_sandbox())
+            .expect("tool-desc-caller script should load");
+
+        harness.inject_tool_descriptions_mock("## Tools\n- tool_a\n- tool_b");
+
+        let result = harness
+            .request(EventCategory::Echo, "get_tools", Value::Null)
+            .expect("request should succeed");
+
+        assert_eq!(result["descriptions"], "## Tools\n- tool_a\n- tool_b");
     }
 }

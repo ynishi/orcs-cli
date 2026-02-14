@@ -5,10 +5,16 @@
 --   agent_mgr (Router)
 --     ├── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
 --     └── skill-worker  — skill queries via RPC to skill_manager
+--
+-- Prompt placement strategies (configurable via [components.settings.agent_mgr]):
+--   top    — [System] [History] [UserInput]
+--   both   — [System] [History] [System] [UserInput]  (default)
+--   bottom — [History] [UserInput] [System]
 
 -- === Worker Scripts ===
 
 -- LLM Worker: fetches skill catalog for context, then calls Claude Code CLI.
+-- Prompt assembly respects `prompt_placement` strategy passed from parent.
 local llm_worker_script = [[
 return {
     id = "llm-worker",
@@ -16,9 +22,9 @@ return {
     run = function(input)
         local message = input.message or ""
         local history_context = input.history_context or ""
+        local placement = input.prompt_placement or "both"
 
-        -- 1. Recommend relevant skills via LLM-powered selection
-        --    Uses lightweight model (haiku) to filter all skills → 0-5 relevant ones.
+        -- 1. Gather system parts: skill recommendations + tool descriptions
         local recommendation = ""
         local skill_count = 0
         local rec_resp = orcs.request("skill::skill_manager", "recommend", {
@@ -38,47 +44,68 @@ return {
                     end
                     lines[#lines + 1] = line
                 end
-                recommendation = "\n[System Recommendation]\n"
+                recommendation = "[System Recommendation]\n"
                     .. "The following skills are relevant to this task. "
                     .. "Consider using them to assist the user:\n"
                     .. table.concat(lines, "\n")
             end
         end
 
-        -- 2. Gather tool descriptions for the Agent CLI
         local tool_desc = ""
         if orcs.tool_descriptions then
             local td = orcs.tool_descriptions()
             if td and td ~= "" then
-                tool_desc = "\n\n## Available ORCS Tools\n" .. td
+                tool_desc = "## Available ORCS Tools\n" .. td
             end
         end
 
-        -- 3. Build prompt: UserIntent + SystemRecommendation placed together
-        --    Recommendation is placed immediately after user intent so the
-        --    agent naturally considers recommended skills in context.
-        local prompt
+        -- 2. Compose system block (full)
+        local system_parts = {}
         if recommendation ~= "" then
-            -- Intent + Recommendation together (close proximity)
-            prompt = message .. "\n" .. recommendation
-        else
-            prompt = message
-        end
-
-        -- Append supplementary context (history, tools) after the core pair
-        if history_context ~= "" then
-            prompt = prompt .. "\n\n## Recent Conversation\n" .. history_context
+            system_parts[#system_parts + 1] = recommendation
         end
         if tool_desc ~= "" then
-            prompt = prompt .. tool_desc
+            system_parts[#system_parts + 1] = tool_desc
+        end
+        local system_full = table.concat(system_parts, "\n\n")
+
+        -- 3. Compose history block
+        local history_block = ""
+        if history_context ~= "" then
+            history_block = "## Recent Conversation\n" .. history_context
         end
 
+        -- 4. Assemble prompt based on placement strategy
+        local sections = {}
+
+        if placement == "top" then
+            -- [System] [History] [UserInput]
+            if system_full ~= "" then sections[#sections + 1] = system_full end
+            if history_block ~= "" then sections[#sections + 1] = history_block end
+            sections[#sections + 1] = message
+
+        elseif placement == "bottom" then
+            -- [History] [UserInput] [System]
+            if history_block ~= "" then sections[#sections + 1] = history_block end
+            sections[#sections + 1] = message
+            if system_full ~= "" then sections[#sections + 1] = system_full end
+
+        else
+            -- "both" (default): [System] [History] [System] [UserInput]
+            if system_full ~= "" then sections[#sections + 1] = system_full end
+            if history_block ~= "" then sections[#sections + 1] = history_block end
+            if system_full ~= "" then sections[#sections + 1] = system_full end
+            sections[#sections + 1] = message
+        end
+
+        local prompt = table.concat(sections, "\n\n")
+
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (skills=%d, history=%d, tools=%d chars)",
-            skill_count, #history_context, #tool_desc
+            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d chars)",
+            placement, skill_count, #history_context, #tool_desc
         ))
 
-        -- 4. Call Claude Code CLI (headless)
+        -- 5. Call Claude Code CLI (headless)
         local llm_resp = orcs.llm(prompt)
         if llm_resp and llm_resp.ok then
             return {
@@ -143,9 +170,15 @@ return {
 }
 ]]
 
--- === Constants ===
+-- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
+
+-- Component settings (populated from config in init())
+local component_settings = {}
+
+-- Valid prompt placement strategies
+local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 
 -- === Routing ===
 
@@ -237,7 +270,7 @@ local function fetch_history_context()
     if not ok or not entries or #entries == 0 then
         return ""
     end
-    local lines = { "\n\n## Recent Conversation" }
+    local lines = {}
     for _, entry in ipairs(entries) do
         local payload = entry.payload or {}
         local text = payload.message or payload.content or payload.response
@@ -246,7 +279,7 @@ local function fetch_history_context()
             lines[#lines + 1] = string.format("- [%s] %s", src, text:sub(1, 200))
         end
     end
-    if #lines > 1 then
+    if #lines > 0 then
         return table.concat(lines, "\n")
     end
     return ""
@@ -257,9 +290,17 @@ local function dispatch_llm(message)
     -- Gather history in parent context (emitter function, unavailable to children)
     local history_context = fetch_history_context()
 
+    -- Resolve prompt placement strategy from config
+    local placement = component_settings.prompt_placement or "both"
+    if not VALID_PLACEMENTS[placement] then
+        orcs.log("warn", "Invalid prompt_placement '" .. placement .. "', falling back to both")
+        placement = "both"
+    end
+
     local result = orcs.send_to_child("llm-worker", {
         message = message,
         history_context = history_context,
+        prompt_placement = placement,
     })
     if result and result.ok then
         local data = result.result or {}
@@ -342,8 +383,18 @@ return {
         return "Ignored"
     end,
 
-    init = function()
-        orcs.log("info", "agent_mgr initializing...")
+    init = function(cfg)
+        -- Store component settings from [components.settings.agent_mgr]
+        if cfg and type(cfg) == "table" then
+            if next(component_settings) ~= nil then
+                orcs.log("warn", "agent_mgr: re-initialization detected, overwriting previous settings")
+            end
+            component_settings = cfg
+            orcs.log("debug", "agent_mgr: config received: " .. orcs.json_encode(cfg))
+        end
+
+        local placement = component_settings.prompt_placement or "both"
+        orcs.log("info", "agent_mgr initializing (prompt_placement=" .. placement .. ")...")
 
         -- Spawn LLM worker (default handler)
         local llm = orcs.spawn_child({
