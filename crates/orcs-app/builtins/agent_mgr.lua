@@ -3,8 +3,14 @@
 --
 -- Architecture:
 --   agent_mgr (Router)
---     ├── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
---     └── skill-worker  — skill queries via RPC to skill_manager
+--     └── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
+--
+-- @command routing:
+--   @shell <cmd>           → builtin::shell (passthrough)
+--   @tool <subcmd> ...     → builtin::tool (passthrough)
+--   @skill <op> ...        → skill::skill_manager (operation dispatch)
+--   @profile <op> ...      → profile::profile_manager (passthrough via handle_input)
+--   @foundation <op> ...   → foundation::foundation_manager (operation dispatch)
 --
 -- Foundation segments (from agent.md via foundation_manager):
 --   system — always at top (identity/core rules)
@@ -120,6 +126,11 @@ return {
         if tool_desc ~= "" then
             system_parts[#system_parts + 1] = tool_desc
         end
+        -- @command reference (passed from parent dispatch_llm)
+        local cmd_ref = input.command_reference or ""
+        if cmd_ref ~= "" then
+            system_parts[#system_parts + 1] = cmd_ref
+        end
         local system_full = table.concat(system_parts, "\n\n")
 
         -- 3. Compose history block
@@ -175,8 +186,8 @@ return {
         local prompt = table.concat(sections, "\n\n")
 
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
-            placement, skill_count, #history_context, #tool_desc,
+            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, cmds=%d, foundation=%d+%d+%d, metrics=%d chars)",
+            placement, skill_count, #history_context, #tool_desc, #cmd_ref,
             #f_system, #f_task, #f_guard, #console_block
         ))
 
@@ -213,43 +224,6 @@ return {
 }
 ]]
 
--- Skill Worker: lightweight skill queries via RPC.
-local skill_worker_script = [[
-return {
-    id = "skill-worker",
-
-    run = function(input)
-        local operation = input.operation or "status"
-        local payload = input.payload or {}
-
-        local resp = orcs.request("skill::skill_manager", operation, payload)
-        if resp and resp.success then
-            return {
-                success = true,
-                data = {
-                    result = resp.data,
-                    source = "skill-worker",
-                },
-            }
-        else
-            local err = (resp and resp.error) or "skill request failed"
-            return {
-                success = false,
-                error = err,
-                data = { source = "skill-worker" },
-            }
-        end
-    end,
-
-    on_signal = function(signal)
-        if signal.kind == "Veto" then
-            return "Abort"
-        end
-        return "Handled"
-    end,
-}
-]]
-
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
@@ -263,14 +237,16 @@ local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 
 -- === Routing ===
 
---- Route table: prefix → { target_type, target }
---- target_type is "rpc" (orcs.request to a component) or "child" (send_to_child).
+--- Route table: prefix → { target, dispatch }
+--- dispatch = "passthrough": send full body as message with operation="input"
+---                           (component parses the message internally)
+--- dispatch = "operation":   parse first word of body as operation, rest as args
 local routes = {
-    shell      = { type = "rpc",   target = "builtin::shell" },
-    skill      = { type = "child", target = "skill-worker" },
-    profile    = { type = "rpc",   target = "profile::profile_manager" },
-    tool       = { type = "rpc",   target = "builtin::tool" },
-    foundation = { type = "rpc",   target = "foundation::foundation_manager" },
+    shell      = { target = "builtin::shell",                 dispatch = "passthrough" },
+    skill      = { target = "skill::skill_manager",           dispatch = "operation" },
+    profile    = { target = "profile::profile_manager",       dispatch = "passthrough" },
+    tool       = { target = "builtin::tool",                  dispatch = "passthrough" },
+    foundation = { target = "foundation::foundation_manager", dispatch = "operation" },
 }
 
 --- Parse @prefix from message. Returns (prefix, rest) or (nil, original).
@@ -287,16 +263,63 @@ local function parse_route(message)
     return nil, message
 end
 
---- Execute an RPC route.
-local function dispatch_rpc(route, body)
-    local resp = orcs.request(route.target, "input", { message = body })
+--- Build @command reference text for LLM instructions.
+local function build_command_reference()
+    local descriptions = {
+        shell      = "Execute shell command (ls, git, cargo, etc.)",
+        tool       = "File operations: read, write, grep, glob, mkdir, remove, mv, pwd",
+        skill      = "Skill management: list, get <name>, activate <name>, deactivate <name>, status",
+        profile    = "Profile switching: list, current, use <name>",
+        foundation = "Foundation segments: get_all, status",
+    }
+    local lines = {
+        "## @Command Reference",
+        "To execute actions, write a line starting with `@<prefix>`:",
+        "",
+    }
+    for _, prefix in ipairs({"shell", "tool", "skill", "profile", "foundation"}) do
+        if routes[prefix] then
+            lines[#lines + 1] = string.format("  @%-12s — %s", prefix, descriptions[prefix] or "(available)")
+        end
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Each @command MUST be on its own line, NOT inside ``` code blocks."
+    lines[#lines + 1] = "When your task is complete, respond normally without @commands."
+    return table.concat(lines, "\n")
+end
+
+--- Execute a routed @command via RPC to the target component.
+local function dispatch_route(route, body)
+    local operation, payload
+    if route.dispatch == "passthrough" then
+        operation = "input"
+        payload = { message = body }
+    else
+        local op, args = body:match("^(%S+)%s+(.+)$")
+        if op then
+            operation = op:lower()
+            payload = { message = args, name = args }
+        else
+            operation = body ~= "" and body:lower() or "status"
+            payload = {}
+        end
+    end
+
+    local resp = orcs.request(route.target, operation, payload)
     if resp and resp.success then
+        -- Operation-dispatch targets don't call orcs.output; display result here
+        if route.dispatch ~= "passthrough" then
+            local data = resp.data
+            if type(data) == "table" then
+                data = orcs.json_encode(data)
+            end
+            orcs.output(tostring(data or "ok"))
+        end
         orcs.emit_event("Extension", "route_response", {
-            route_type = "rpc",
             target = route.target,
+            operation = operation,
             message = body,
         })
-        orcs.log("debug", "dispatch_rpc: emitted route_response event for " .. route.target)
         return {
             success = true,
             data = {
@@ -306,35 +329,6 @@ local function dispatch_rpc(route, body)
         }
     else
         local err = (resp and resp.error) or "request failed"
-        orcs.output("[AgentMgr] @" .. route.target .. " error: " .. err, "error")
-        return { success = false, error = err }
-    end
-end
-
---- Execute a child-worker route.
-local function dispatch_child(route, body)
-    local result = orcs.send_to_child(route.target, { message = body, operation = "input", payload = { message = body } })
-    if result and result.ok then
-        local data = result.result or {}
-        local response = data.response or data.result
-        if type(response) == "table" then
-            response = orcs.json_encode(response)
-        end
-        orcs.emit_event("Extension", "route_response", {
-            route_type = "child",
-            target = route.target,
-            message = body,
-        })
-        orcs.log("debug", "dispatch_child: emitted route_response event for " .. route.target)
-        return {
-            success = true,
-            data = {
-                response = response or "ok",
-                source = route.target,
-            },
-        }
-    else
-        local err = (result and result.error) or "unknown"
         orcs.output("[AgentMgr] @" .. route.target .. " error: " .. err, "error")
         return { success = false, error = err }
     end
@@ -462,6 +456,9 @@ local function dispatch_llm(message)
         placement = "both"
     end
 
+    -- Build @command reference for LLM instructions
+    local command_reference = build_command_reference()
+
     local session_id = nil
     local last_response = nil
     local last_response_shown = false
@@ -478,8 +475,9 @@ local function dispatch_llm(message)
             -- Continuation: llm-worker will skip prompt assembly and just --resume
             input.session_id = session_id
         else
-            -- First call: include history for full prompt assembly
+            -- First call: include history and @command reference for full prompt assembly
             input.history_context = history_context
+            input.command_reference = command_reference
         end
 
         local result = orcs.send_to_child("llm-worker", input)
@@ -534,12 +532,7 @@ local function dispatch_llm(message)
         for _, cmd in ipairs(commands) do
             orcs.log("info", string.format("ReAct: @%s %s", cmd.prefix, utf8_truncate(cmd.body, 80)))
             local route = routes[cmd.prefix]
-            local cmd_result
-            if route.type == "rpc" then
-                cmd_result = dispatch_rpc(route, cmd.body)
-            else
-                cmd_result = dispatch_child(route, cmd.body)
-            end
+            local cmd_result = dispatch_route(route, cmd.body)
             cmd_results[#cmd_results + 1] = {
                 prefix = cmd.prefix,
                 success = cmd_result.success,
@@ -607,11 +600,7 @@ return {
             local route = routes[prefix]
             if route then
                 orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. route.target)
-                if route.type == "rpc" then
-                    return dispatch_rpc(route, body)
-                else
-                    return dispatch_child(route, body)
-                end
+                return dispatch_route(route, body)
             else
                 -- Unknown @prefix: pass full message to llm-worker as-is
                 orcs.log("debug", "AgentMgr: unknown prefix @" .. prefix .. ", falling through to llm")
@@ -653,17 +642,6 @@ return {
             orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
         end
 
-        -- Spawn skill worker (internal service)
-        local skill = orcs.spawn_child({
-            id = "skill-worker",
-            script = skill_worker_script,
-        })
-        if skill.ok then
-            orcs.log("info", "spawned skill-worker")
-        else
-            orcs.log("error", "failed to spawn skill-worker: " .. (skill.error or ""))
-        end
-
         -- Register observability hook: log routing outcomes
         if orcs.hook then
             local ok, err = pcall(function()
@@ -686,7 +664,7 @@ return {
             end
         end
 
-        orcs.output("[AgentMgr] Ready (workers: llm, skill)")
+        orcs.output("[AgentMgr] Ready (worker: llm)")
         orcs.log("info", "agent_mgr initialized")
     end,
 

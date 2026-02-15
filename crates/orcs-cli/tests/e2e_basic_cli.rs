@@ -69,7 +69,7 @@ fn agent_mgr_ready_with_workers() {
     cmd.write_stdin("q\n")
         .assert()
         .success()
-        .stdout(contains("[AgentMgr] Ready (workers: llm, skill)"));
+        .stdout(contains("[AgentMgr] Ready (worker: llm)"));
 }
 
 // ─── Worker Spawning ─────────────────────────────────────────────
@@ -81,8 +81,7 @@ fn agent_mgr_spawns_workers() {
         .write_stdin("q\n")
         .assert()
         .success()
-        .stdout(contains("spawned llm-worker"))
-        .stdout(contains("spawned skill-worker"));
+        .stdout(contains("spawned llm-worker"));
 }
 
 // ─── Component Routes ───────────────────────────────────────────
