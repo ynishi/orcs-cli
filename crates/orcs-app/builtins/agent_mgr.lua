@@ -29,6 +29,29 @@ return {
 
     run = function(input)
         local message = input.message or ""
+
+        -- Session resumption: skip full prompt assembly, send message directly
+        if input.session_id and input.session_id ~= "" then
+            orcs.log("debug", "llm-worker: resuming session " .. input.session_id:sub(1, 20))
+            local llm_resp = orcs.llm(message, { session_id = input.session_id })
+            if llm_resp and llm_resp.ok then
+                return {
+                    success = true,
+                    data = {
+                        response = llm_resp.content,
+                        session_id = llm_resp.session_id,
+                        num_turns = llm_resp.num_turns,
+                        cost = llm_resp.cost,
+                        source = "llm-worker",
+                    },
+                }
+            else
+                local err = (llm_resp and llm_resp.error) or "llm resume failed"
+                return { success = false, error = err }
+            end
+        end
+
+        -- First call: full prompt assembly
         local history_context = input.history_context or ""
         local placement = input.prompt_placement or "both"
 
@@ -157,13 +180,18 @@ return {
             #f_system, #f_task, #f_guard, #console_block
         ))
 
-        -- 5. Call Claude Code CLI (headless)
+        -- 5. Call Claude Code CLI (headless, JSON output)
+        -- Note: session_id is handled by the early-return path above;
+        -- this path is always a fresh first call.
         local llm_resp = orcs.llm(prompt)
         if llm_resp and llm_resp.ok then
             return {
                 success = true,
                 data = {
                     response = llm_resp.content,
+                    session_id = llm_resp.session_id,
+                    num_turns = llm_resp.num_turns,
+                    cost = llm_resp.cost,
                     source = "llm-worker",
                 },
             }
@@ -225,6 +253,7 @@ return {
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
+local MAX_REACT_ITERATIONS = 5  -- Max tool-use loop iterations before returning
 
 -- Component settings (populated from config in init())
 local component_settings = {}
@@ -311,6 +340,50 @@ local function dispatch_child(route, body)
     end
 end
 
+--- Extract @commands from LLM response text.
+--- Only matches lines starting with a registered route prefix to avoid false positives.
+--- Lines inside fenced code blocks (```) are skipped to prevent accidental execution
+--- of example commands in LLM output.
+--- Returns a list of {prefix=..., body=...} tables.
+local function extract_commands(text)
+    local commands = {}
+    local in_code_block = false
+    for line in text:gmatch("[^\n]+") do
+        local trimmed = line:match("^%s*(.-)%s*$")
+        -- Toggle code block state on fence lines (``` with optional language tag)
+        if trimmed:match("^```") then
+            in_code_block = not in_code_block
+        elseif not in_code_block then
+            local prefix, body = trimmed:match("^@(%w+)%s+(.+)$")
+            if not prefix then
+                prefix = trimmed:match("^@(%w+)%s*$")
+                body = ""
+            end
+            if prefix then
+                local p = prefix:lower()
+                if routes[p] then
+                    commands[#commands + 1] = { prefix = p, body = body or "" }
+                end
+            end
+        end
+    end
+    return commands
+end
+
+--- Format command execution results into text for LLM continuation.
+local function format_command_results(results)
+    local parts = {}
+    for _, r in ipairs(results) do
+        local status = r.success and "OK" or "ERROR"
+        local content = r.response or r.error or "(no output)"
+        if type(content) == "table" then
+            content = orcs.json_encode(content)
+        end
+        parts[#parts + 1] = string.format("[@%s result: %s]\n%s", r.prefix, status, tostring(content))
+    end
+    return table.concat(parts, "\n\n")
+end
+
 --- Truncate a string to at most max_bytes bytes without splitting multi-byte
 --- UTF-8 characters.  Plain string.sub() can cut in the middle of a
 --- multi-byte sequence, producing invalid UTF-8 that Rust's String rejects.
@@ -356,7 +429,14 @@ local function fetch_history_context()
         local payload = entry.payload or {}
         local text = payload.message or payload.content or payload.response
         if text and type(text) == "string" and text ~= "" then
-            local src = entry.source or "unknown"
+            -- source is a ComponentId table { namespace, name }, not a string
+            local raw_src = entry.source
+            local src
+            if type(raw_src) == "table" then
+                src = raw_src.name or raw_src.namespace or "unknown"
+            else
+                src = tostring(raw_src or "unknown")
+            end
             lines[#lines + 1] = string.format("- [%s] %s", src, utf8_truncate(text, 200))
         end
     end
@@ -366,7 +446,11 @@ local function fetch_history_context()
     return ""
 end
 
---- Default route: send to llm-worker.
+--- Default route: send to llm-worker with ReAct loop.
+--- On each iteration, the LLM response is scanned for @-prefixed commands
+--- directed at registered routes. Commands are executed and results fed back
+--- via --resume (session continuity) until the LLM produces a final answer
+--- (no more commands) or the iteration limit is reached.
 local function dispatch_llm(message)
     -- Gather history in parent context (emitter function, unavailable to children)
     local history_context = fetch_history_context()
@@ -378,40 +462,121 @@ local function dispatch_llm(message)
         placement = "both"
     end
 
-    local result = orcs.send_to_child("llm-worker", {
-        message = message,
-        history_context = history_context,
-        prompt_placement = placement,
-    })
-    if result and result.ok then
+    local session_id = nil
+    local last_response = nil
+    local last_response_shown = false
+    local total_cost = 0
+    local current_message = message
+
+    for iteration = 1, MAX_REACT_ITERATIONS do
+        -- Build input for llm-worker
+        local input = {
+            message = current_message,
+            prompt_placement = placement,
+        }
+        if session_id then
+            -- Continuation: llm-worker will skip prompt assembly and just --resume
+            input.session_id = session_id
+        else
+            -- First call: include history for full prompt assembly
+            input.history_context = history_context
+        end
+
+        local result = orcs.send_to_child("llm-worker", input)
+        if not result or not result.ok then
+            local err = (result and result.error) or "unknown"
+            orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
+            return { success = false, error = err }
+        end
+
         local data = result.result or {}
-        -- Worker returns {response=..., source=...} on success,
-        -- {error=..., source=...} on failure.
         if data.error then
             orcs.output_with_level("[AgentMgr] Error: " .. data.error, "error")
             return { success = false, error = data.error }
         end
+
         local response = data.response or "no response"
+        session_id = data.session_id
+        total_cost = total_cost + (data.cost or 0)
+        last_response = response
+        last_response_shown = false
+
+        -- Scan for @commands targeting registered routes
+        local commands = extract_commands(response)
+        if #commands == 0 then
+            -- Final answer: no more commands to execute
+            break
+        end
+
+        -- Show intermediate LLM response (user sees the reasoning)
         orcs.output(response)
-        orcs.emit_event("Extension", "llm_response", {
-            message = message,
-            response = response,
-            source = data.source or "llm-worker",
-        })
-        orcs.log("debug", "dispatch_llm: emitted llm_response event")
-        return {
-            success = true,
-            data = {
-                message = message,
-                response = response,
-                source = data.source or "llm-worker",
-            },
-        }
-    else
-        local err = (result and result.error) or "unknown"
-        orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
-        return { success = false, error = err }
+        last_response_shown = true
+
+        -- Guard: cannot continue without session_id
+        if not session_id then
+            orcs.log("warn", "ReAct: no session_id returned, cannot resume — stopping loop")
+            break
+        end
+
+        -- Guard: reached iteration limit
+        if iteration == MAX_REACT_ITERATIONS then
+            orcs.log("warn", "ReAct: reached max iterations (" .. MAX_REACT_ITERATIONS .. "), stopping")
+            break
+        end
+
+        orcs.log("info", string.format(
+            "ReAct iteration %d/%d: executing %d command(s)",
+            iteration, MAX_REACT_ITERATIONS, #commands
+        ))
+
+        -- Execute all extracted commands
+        local cmd_results = {}
+        for _, cmd in ipairs(commands) do
+            orcs.log("info", string.format("ReAct: @%s %s", cmd.prefix, utf8_truncate(cmd.body, 80)))
+            local route = routes[cmd.prefix]
+            local cmd_result
+            if route.type == "rpc" then
+                cmd_result = dispatch_rpc(route, cmd.body)
+            else
+                cmd_result = dispatch_child(route, cmd.body)
+            end
+            cmd_results[#cmd_results + 1] = {
+                prefix = cmd.prefix,
+                success = cmd_result.success,
+                response = cmd_result.data and cmd_result.data.response,
+                error = cmd_result.error,
+            }
+        end
+
+        -- Prepare continuation message with command results
+        current_message = format_command_results(cmd_results)
     end
+
+    -- Output final LLM response (skip if already shown as intermediate)
+    if not last_response_shown then
+        orcs.output(last_response)
+    end
+    orcs.emit_event("Extension", "llm_response", {
+        message = message,
+        response = last_response,
+        source = "llm-worker",
+        cost = total_cost,
+        session_id = session_id,
+    })
+    orcs.log("debug", string.format(
+        "dispatch_llm: completed (cost=%.4f, session=%s)",
+        total_cost or 0, session_id or "none"
+    ))
+    return {
+        success = true,
+        data = {
+            message = message,
+            response = last_response,
+            source = "llm-worker",
+            cost = total_cost,
+            session_id = session_id,
+        },
+    }
 end
 
 -- === Component Definition ===

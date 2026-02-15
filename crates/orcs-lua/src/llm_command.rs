@@ -18,12 +18,14 @@ use mlua::{Lua, RegistryKey, Table};
 /// Lua registry key for the LLM handler function.
 struct LlmHandlerKey(RegistryKey);
 
-/// Default LLM handler: spawns `claude -p` via `orcs.exec` (single-shot).
+/// Default LLM handler: spawns `claude -p --output-format json` via `orcs.exec`.
 ///
-/// Conversation history is managed by the Framework (Board / agent_mgr),
-/// not by the CLI's session mechanism. Each call is stateless.
+/// Returns structured response parsed from Claude Code CLI JSON output:
+///   `{ ok, content, session_id, num_turns, cost, subtype }`
 ///
-/// Supports opts: `model`.
+/// When `opts.session_id` is set, resumes a previous session via `--resume`.
+///
+/// Supports opts: `model`, `session_id`, `system_prompt`, `max_turns`.
 /// Removes Claude Code nested-session guard env vars before execution.
 const DEFAULT_HANDLER_LUA: &str = r#"
 local function shell_escape(s)
@@ -37,6 +39,7 @@ return function(prompt, opts)
     local cmd_parts = {
         "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT 2>/dev/null;",
         "claude", "-p",
+        "--output-format", "json",
     }
 
     if opts.model and opts.model ~= "" then
@@ -44,20 +47,62 @@ return function(prompt, opts)
         cmd_parts[#cmd_parts + 1] = shell_escape(opts.model)
     end
 
+    if opts.session_id and opts.session_id ~= "" then
+        cmd_parts[#cmd_parts + 1] = "--resume"
+        cmd_parts[#cmd_parts + 1] = shell_escape(opts.session_id)
+    end
+
+    if opts.system_prompt and opts.system_prompt ~= "" then
+        cmd_parts[#cmd_parts + 1] = "--system-prompt"
+        cmd_parts[#cmd_parts + 1] = shell_escape(opts.system_prompt)
+    end
+
+    if opts.max_turns then
+        cmd_parts[#cmd_parts + 1] = "--max-turns"
+        cmd_parts[#cmd_parts + 1] = tostring(opts.max_turns)
+    end
+
     cmd_parts[#cmd_parts + 1] = shell_escape(prompt)
 
     local cmd = table.concat(cmd_parts, " ")
-    orcs.log("debug", "llm-handler: " .. cmd:sub(1, 200))
+    orcs.log("debug", "llm-handler: " .. cmd:sub(1, 300))
 
     local result = orcs.exec(cmd)
 
-    if result.ok then
-        return { ok = true, content = result.stdout }
-    else
+    if not result.ok then
         local err = result.stderr
         if err == "" then err = result.stdout end
         if err == "" then err = "claude CLI exited with code " .. tostring(result.code) end
         return { ok = false, error = err }
+    end
+
+    -- Parse JSON response from --output-format json
+    local raw = result.stdout
+    local parse_ok, parsed = pcall(orcs.json_parse, raw)
+    if not parse_ok or not parsed then
+        -- Fallback: treat raw stdout as plain text (pre-JSON handler compat)
+        return { ok = true, content = raw }
+    end
+
+    if parsed.subtype == "success" then
+        return {
+            ok = true,
+            content = parsed.result or "",
+            session_id = parsed.session_id,
+            num_turns = parsed.num_turns,
+            cost = parsed.total_cost_usd,
+            subtype = parsed.subtype,
+        }
+    else
+        -- Error subtypes: error_max_budget_usd, error_tool, etc.
+        local err = parsed.result or parsed.subtype or "unknown error"
+        return {
+            ok = false,
+            error = err,
+            session_id = parsed.session_id,
+            cost = parsed.total_cost_usd,
+            subtype = parsed.subtype,
+        }
     end
 end
 "#;
@@ -112,32 +157,62 @@ mod tests {
     use super::*;
     use crate::orcs_helpers::ensure_orcs_table;
 
-    /// Helper: set up a minimal Lua env with orcs table and a fake orcs.exec/orcs.log.
-    fn setup_lua_with_fake_exec() -> Lua {
-        let lua = Lua::new();
-        let orcs = ensure_orcs_table(&lua).expect("create orcs table");
-
-        // Fake orcs.log (no-op)
+    /// Register a no-op orcs.log and orcs.json_parse on the given orcs table.
+    fn register_test_helpers(lua: &Lua, orcs: &Table) {
         let log_fn = lua
             .create_function(|_, (_level, _msg): (String, String)| Ok(()))
             .expect("create log fn");
         orcs.set("log", log_fn).expect("set log");
 
-        // Fake orcs.exec that returns { ok=true, stdout=..., stderr="", code=0 }
+        // orcs.json_parse — needed by the default handler
+        let json_parse_fn = lua
+            .create_function(|lua, raw: String| {
+                let val: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|_| mlua::Error::RuntimeError("bad json".into()))?;
+                mlua::LuaSerdeExt::to_value(lua, &val)
+            })
+            .expect("create json_parse fn");
+        orcs.set("json_parse", json_parse_fn)
+            .expect("set json_parse");
+    }
+
+    /// Fake orcs.exec that returns raw stdout (caller controls JSON content).
+    fn register_fake_exec_raw(lua: &Lua, orcs: &Table, stdout: &str) {
+        let s = stdout.to_string();
         let exec_fn = lua
-            .create_function(|lua, cmd: String| {
+            .create_function(move |lua, _cmd: String| {
                 let result = lua.create_table()?;
                 result.set("ok", true)?;
-                result.set("stdout", format!("response to: {}", cmd))?;
+                result.set("stdout", s.as_str())?;
                 result.set("stderr", "")?;
                 result.set("code", 0)?;
                 Ok(result)
             })
             .expect("create exec fn");
         orcs.set("exec", exec_fn).expect("set exec");
-
-        lua
     }
+
+    /// Fake orcs.exec that captures the command and returns JSON.
+    fn register_fake_exec_capture(lua: &Lua, orcs: &Table, json_response: &str) {
+        let json_resp = json_response.to_string();
+        let exec_fn = lua
+            .create_function(move |lua, cmd: String| {
+                // Store the command for later inspection
+                let orcs_t: Table = lua.globals().get("orcs").expect("get orcs");
+                orcs_t.set("_last_cmd", cmd).expect("set _last_cmd");
+                let result = lua.create_table()?;
+                result.set("ok", true)?;
+                result.set("stdout", json_resp.as_str())?;
+                result.set("stderr", "")?;
+                result.set("code", 0)?;
+                Ok(result)
+            })
+            .expect("create exec fn");
+        orcs.set("exec", exec_fn).expect("set exec");
+    }
+
+    const FAKE_SUCCESS_JSON: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Hello world.","session_id":"abc-123","total_cost_usd":0.01}"#;
+    const FAKE_ERROR_JSON: &str = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":false,"num_turns":0,"result":null,"session_id":"def-456","total_cost_usd":0.50}"#;
 
     #[test]
     fn set_llm_handler_and_call() {
@@ -163,38 +238,133 @@ mod tests {
     }
 
     #[test]
-    fn default_handler_calls_claude_cli() {
-        let lua = setup_lua_with_fake_exec();
+    fn default_handler_parses_json_success() {
+        let lua = Lua::new();
         let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        register_fake_exec_raw(&lua, &orcs, FAKE_SUCCESS_JSON);
         register_llm_functions(&lua, &orcs).expect("register llm functions");
 
         let result =
             call_llm_handler(&lua, "test prompt".into(), None).expect("call default handler");
-        assert_eq!(result.get::<bool>("ok").expect("get ok"), true);
-        let content: String = result.get("content").expect("get content");
-        assert!(
-            content.contains("claude") && content.contains("-p"),
-            "default handler should call claude -p, got: {}",
-            content
+        assert_eq!(result.get::<bool>("ok").expect("ok"), true);
+        assert_eq!(
+            result.get::<String>("content").expect("content"),
+            "Hello world."
+        );
+        assert_eq!(
+            result.get::<String>("session_id").expect("session_id"),
+            "abc-123"
+        );
+        assert_eq!(result.get::<i64>("num_turns").expect("num_turns"), 1);
+        assert_eq!(result.get::<String>("subtype").expect("subtype"), "success");
+    }
+
+    #[test]
+    fn default_handler_parses_json_error_subtype() {
+        let lua = Lua::new();
+        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        register_fake_exec_raw(&lua, &orcs, FAKE_ERROR_JSON);
+        register_llm_functions(&lua, &orcs).expect("register llm functions");
+
+        let result = call_llm_handler(&lua, "test".into(), None).expect("call handler");
+        assert_eq!(result.get::<bool>("ok").expect("ok"), false);
+        assert_eq!(
+            result.get::<String>("subtype").expect("subtype"),
+            "error_max_budget_usd"
+        );
+        assert_eq!(
+            result.get::<String>("session_id").expect("session_id"),
+            "def-456"
         );
     }
 
     #[test]
-    fn default_handler_with_model() {
-        let lua = setup_lua_with_fake_exec();
+    fn default_handler_with_model_flag() {
+        let lua = Lua::new();
         let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        register_fake_exec_capture(&lua, &orcs, FAKE_SUCCESS_JSON);
         register_llm_functions(&lua, &orcs).expect("register llm functions");
 
         let opts = lua.create_table().expect("create opts");
         opts.set("model", "claude-haiku-4-5-20251001")
             .expect("set model");
 
-        let result = call_llm_handler(&lua, "hi".into(), Some(opts)).expect("call with model");
-        let content: String = result.get("content").expect("get content");
+        call_llm_handler(&lua, "hi".into(), Some(opts)).expect("call with model");
+        let cmd: String = lua
+            .globals()
+            .get::<Table>("orcs")
+            .expect("orcs")
+            .get("_last_cmd")
+            .expect("_last_cmd");
         assert!(
-            content.contains("--model") && content.contains("claude-haiku-4-5-20251001"),
-            "should pass --model flag, got: {}",
-            content
+            cmd.contains("--model") && cmd.contains("claude-haiku-4-5-20251001"),
+            "should pass --model flag, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn default_handler_with_session_resume() {
+        let lua = Lua::new();
+        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        register_fake_exec_capture(&lua, &orcs, FAKE_SUCCESS_JSON);
+        register_llm_functions(&lua, &orcs).expect("register llm functions");
+
+        let opts = lua.create_table().expect("create opts");
+        opts.set("session_id", "prev-session-42")
+            .expect("set session_id");
+
+        call_llm_handler(&lua, "continue".into(), Some(opts)).expect("call with resume");
+        let cmd: String = lua
+            .globals()
+            .get::<Table>("orcs")
+            .expect("orcs")
+            .get("_last_cmd")
+            .expect("_last_cmd");
+        assert!(
+            cmd.contains("--resume") && cmd.contains("prev-session-42"),
+            "should pass --resume flag, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn default_handler_includes_output_format_json() {
+        let lua = Lua::new();
+        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        register_fake_exec_capture(&lua, &orcs, FAKE_SUCCESS_JSON);
+        register_llm_functions(&lua, &orcs).expect("register llm functions");
+
+        call_llm_handler(&lua, "hi".into(), None).expect("call handler");
+        let cmd: String = lua
+            .globals()
+            .get::<Table>("orcs")
+            .expect("orcs")
+            .get("_last_cmd")
+            .expect("_last_cmd");
+        assert!(
+            cmd.contains("--output-format") && cmd.contains("json"),
+            "should include --output-format json, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn default_handler_fallback_plain_text() {
+        let lua = Lua::new();
+        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
+        register_test_helpers(&lua, &orcs);
+        // Return non-JSON text (fallback path)
+        register_fake_exec_raw(&lua, &orcs, "plain text response");
+        register_llm_functions(&lua, &orcs).expect("register llm functions");
+
+        let result = call_llm_handler(&lua, "test".into(), None).expect("call handler");
+        assert_eq!(result.get::<bool>("ok").expect("ok"), true);
+        assert_eq!(
+            result.get::<String>("content").expect("content"),
+            "plain text response"
         );
     }
 
@@ -236,12 +406,7 @@ mod tests {
     fn default_handler_exec_failure() {
         let lua = Lua::new();
         let orcs = ensure_orcs_table(&lua).expect("create orcs table");
-
-        // Fake orcs.log
-        let log_fn = lua
-            .create_function(|_, (_level, _msg): (String, String)| Ok(()))
-            .expect("create log fn");
-        orcs.set("log", log_fn).expect("set log");
+        register_test_helpers(&lua, &orcs);
 
         // Fake orcs.exec that always fails
         let exec_fn = lua
