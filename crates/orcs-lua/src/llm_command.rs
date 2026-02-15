@@ -18,9 +18,12 @@ use mlua::{Lua, RegistryKey, Table};
 /// Lua registry key for the LLM handler function.
 struct LlmHandlerKey(RegistryKey);
 
-/// Default LLM handler: spawns `claude -p` via `orcs.exec`.
+/// Default LLM handler: spawns `claude -p` via `orcs.exec` (single-shot).
 ///
-/// Supports opts: `model`, `new_session`, `resume`.
+/// Conversation history is managed by the Framework (Board / agent_mgr),
+/// not by the CLI's session mechanism. Each call is stateless.
+///
+/// Supports opts: `model`.
 /// Removes Claude Code nested-session guard env vars before execution.
 const DEFAULT_HANDLER_LUA: &str = r#"
 local function shell_escape(s)
@@ -35,25 +38,10 @@ return function(prompt, opts)
         "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT 2>/dev/null;",
         "claude", "-p",
     }
-    local session_id = nil
 
     if opts.model and opts.model ~= "" then
         cmd_parts[#cmd_parts + 1] = "--model"
         cmd_parts[#cmd_parts + 1] = shell_escape(opts.model)
-    end
-
-    if opts.resume and opts.resume ~= "" then
-        cmd_parts[#cmd_parts + 1] = "--resume"
-        cmd_parts[#cmd_parts + 1] = shell_escape(opts.resume)
-    elseif opts.new_session then
-        local uuid_result = orcs.exec("uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fallback-" .. tostring(os.time()))
-        if uuid_result.ok then
-            session_id = uuid_result.stdout:gsub("%s+$", "")
-        end
-        if session_id and session_id ~= "" then
-            cmd_parts[#cmd_parts + 1] = "--session-id"
-            cmd_parts[#cmd_parts + 1] = shell_escape(session_id)
-        end
     end
 
     cmd_parts[#cmd_parts + 1] = shell_escape(prompt)
@@ -64,11 +52,7 @@ return function(prompt, opts)
     local result = orcs.exec(cmd)
 
     if result.ok then
-        return {
-            ok = true,
-            content = result.stdout,
-            session_id = session_id,
-        }
+        return { ok = true, content = result.stdout }
     else
         local err = result.stderr
         if err == "" then err = result.stdout end
@@ -143,17 +127,10 @@ mod tests {
         let exec_fn = lua
             .create_function(|lua, cmd: String| {
                 let result = lua.create_table()?;
-                if cmd.contains("uuidgen") {
-                    result.set("ok", true)?;
-                    result.set("stdout", "test-uuid-1234\n")?;
-                    result.set("stderr", "")?;
-                    result.set("code", 0)?;
-                } else {
-                    result.set("ok", true)?;
-                    result.set("stdout", format!("response to: {}", cmd))?;
-                    result.set("stderr", "")?;
-                    result.set("code", 0)?;
-                }
+                result.set("ok", true)?;
+                result.set("stdout", format!("response to: {}", cmd))?;
+                result.set("stderr", "")?;
+                result.set("code", 0)?;
                 Ok(result)
             })
             .expect("create exec fn");
@@ -218,50 +195,6 @@ mod tests {
             content.contains("--model") && content.contains("claude-haiku-4-5-20251001"),
             "should pass --model flag, got: {}",
             content
-        );
-    }
-
-    #[test]
-    fn default_handler_with_resume() {
-        let lua = setup_lua_with_fake_exec();
-        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
-        register_llm_functions(&lua, &orcs).expect("register llm functions");
-
-        let opts = lua.create_table().expect("create opts");
-        opts.set("resume", "abc-123").expect("set resume");
-
-        let result =
-            call_llm_handler(&lua, "continue".into(), Some(opts)).expect("call with resume");
-        let content: String = result.get("content").expect("get content");
-        assert!(
-            content.contains("--resume") && content.contains("abc-123"),
-            "should pass --resume flag, got: {}",
-            content
-        );
-    }
-
-    #[test]
-    fn default_handler_with_new_session() {
-        let lua = setup_lua_with_fake_exec();
-        let orcs = ensure_orcs_table(&lua).expect("get orcs table");
-        register_llm_functions(&lua, &orcs).expect("register llm functions");
-
-        let opts = lua.create_table().expect("create opts");
-        opts.set("new_session", true).expect("set new_session");
-
-        let result =
-            call_llm_handler(&lua, "start".into(), Some(opts)).expect("call with new_session");
-        let content: String = result.get("content").expect("get content");
-        assert!(
-            content.contains("--session-id"),
-            "should pass --session-id flag, got: {}",
-            content
-        );
-        let sid: String = result.get("session_id").expect("get session_id");
-        assert!(
-            sid.contains("test-uuid-1234"),
-            "session_id should come from uuidgen, got: {}",
-            sid
         );
     }
 
