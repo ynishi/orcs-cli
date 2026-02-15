@@ -598,7 +598,7 @@ return {
             return { success = false, error = "empty message" }
         end
 
-        orcs.log("info", "AgentMgr received: " .. message:sub(1, 50))
+        orcs.log("info", "AgentMgr received: " .. utf8_truncate(message, 50))
 
         -- Parse @prefix routing
         local prefix, body = parse_route(message)

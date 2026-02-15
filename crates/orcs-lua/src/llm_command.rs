@@ -33,6 +33,27 @@ local function shell_escape(s)
     return "'" .. tostring(s):gsub("'", "'\\''" ) .. "'"
 end
 
+local function safe_sub(s, max)
+    if #s <= max then return s end
+    local pos = max
+    while pos > 0 do
+        local b = string.byte(s, pos)
+        if b < 0x80 or b >= 0xC0 then break end
+        pos = pos - 1
+    end
+    if pos > 0 then
+        local b = string.byte(s, pos)
+        local clen = 1
+        if     b >= 0xF0 then clen = 4
+        elseif b >= 0xE0 then clen = 3
+        elseif b >= 0xC0 then clen = 2
+        end
+        if pos + clen - 1 > max then return s:sub(1, pos - 1) end
+        return s:sub(1, pos + clen - 1)
+    end
+    return ""
+end
+
 return function(prompt, opts)
     opts = opts or {}
 
@@ -65,7 +86,7 @@ return function(prompt, opts)
     cmd_parts[#cmd_parts + 1] = shell_escape(prompt)
 
     local cmd = table.concat(cmd_parts, " ")
-    orcs.log("debug", "llm-handler: " .. cmd:sub(1, 300))
+    orcs.log("debug", "llm-handler: " .. safe_sub(cmd, 300))
 
     local result = orcs.exec(cmd)
 
