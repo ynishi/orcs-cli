@@ -915,6 +915,38 @@ fn register_context_functions(
         })?;
     orcs_table.set("send_to_child", send_to_child_fn)?;
 
+    // orcs.send_to_child_async(child_id, message) -> { ok, error? }
+    //
+    // Fire-and-forget: starts the child in a background thread and returns
+    // immediately. The child's output flows through emit_output automatically.
+    let send_to_child_async_fn =
+        lua.create_function(|lua, (child_id, message): (String, mlua::Value)| {
+            let wrapper = lua
+                .app_data_ref::<ContextWrapper>()
+                .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+            let ctx = wrapper
+                .0
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+
+            let input = crate::types::lua_to_json(message, lua)?;
+
+            let result_table = lua.create_table()?;
+            match ctx.send_to_child_async(&child_id, input) {
+                Ok(()) => {
+                    result_table.set("ok", true)?;
+                }
+                Err(e) => {
+                    result_table.set("ok", false)?;
+                    result_table.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result_table)
+        })?;
+    orcs_table.set("send_to_child_async", send_to_child_async_fn)?;
+
     // orcs.send_to_children_batch(ids, inputs) -> [ { ok, result?, error? }, ... ]
     //
     // ids:    Lua table (array) of child ID strings

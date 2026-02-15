@@ -297,6 +297,31 @@ pub(super) fn register(
         })?;
     orcs_table.set("send_to_child", send_to_child_fn)?;
 
+    // orcs.send_to_child_async(child_id, message) -> { ok, error? }
+    let ctx_clone = Arc::clone(&ctx);
+    let send_to_child_async_fn =
+        lua.create_function(move |lua, (child_id, message): (String, mlua::Value)| {
+            let ctx_guard = ctx_clone
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            let input = lua_to_json(message, lua)?;
+
+            let result_table = lua.create_table()?;
+            match ctx_guard.send_to_child_async(&child_id, input) {
+                Ok(()) => {
+                    result_table.set("ok", true)?;
+                }
+                Err(e) => {
+                    result_table.set("ok", false)?;
+                    result_table.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result_table)
+        })?;
+    orcs_table.set("send_to_child_async", send_to_child_async_fn)?;
+
     // orcs.send_to_children_batch(ids, inputs) -> [ { ok, result?, error? }, ... ]
     //
     // ids:    Lua table (array) of child ID strings

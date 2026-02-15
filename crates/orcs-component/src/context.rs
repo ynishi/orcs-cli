@@ -419,6 +419,39 @@ pub trait ChildContext: Send + Sync + Debug {
         input: serde_json::Value,
     ) -> Result<ChildResult, RunError>;
 
+    /// Sends input to a child asynchronously (fire-and-forget).
+    ///
+    /// Unlike [`send_to_child`], this method returns immediately without
+    /// waiting for the child to complete. The child runs in a background
+    /// thread and its output flows through `emit_output` automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_id` - The child's ID
+    /// * `input` - Input data to pass to the child
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the child was found and background execution started.
+    ///
+    /// # Errors
+    ///
+    /// - [`RunError::NotFound`] if child doesn't exist
+    /// - [`RunError::ExecutionFailed`] if spawner lock fails
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an error indicating async send is not supported.
+    fn send_to_child_async(
+        &self,
+        _child_id: &str,
+        _input: serde_json::Value,
+    ) -> Result<(), RunError> {
+        Err(RunError::ExecutionFailed(
+            "send_to_child_async not supported by this context".into(),
+        ))
+    }
+
     /// Sends input to multiple children in parallel and returns all results.
     ///
     /// Each `(child_id, input)` pair is executed concurrently using OS threads.
@@ -688,6 +721,23 @@ pub trait AsyncChildContext: Send + Sync + Debug {
         child_id: &str,
         input: serde_json::Value,
     ) -> Result<ChildResult, RunError>;
+
+    /// Sends input to a child asynchronously (fire-and-forget).
+    ///
+    /// Returns immediately. The child runs in a background thread.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an error indicating async send is not supported.
+    fn send_to_child_async(
+        &self,
+        _child_id: &str,
+        _input: serde_json::Value,
+    ) -> Result<(), RunError> {
+        Err(RunError::ExecutionFailed(
+            "send_to_child_async not supported by this context".into(),
+        ))
+    }
 
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn AsyncChildContext>;

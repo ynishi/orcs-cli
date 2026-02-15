@@ -665,6 +665,44 @@ impl ChildContext for ChildContextImpl {
         spawner.run_child(child_id, input)
     }
 
+    fn send_to_child_async(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<(), RunError> {
+        // Brief lock to get child Arc, then release.
+        let child_arc = {
+            let spawner = self
+                .spawner
+                .lock()
+                .map_err(|e| RunError::ExecutionFailed(format!("spawner lock failed: {}", e)))?;
+            spawner
+                .get_child_arc(child_id)
+                .ok_or_else(|| RunError::NotFound(child_id.to_string()))?
+        };
+        // spawner lock released
+
+        let child_id_owned = child_id.to_string();
+        std::thread::spawn(move || match child_arc.lock() {
+            Ok(mut child) => {
+                if let orcs_component::ChildResult::Err(e) = child.run(input) {
+                    tracing::warn!(
+                        child_id = %child_id_owned,
+                        "send_to_child_async: child returned error: {}", e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    child_id = %child_id_owned,
+                    "send_to_child_async: child lock failed: {}", e
+                );
+            }
+        });
+
+        Ok(())
+    }
+
     fn send_to_children_batch(
         &self,
         requests: Vec<(String, serde_json::Value)>,
@@ -984,6 +1022,42 @@ impl AsyncChildContext for ChildContextImpl {
         spawner.run_child(child_id, input)
     }
 
+    fn send_to_child_async(
+        &self,
+        child_id: &str,
+        input: serde_json::Value,
+    ) -> Result<(), RunError> {
+        let child_arc = {
+            let spawner = self
+                .spawner
+                .lock()
+                .map_err(|e| RunError::ExecutionFailed(format!("spawner lock failed: {}", e)))?;
+            spawner
+                .get_child_arc(child_id)
+                .ok_or_else(|| RunError::NotFound(child_id.to_string()))?
+        };
+
+        let child_id_owned = child_id.to_string();
+        std::thread::spawn(move || match child_arc.lock() {
+            Ok(mut child) => {
+                if let orcs_component::ChildResult::Err(e) = child.run(input) {
+                    tracing::warn!(
+                        child_id = %child_id_owned,
+                        "send_to_child_async: child returned error: {}", e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    child_id = %child_id_owned,
+                    "send_to_child_async: child lock failed: {}", e
+                );
+            }
+        });
+
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn AsyncChildContext> {
         Box::new(self.clone())
     }
@@ -1166,6 +1240,207 @@ mod tests {
         let cloned: Box<dyn AsyncChildContext> = AsyncChildContext::clone_box(&ctx);
 
         assert_eq!(AsyncChildContext::parent_id(cloned.as_ref()), "test-parent");
+    }
+
+    // --- send_to_child_async tests ---
+
+    #[test]
+    fn send_to_child_async_returns_immediately() {
+        let (ctx, _) = setup();
+
+        let config = ChildConfig::new("async-worker");
+        ChildContext::spawn_child(&ctx, config).expect("spawn async-worker");
+
+        let result = ChildContext::send_to_child_async(
+            &ctx,
+            "async-worker",
+            serde_json::json!({"fire": "forget"}),
+        );
+
+        assert!(result.is_ok(), "should return Ok immediately");
+    }
+
+    #[test]
+    fn send_to_child_async_missing_child_returns_error() {
+        let (ctx, _) = setup();
+
+        let result = ChildContext::send_to_child_async(&ctx, "nonexistent", serde_json::json!({}));
+
+        assert!(result.is_err(), "should return Err for missing child");
+        let err = result.expect_err("expected NotFound error");
+        assert!(
+            err.to_string().contains("not found"),
+            "error should mention 'not found', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn send_to_child_async_child_actually_runs() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Custom worker that sets a flag when run
+        struct FlagWorker {
+            id: String,
+            status: Status,
+            ran: Arc<AtomicBool>,
+        }
+
+        impl Identifiable for FlagWorker {
+            fn id(&self) -> &str {
+                &self.id
+            }
+        }
+
+        impl SignalReceiver for FlagWorker {
+            fn on_signal(&mut self, _: &Signal) -> SignalResponse {
+                SignalResponse::Handled
+            }
+            fn abort(&mut self) {
+                self.status = Status::Aborted;
+            }
+        }
+
+        impl Statusable for FlagWorker {
+            fn status(&self) -> Status {
+                self.status
+            }
+        }
+
+        impl Child for FlagWorker {}
+
+        impl RunnableChild for FlagWorker {
+            fn run(&mut self, input: serde_json::Value) -> ChildResult {
+                self.ran.store(true, Ordering::SeqCst);
+                ChildResult::Ok(input)
+            }
+        }
+
+        let ran_flag = Arc::new(AtomicBool::new(false));
+
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        let ctx = ChildContextImpl::new("test-parent", output_tx, Arc::clone(&spawner_arc));
+
+        // Directly spawn into spawner (bypass lua loader)
+        {
+            let worker = Box::new(FlagWorker {
+                id: "flag-worker".into(),
+                status: Status::Idle,
+                ran: Arc::clone(&ran_flag),
+            });
+            let mut spawner_guard = spawner_arc.lock().expect("lock spawner");
+            spawner_guard
+                .spawn(ChildConfig::new("flag-worker"), worker)
+                .expect("spawn flag-worker");
+        }
+
+        let result =
+            ChildContext::send_to_child_async(&ctx, "flag-worker", serde_json::json!({"go": true}));
+        assert!(result.is_ok(), "async send should succeed");
+
+        // Wait for background thread to complete
+        for _ in 0..100 {
+            if ran_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            ran_flag.load(Ordering::SeqCst),
+            "child should have been executed by background thread"
+        );
+    }
+
+    #[test]
+    fn send_to_child_async_multiple_children_concurrent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CounterWorker {
+            id: String,
+            status: Status,
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl Identifiable for CounterWorker {
+            fn id(&self) -> &str {
+                &self.id
+            }
+        }
+
+        impl SignalReceiver for CounterWorker {
+            fn on_signal(&mut self, _: &Signal) -> SignalResponse {
+                SignalResponse::Handled
+            }
+            fn abort(&mut self) {
+                self.status = Status::Aborted;
+            }
+        }
+
+        impl Statusable for CounterWorker {
+            fn status(&self) -> Status {
+                self.status
+            }
+        }
+
+        impl Child for CounterWorker {}
+
+        impl RunnableChild for CounterWorker {
+            fn run(&mut self, input: serde_json::Value) -> ChildResult {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                ChildResult::Ok(input)
+            }
+        }
+
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        let ctx = ChildContextImpl::new("test-parent", output_tx, Arc::clone(&spawner_arc));
+
+        // Spawn 3 children
+        for i in 0..3 {
+            let worker = Box::new(CounterWorker {
+                id: format!("counter-{}", i),
+                status: Status::Idle,
+                counter: Arc::clone(&counter),
+            });
+            let mut spawner_guard = spawner_arc.lock().expect("lock spawner");
+            spawner_guard
+                .spawn(ChildConfig::new(format!("counter-{}", i)), worker)
+                .expect("spawn counter worker");
+        }
+
+        // Send async to all 3
+        for i in 0..3 {
+            let result = ChildContext::send_to_child_async(
+                &ctx,
+                &format!("counter-{}", i),
+                serde_json::json!({"i": i}),
+            );
+            assert!(result.is_ok(), "async send to counter-{} should succeed", i);
+        }
+
+        // Wait for all background threads
+        for _ in 0..200 {
+            if counter.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "all 3 children should have run"
+        );
     }
 
     // --- send_to_children_batch tests ---
