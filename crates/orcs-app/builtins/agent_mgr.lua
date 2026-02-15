@@ -311,6 +311,34 @@ local function dispatch_child(route, body)
     end
 end
 
+--- Truncate a string to at most max_bytes bytes without splitting multi-byte
+--- UTF-8 characters.  Plain string.sub() can cut in the middle of a
+--- multi-byte sequence, producing invalid UTF-8 that Rust's String rejects.
+local function utf8_truncate(s, max_bytes)
+    if #s <= max_bytes then return s end
+    local pos = max_bytes
+    -- Walk backwards past any continuation bytes (10xxxxxx)
+    while pos > 0 do
+        local b = string.byte(s, pos)
+        if b < 0x80 or b >= 0xC0 then break end
+        pos = pos - 1
+    end
+    -- pos is at an ASCII byte or a start byte; verify the full character fits
+    if pos > 0 then
+        local b = string.byte(s, pos)
+        local char_len = 1
+        if     b >= 0xF0 then char_len = 4
+        elseif b >= 0xE0 then char_len = 3
+        elseif b >= 0xC0 then char_len = 2
+        end
+        if pos + char_len - 1 > max_bytes then
+            return s:sub(1, pos - 1)
+        end
+        return s:sub(1, pos + char_len - 1)
+    end
+    return ""
+end
+
 --- Fetch recent conversation history from EventBoard.
 --- Called in parent (agent_mgr) because board_recent is an emitter function
 --- unavailable to child workers.
@@ -329,7 +357,7 @@ local function fetch_history_context()
         local text = payload.message or payload.content or payload.response
         if text and type(text) == "string" and text ~= "" then
             local src = entry.source or "unknown"
-            lines[#lines + 1] = string.format("- [%s] %s", src, text:sub(1, 200))
+            lines[#lines + 1] = string.format("- [%s] %s", src, utf8_truncate(text, 200))
         end
     end
     if #lines > 0 then

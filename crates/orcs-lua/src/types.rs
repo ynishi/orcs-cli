@@ -338,7 +338,7 @@ pub fn lua_to_json(value: Value, lua: &Lua) -> Result<serde_json::Value, mlua::E
         Value::Number(n) => serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .ok_or_else(|| mlua::Error::SerializeError("invalid number".into())),
-        Value::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_string())),
+        Value::String(s) => Ok(serde_json::Value::String(s.to_string_lossy().to_string())),
         Value::Table(table) => {
             // Check if it's an array or object
             let len = table.raw_len();
@@ -630,11 +630,179 @@ mod tests {
         let lua = Lua::new();
 
         // Integer
-        let int_result = lua_to_json(Value::Integer(42), &lua).unwrap();
+        let int_result = lua_to_json(Value::Integer(42), &lua).expect("integer conversion");
         assert_eq!(int_result, serde_json::json!(42));
 
         // Float
-        let float_result = lua_to_json(Value::Number(2.72), &lua).unwrap();
-        assert!(float_result.as_f64().unwrap() - 2.72 < 0.001);
+        let float_result = lua_to_json(Value::Number(2.72), &lua).expect("float conversion");
+        assert!(float_result.as_f64().expect("f64") - 2.72 < 0.001);
+    }
+
+    #[test]
+    fn lua_to_json_valid_utf8_string() {
+        let lua = Lua::new();
+        let s = lua
+            .create_string("こんにちは世界")
+            .expect("create JP string");
+        let result =
+            lua_to_json(Value::String(s), &lua).expect("valid UTF-8 should convert successfully");
+        assert_eq!(result, serde_json::json!("こんにちは世界"));
+    }
+
+    #[test]
+    fn lua_to_json_invalid_utf8_string_uses_lossy() {
+        let lua = Lua::new();
+        // Build a byte sequence with invalid UTF-8: valid prefix + broken continuation
+        // "abc" (3 bytes) + 0xE3 0x81 (incomplete 3-byte sequence, missing last byte)
+        let bytes: &[u8] = &[0x61, 0x62, 0x63, 0xE3, 0x81];
+        let s = lua.create_string(bytes).expect("create binary string");
+        let result = lua_to_json(Value::String(s), &lua)
+            .expect("invalid UTF-8 should not error; lossy conversion instead");
+        let text = result.as_str().expect("should be a string");
+        assert!(
+            text.starts_with("abc"),
+            "valid prefix preserved, got: {text}"
+        );
+        assert!(
+            text.contains('\u{FFFD}'),
+            "replacement char expected for broken bytes, got: {text}"
+        );
+    }
+
+    #[test]
+    fn lua_to_json_truncated_multibyte_in_table() {
+        let lua = Lua::new();
+        // Simulate what agent_mgr does: a table with a truncated JP string
+        // "あ" = 0xE3 0x81 0x82, truncated to 2 bytes → invalid
+        let broken: &[u8] = &[0xE3, 0x81];
+        let table = lua.create_table().expect("create table");
+        table
+            .set("message", lua.create_string(broken).expect("broken str"))
+            .expect("set message");
+        let result = lua_to_json(Value::Table(table), &lua)
+            .expect("table with invalid UTF-8 string should convert via lossy");
+        let msg = result
+            .get("message")
+            .expect("message key")
+            .as_str()
+            .expect("string value");
+        assert!(
+            msg.contains('\u{FFFD}'),
+            "replacement char expected, got: {msg}"
+        );
+    }
+
+    // === utf8_truncate Lua function tests ===
+    // Tests the Lua-side helper from agent_mgr.lua that prevents
+    // string.sub from splitting multi-byte UTF-8 characters.
+
+    const UTF8_TRUNCATE_LUA: &str = r#"
+        local function utf8_truncate(s, max_bytes)
+            if #s <= max_bytes then return s end
+            local pos = max_bytes
+            while pos > 0 do
+                local b = string.byte(s, pos)
+                if b < 0x80 or b >= 0xC0 then break end
+                pos = pos - 1
+            end
+            if pos > 0 then
+                local b = string.byte(s, pos)
+                local char_len = 1
+                if     b >= 0xF0 then char_len = 4
+                elseif b >= 0xE0 then char_len = 3
+                elseif b >= 0xC0 then char_len = 2
+                end
+                if pos + char_len - 1 > max_bytes then
+                    return s:sub(1, pos - 1)
+                end
+                return s:sub(1, pos + char_len - 1)
+            end
+            return ""
+        end
+        return utf8_truncate
+    "#;
+
+    fn load_utf8_truncate(lua: &Lua) -> mlua::Function {
+        lua.load(UTF8_TRUNCATE_LUA)
+            .eval::<mlua::Function>()
+            .expect("load utf8_truncate")
+    }
+
+    #[test]
+    fn utf8_truncate_ascii_within_limit() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        let result: String = f.call(("hello", 10)).expect("call");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn utf8_truncate_ascii_exact_limit() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        let result: String = f.call(("hello", 5)).expect("call");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn utf8_truncate_ascii_over_limit() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        let result: String = f.call(("hello world", 5)).expect("call");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn utf8_truncate_jp_preserves_full_chars() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        // "あいう" = 9 bytes (3 chars × 3 bytes)
+        // Limit 7 → should keep "あい" (6 bytes), not split "う"
+        let result: String = f.call(("あいう", 7)).expect("call");
+        assert_eq!(result, "あい");
+    }
+
+    #[test]
+    fn utf8_truncate_jp_exact_boundary() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        // "あいう" = 9 bytes; limit 9 → return full string
+        let result: String = f.call(("あいう", 9)).expect("call");
+        assert_eq!(result, "あいう");
+    }
+
+    #[test]
+    fn utf8_truncate_mixed_ascii_jp() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        // "abcあ" = 3 + 3 = 6 bytes; limit 5 → "abc" (can't fit "あ")
+        let result: String = f.call(("abcあ", 5)).expect("call");
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn utf8_truncate_4byte_emoji() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        // "a😀b" = 1 + 4 + 1 = 6 bytes; limit 3 → "a" (can't fit 😀)
+        let result: String = f.call(("a😀b", 3)).expect("call");
+        assert_eq!(result, "a");
+    }
+
+    #[test]
+    fn utf8_truncate_result_is_valid_utf8() {
+        let lua = Lua::new();
+        let f = load_utf8_truncate(&lua);
+        // "日本語テスト" = 18 bytes; various cut points should all produce valid UTF-8
+        let input = "日本語テスト";
+        for limit in 1..=18 {
+            let result: String = f.call((input, limit)).expect("call");
+            // If we got here without error, it's valid UTF-8
+            assert!(
+                result.len() <= limit,
+                "limit={limit}, got {} bytes: {result}",
+                result.len()
+            );
+        }
     }
 }
