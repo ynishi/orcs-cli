@@ -11,10 +11,13 @@
 --   task   — before history (project context)
 --   guard  — before user message (output constraints)
 --
+-- Console metrics (from console_metrics):
+--   git branch, working directory, timestamp
+--
 -- Prompt placement strategies (configurable via [components.settings.agent_mgr]):
---   top    — [f:system] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
---   both   — [f:system] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]  (default)
---   bottom — [f:system] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+--   top    — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
+--   both   — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]  (default)
+--   bottom — [f:system] [Metrics] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
 
 -- === Worker Scripts ===
 
@@ -29,7 +32,7 @@ return {
         local history_context = input.history_context or ""
         local placement = input.prompt_placement or "both"
 
-        -- 0. Fetch foundation segments (system/task/guard from agent.md)
+        -- 0a. Fetch foundation segments (system/task/guard from agent.md)
         local f_system = ""
         local f_task = ""
         local f_guard = ""
@@ -40,6 +43,15 @@ return {
             f_guard = f_resp.data.guard or ""
         else
             orcs.log("debug", "llm-worker: foundation segments unavailable, proceeding without")
+        end
+
+        -- 0b. Fetch console metrics (git, cwd, timestamp)
+        local console_block = ""
+        local m_resp = orcs.request("metrics::console_metrics", "get_all", {})
+        if m_resp and m_resp.success and m_resp.formatted then
+            console_block = m_resp.formatted
+        else
+            orcs.log("debug", "llm-worker: console metrics unavailable, proceeding without")
         end
 
         -- 1. Gather system parts: skill recommendations + tool descriptions
@@ -95,10 +107,11 @@ return {
 
         -- 4. Assemble prompt based on placement strategy
         --
-        -- Foundation segments have fixed positions:
-        --   f_system → always at top (identity/core rules)
-        --   f_task   → before history (project context)
-        --   f_guard  → just before user message (output constraints)
+        -- Fixed positions:
+        --   f_system      → always at top (identity/core rules)
+        --   console_block → after f_system (workspace context)
+        --   f_task        → before history (project context)
+        --   f_guard       → just before user message (output constraints)
         --
         -- Placement strategy controls skill/tool block (system_full) position only.
         local sections = {}
@@ -106,8 +119,11 @@ return {
         -- Foundation:system — always top
         if f_system ~= "" then sections[#sections + 1] = f_system end
 
+        -- Console metrics — always after f_system
+        if console_block ~= "" then sections[#sections + 1] = console_block end
+
         if placement == "top" then
-            -- [f:system] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
+            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
@@ -115,7 +131,7 @@ return {
             sections[#sections + 1] = message
 
         elseif placement == "bottom" then
-            -- [f:system] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+            -- [f:system] [Metrics] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
             if f_guard ~= "" then sections[#sections + 1] = f_guard end
@@ -124,7 +140,7 @@ return {
 
         else
             -- "both" (default):
-            -- [f:system] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]
+            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
@@ -136,9 +152,9 @@ return {
         local prompt = table.concat(sections, "\n\n")
 
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d chars)",
+            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
             placement, skill_count, #history_context, #tool_desc,
-            #f_system, #f_task, #f_guard
+            #f_system, #f_task, #f_guard, #console_block
         ))
 
         -- 5. Call Claude Code CLI (headless)

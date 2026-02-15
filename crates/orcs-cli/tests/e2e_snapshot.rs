@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{extract_session_id, orcs_cmd, orcs_cmd_fresh_snapshot, orcs_cmd_with_builtins};
+use common::{extract_session_id, orcs_cmd_raw, orcs_cmd_snapshot, orcs_cmd_with_builtins};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
@@ -15,7 +15,7 @@ use predicates::str::contains;
 fn install_builtins_creates_files() {
     let tmp = tempfile::tempdir().expect("create temp dir");
 
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")])
         .arg("--install-builtins")
         .assert()
@@ -29,14 +29,14 @@ fn install_builtins_skips_existing() {
     let dir_str = tmp.path().to_str().expect("valid utf8");
 
     // First install
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", dir_str])
         .arg("--install-builtins")
         .assert()
         .success();
 
     // Second install should skip
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", dir_str])
         .arg("--install-builtins")
         .assert()
@@ -50,14 +50,14 @@ fn install_builtins_force_overwrites() {
     let dir_str = tmp.path().to_str().expect("valid utf8");
 
     // First install
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", dir_str])
         .arg("--install-builtins")
         .assert()
         .success();
 
     // Force reinstall should overwrite
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", dir_str])
         .arg("--install-builtins")
         .arg("--force")
@@ -69,7 +69,7 @@ fn install_builtins_force_overwrites() {
 
 #[test]
 fn force_requires_install_builtins() {
-    orcs_cmd()
+    orcs_cmd_raw()
         .arg("--force")
         .assert()
         .failure()
@@ -80,19 +80,19 @@ fn force_requires_install_builtins() {
 
 #[test]
 fn pause_collects_snapshots() {
-    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
+    let (mut cmd, _guard) = orcs_cmd_snapshot();
     cmd.arg("-d")
         .write_stdin("p\n")
         .assert()
         .success()
-        .stdout(contains("collected 3 snapshots from runners"))
+        .stdout(contains("collected 4 snapshots from runners"))
         .stdout(contains("Session saved:"))
         .stdout(contains("Resume with: orcs --resume"));
 }
 
 #[test]
 fn pause_captures_skill_manager_snapshot() {
-    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
+    let (mut cmd, _guard) = orcs_cmd_snapshot();
     cmd.arg("-d").write_stdin("p\n").assert().success().stdout(
         contains("skill::skill_manager").and(contains("has_snapshot").and(contains("true"))),
     );
@@ -100,7 +100,7 @@ fn pause_captures_skill_manager_snapshot() {
 
 #[test]
 fn pause_captures_profile_manager_snapshot() {
-    let (mut cmd, _guard) = orcs_cmd_fresh_snapshot();
+    let (mut cmd, _guard) = orcs_cmd_snapshot();
     cmd.arg("-d").write_stdin("p\n").assert().success().stdout(
         contains("profile::profile_manager").and(contains("has_snapshot").and(contains("true"))),
     );
@@ -131,7 +131,7 @@ fn pause_resume_round_trip() {
         .assert()
         .success()
         .stdout(contains("Resumed session:"))
-        .stdout(contains("3 component(s) restored"));
+        .stdout(contains("4 component(s) restored"));
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn builtins_dir_override_is_used() {
     let dir_str = tmp.path().to_str().expect("valid utf8");
 
     // Install builtins to custom dir
-    orcs_cmd()
+    orcs_cmd_raw()
         .args(["--builtins-dir", dir_str])
         .arg("--install-builtins")
         .assert()

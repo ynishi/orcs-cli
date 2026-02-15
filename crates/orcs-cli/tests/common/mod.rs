@@ -26,17 +26,21 @@ fn strip_claude_guard(cmd: &mut assert_cmd::Command) {
     }
 }
 
-/// Build a Command for the `orcs` binary with the basic timeout.
-pub fn orcs_cmd() -> assert_cmd::Command {
+/// Build a bare Command without `--builtins-dir` pre-set.
+///
+/// Use this only for tests that explicitly provide their own `--builtins-dir`.
+pub fn orcs_cmd_raw() -> assert_cmd::Command {
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
     strip_claude_guard(&mut cmd);
     cmd
 }
 
-/// Build a Command with fresh builtins in a tempdir.
+/// Build a Command for the `orcs` binary with fresh builtins in a tempdir.
+///
+/// Always uses a fresh temp directory to avoid stale builtin cache issues.
 /// Returns (command, _guard) — keep the guard alive for the test's duration.
-pub fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
+pub fn orcs_cmd() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
@@ -46,7 +50,7 @@ pub fn orcs_cmd_fresh() -> (assert_cmd::Command, tempfile::TempDir) {
 }
 
 /// Build a Command with fresh builtins and the extended snapshot timeout.
-pub fn orcs_cmd_fresh_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
+pub fn orcs_cmd_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_SNAPSHOT);

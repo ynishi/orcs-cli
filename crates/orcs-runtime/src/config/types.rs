@@ -368,6 +368,7 @@ impl Default for ComponentsConfig {
                 "skill_manager".into(),
                 "profile_manager".into(),
                 "foundation_manager".into(),
+                "console_metrics".into(),
                 "shell".into(),
                 "tool".into(),
             ],

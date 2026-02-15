@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{orcs_cmd, orcs_cmd_fresh};
+use common::orcs_cmd;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
@@ -13,8 +13,8 @@ use predicates::str::contains;
 
 #[test]
 fn quit_immediately() {
-    orcs_cmd()
-        .write_stdin("q\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("Interactive mode started"))
@@ -24,8 +24,8 @@ fn quit_immediately() {
 
 #[test]
 fn quit_long_form() {
-    orcs_cmd()
-        .write_stdin("quit\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("quit\n")
         .assert()
         .success()
         .stdout(contains("Quit requested"));
@@ -33,7 +33,8 @@ fn quit_long_form() {
 
 #[test]
 fn empty_stdin_exits_gracefully() {
-    orcs_cmd().write_stdin("").assert().success();
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("").assert().success();
 }
 
 // ─── Component Ready Messages ──────────────────────────────────────
@@ -42,8 +43,8 @@ fn empty_stdin_exits_gracefully() {
 fn components_initialize() {
     // Check spawn messages (synchronous in builder, before interactive mode)
     // rather than Ready messages which race with stdin processing.
-    orcs_cmd()
-        .write_stdin("q\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("builtin::agent_mgr"))
@@ -53,7 +54,7 @@ fn components_initialize() {
 
 #[test]
 fn profile_manager_initializes() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.arg("-d")
         .write_stdin("q\n")
         .assert()
@@ -64,7 +65,7 @@ fn profile_manager_initializes() {
 
 #[test]
 fn agent_mgr_ready_with_workers() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.write_stdin("q\n")
         .assert()
         .success()
@@ -75,7 +76,7 @@ fn agent_mgr_ready_with_workers() {
 
 #[test]
 fn agent_mgr_spawns_workers() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.arg("-d")
         .write_stdin("q\n")
         .assert()
@@ -88,7 +89,7 @@ fn agent_mgr_spawns_workers() {
 
 #[test]
 fn all_component_routes_registered() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.arg("-d")
         .write_stdin("q\n")
         .assert()
@@ -105,7 +106,7 @@ fn all_component_routes_registered() {
 
 #[test]
 fn clean_shutdown_logs() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.arg("-d")
         .write_stdin("q\n")
         .assert()
@@ -119,8 +120,8 @@ fn clean_shutdown_logs() {
 
 #[test]
 fn help_shows_commands() {
-    orcs_cmd()
-        .write_stdin("help\nq\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("help\nq\n")
         .assert()
         .success()
         .stdout(contains("Commands:"))
@@ -133,8 +134,8 @@ fn help_shows_commands() {
 #[test]
 fn at_shell_routes_to_shell() {
     // With -d, debug log "Routed @shell to channel" confirms routing.
-    orcs_cmd()
-        .arg("-d")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.arg("-d")
         .write_stdin("@shell echo hello_e2e\nq\n")
         .assert()
         .success()
@@ -143,7 +144,7 @@ fn at_shell_routes_to_shell() {
 
 #[test]
 fn at_profile_manager_routes() {
-    let (mut cmd, _guard) = orcs_cmd_fresh();
+    let (mut cmd, _guard) = orcs_cmd();
     cmd.arg("-d")
         .write_stdin("@profile_manager list\nq\n")
         .assert()
@@ -153,8 +154,8 @@ fn at_profile_manager_routes() {
 
 #[test]
 fn at_unknown_component_shows_error() {
-    orcs_cmd()
-        .write_stdin("@nonexistent test\nq\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("@nonexistent test\nq\n")
         .assert()
         .success()
         .stderr(contains("Unknown component: @nonexistent"));
@@ -164,8 +165,8 @@ fn at_unknown_component_shows_error() {
 
 #[test]
 fn skill_manager_discovers_skills() {
-    orcs_cmd()
-        .write_stdin("q\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("SkillManager initialized"));
@@ -175,8 +176,8 @@ fn skill_manager_discovers_skills() {
 
 #[test]
 fn pause_saves_session() {
-    orcs_cmd()
-        .write_stdin("p\n")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("p\n")
         .assert()
         .success()
         .stdout(contains("Saving session").or(contains("Pause requested")));
@@ -186,8 +187,8 @@ fn pause_saves_session() {
 
 #[test]
 fn resume_nonexistent_session_returns_error() {
-    orcs_cmd()
-        .args(["--resume", "00000000-0000-0000-0000-000000000000"])
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.args(["--resume", "00000000-0000-0000-0000-000000000000"])
         .write_stdin("q\n")
         .assert()
         .failure()
@@ -198,7 +199,8 @@ fn resume_nonexistent_session_returns_error() {
 
 #[test]
 fn blank_lines_are_ignored() {
-    orcs_cmd().write_stdin("\n\n\nq\n").assert().success();
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.write_stdin("\n\n\nq\n").assert().success();
 }
 
 // ─── User Message → dispatch_llm → orcs.output ──────────────────────
@@ -363,8 +365,8 @@ fn dispatch_llm_output_reaches_stdout() {
 
 #[test]
 fn version_flag() {
-    orcs_cmd()
-        .arg("--version")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.arg("--version")
         .assert()
         .success()
         .stdout(contains("orcs"));
@@ -372,8 +374,8 @@ fn version_flag() {
 
 #[test]
 fn help_flag() {
-    orcs_cmd()
-        .arg("--help")
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.arg("--help")
         .assert()
         .success()
         .stdout(contains("ORCS CLI"));

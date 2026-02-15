@@ -44,6 +44,7 @@
 use crate::error::LuaError;
 use mlua::{Lua, LuaSerdeExt, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
+use std::process::Command;
 use std::sync::Arc;
 
 /// Global table name for orcs functions in Lua.
@@ -178,6 +179,72 @@ pub fn register_base_orcs_functions(
         orcs_table.set("toml_encode", toml_encode)?;
     }
 
+    // orcs.git_info() -> {ok, branch, commit_short, dirty}
+    // Runs git commands directly from Rust (no sandbox exec, no permission needed).
+    {
+        let sandbox_root = sandbox.root().to_path_buf();
+        let git_info_fn = lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+
+            // Check if inside a git repo
+            let repo_check = Command::new("git")
+                .args(["rev-parse", "--is-inside-work-tree"])
+                .current_dir(&sandbox_root)
+                .output();
+
+            let is_repo = repo_check
+                .as_ref()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if !is_repo {
+                result.set("ok", false)?;
+                return Ok(result);
+            }
+
+            result.set("ok", true)?;
+
+            // Branch name
+            if let Ok(output) = Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&sandbox_root)
+                .output()
+            {
+                if output.status.success() {
+                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    result.set("branch", branch)?;
+                }
+            }
+
+            // Short commit hash
+            if let Ok(output) = Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .current_dir(&sandbox_root)
+                .output()
+            {
+                if output.status.success() {
+                    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    result.set("commit_short", commit)?;
+                }
+            }
+
+            // Dirty status (any uncommitted changes)
+            if let Ok(output) = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&sandbox_root)
+                .output()
+            {
+                if output.status.success() {
+                    let dirty = !output.stdout.is_empty();
+                    result.set("dirty", dirty)?;
+                }
+            }
+
+            Ok(result)
+        })?;
+        orcs_table.set("git_info", git_info_fn)?;
+    }
+
     // Register native Rust tools (read, write, grep, glob, mkdir, remove, mv)
     crate::tools::register_tool_functions(lua, Arc::clone(&sandbox))?;
 
@@ -222,6 +289,9 @@ orcs.exec(cmd) -> {ok, stdout, stderr, code}
 
 orcs.pwd
   Project root path (string).
+
+orcs.git_info() -> {ok, branch, commit_short, dirty}
+  Git repository info. ok=false if not in a git repo.
 
 "#;
 
@@ -619,6 +689,36 @@ activate = ["rust-dev", "git-workflow"]
             .unwrap();
         assert!(result.contains("name"));
         assert!(result.contains("test"));
+    }
+
+    #[test]
+    fn git_info_returns_table() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_sandbox()).expect("register should succeed");
+
+        let result: Table = lua
+            .load("return orcs.git_info()")
+            .eval()
+            .expect("git_info should return a table");
+
+        // We're running inside the orcs-cli git repo, so ok should be true
+        let ok = result.get::<bool>("ok").expect("should have ok field");
+        assert!(ok, "expected ok=true since we're in a git repo");
+
+        let branch = result
+            .get::<String>("branch")
+            .expect("should have branch field");
+        assert!(!branch.is_empty(), "branch should not be empty");
+
+        let commit = result
+            .get::<String>("commit_short")
+            .expect("should have commit_short field");
+        assert!(!commit.is_empty(), "commit_short should not be empty");
+
+        // dirty is a bool, just verify it exists
+        let _dirty = result
+            .get::<bool>("dirty")
+            .expect("should have dirty field");
     }
 
     #[test]
