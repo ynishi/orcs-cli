@@ -94,7 +94,7 @@ mod child;
 mod component;
 mod error;
 pub mod hook_helpers;
-pub(crate) mod llm_command;
+pub mod llm_command;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;
@@ -111,6 +111,7 @@ pub use hook_helpers::{
     load_hooks_from_config, register_hook_function, register_hook_stub, register_unhook_function,
     HookLoadError, HookLoadResult, LuaHook,
 };
+pub use llm_command::{set_llm_backend, CliBackend, LlmBackend, LlmResult, LlmSessionMode};
 pub use loader::{LoadResult, LoadWarning, ScriptLoader};
 pub use lua_env::LuaEnv;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};

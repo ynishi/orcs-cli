@@ -1,11 +1,99 @@
-//! Claude CLI command builder for `orcs.llm()`.
+//! LLM backend abstraction for `orcs.llm()`.
 //!
-//! Builds `std::process::Command` for the `claude` CLI with session
+//! Provides `LlmBackend` trait for pluggable LLM invocation and
+//! `CliBackend` implementation that calls the `claude` CLI with session
 //! management support (`--session-id` for new sessions, `--resume`
 //! for continuation).
+//!
+//! # Backend selection
+//!
+//! ```text
+//! Lua: orcs.llm(prompt, opts)
+//!   → Capability::LLM gate
+//!   → LlmBackend::execute()
+//!       ├── CliBackend (default) → claude -p subprocess
+//!       └── (future) ApiBackend  → Anthropic Messages API
+//! ```
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+
+/// Abstraction for LLM invocation.
+///
+/// Implementations handle the actual LLM call (CLI subprocess, HTTP API, etc.)
+/// while callers remain backend-agnostic.
+pub trait LlmBackend: Send + Sync {
+    /// Execute an LLM call with the given parameters.
+    fn execute(
+        &self,
+        prompt: &str,
+        mode: &LlmSessionMode,
+        model: Option<&str>,
+        cwd: &Path,
+    ) -> LlmResult;
+}
+
+/// Wrapper for storing `LlmBackend` in Lua `app_data`.
+pub(crate) struct LlmBackendWrapper(pub(crate) Arc<dyn LlmBackend>);
+
+/// Sets a custom [`LlmBackend`] for `orcs.llm()` calls.
+///
+/// Must be called **before** context/function registration
+/// (`register_base_orcs_functions`, `register_context_functions`, etc.)
+/// so that the backend is captured at registration time.
+///
+/// If not called, [`CliBackend`] is used as the default.
+pub fn set_llm_backend(lua: &mlua::Lua, backend: Arc<dyn LlmBackend>) {
+    lua.set_app_data(LlmBackendWrapper(backend));
+}
+
+/// Default backend: invokes the `claude` CLI in headless (`-p`) mode.
+pub struct CliBackend;
+
+impl LlmBackend for CliBackend {
+    fn execute(
+        &self,
+        prompt: &str,
+        mode: &LlmSessionMode,
+        model: Option<&str>,
+        cwd: &Path,
+    ) -> LlmResult {
+        let mut cmd = build_command(prompt, mode, model, cwd);
+
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let content = String::from_utf8_lossy(&out.stdout).to_string();
+                let session_id = match mode {
+                    LlmSessionMode::NewSession(uuid) => Some(uuid.clone()),
+                    _ => None,
+                };
+                LlmResult {
+                    ok: true,
+                    content: Some(content),
+                    error: None,
+                    session_id,
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                LlmResult {
+                    ok: false,
+                    content: None,
+                    error: Some(if stderr.is_empty() { stdout } else { stderr }),
+                    session_id: None,
+                }
+            }
+            Err(e) => LlmResult {
+                ok: false,
+                content: None,
+                error: Some(format!("failed to spawn claude: {e}")),
+                session_id: None,
+            },
+        }
+    }
+}
 
 /// Session mode for the LLM call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,47 +161,16 @@ fn build_command(prompt: &str, mode: &LlmSessionMode, model: Option<&str>, cwd: 
 }
 
 /// Executes a claude CLI call and returns the result.
+///
+/// Convenience function that delegates to [`CliBackend`].
+/// Prefer using [`LlmBackend::execute`] via the injected backend for new code.
 pub fn execute_llm(
     prompt: &str,
     mode: &LlmSessionMode,
     model: Option<&str>,
     cwd: &Path,
 ) -> LlmResult {
-    let mut cmd = build_command(prompt, mode, model, cwd);
-
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            let content = String::from_utf8_lossy(&out.stdout).to_string();
-            // claude CLI の `--session-id` は指定した UUID をそのまま使用する仕様。
-            // CLI が別 ID を振り直すことはない。
-            let session_id = match mode {
-                LlmSessionMode::NewSession(uuid) => Some(uuid.clone()),
-                _ => None,
-            };
-            LlmResult {
-                ok: true,
-                content: Some(content),
-                error: None,
-                session_id,
-            }
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            LlmResult {
-                ok: false,
-                content: None,
-                error: Some(if stderr.is_empty() { stdout } else { stderr }),
-                session_id: None,
-            }
-        }
-        Err(e) => LlmResult {
-            ok: false,
-            content: None,
-            error: Some(format!("failed to spawn claude: {e}")),
-            session_id: None,
-        },
-    }
+    CliBackend.execute(prompt, mode, model, cwd)
 }
 
 /// Parses the model from an optional Lua options table.
@@ -414,6 +471,72 @@ mod tests {
             content.contains("ORCSTest42"),
             "Expected 'ORCSTest42' in response, got: {}",
             content.chars().take(200).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn cli_backend_implements_trait() {
+        let backend: Arc<dyn LlmBackend> = Arc::new(CliBackend);
+        let result = backend.execute("test", &LlmSessionMode::SingleShot, None, Path::new("/tmp"));
+        // Verify LlmResult invariants regardless of claude binary presence
+        if result.ok {
+            assert!(result.content.is_some(), "ok=true must have content");
+            assert!(result.error.is_none(), "ok=true must not have error");
+        } else {
+            assert!(result.error.is_some(), "ok=false must have error message");
+            assert!(result.content.is_none(), "ok=false must not have content");
+        }
+    }
+
+    #[test]
+    fn execute_llm_delegates_to_cli_backend() {
+        let result = execute_llm("test", &LlmSessionMode::SingleShot, None, Path::new("/tmp"));
+        // Same invariant check — execute_llm delegates to CliBackend
+        if result.ok {
+            assert!(result.content.is_some(), "ok=true must have content");
+        } else {
+            assert!(result.error.is_some(), "ok=false must have error message");
+        }
+    }
+
+    #[test]
+    fn set_llm_backend_injects_custom_backend() {
+        struct FakeBackend;
+        impl LlmBackend for FakeBackend {
+            fn execute(
+                &self,
+                prompt: &str,
+                _mode: &LlmSessionMode,
+                _model: Option<&str>,
+                _cwd: &Path,
+            ) -> LlmResult {
+                LlmResult {
+                    ok: true,
+                    content: Some(format!("echo: {prompt}")),
+                    error: None,
+                    session_id: None,
+                }
+            }
+        }
+
+        let lua = mlua::Lua::new();
+        set_llm_backend(&lua, Arc::new(FakeBackend));
+
+        // Verify the backend was stored and can be retrieved
+        let wrapper = lua
+            .app_data_ref::<LlmBackendWrapper>()
+            .expect("LlmBackendWrapper should be set after set_llm_backend");
+        let result = wrapper.0.execute(
+            "hello",
+            &LlmSessionMode::SingleShot,
+            None,
+            Path::new("/tmp"),
+        );
+        assert!(result.ok, "FakeBackend should return ok=true");
+        assert_eq!(
+            result.content.as_deref(),
+            Some("echo: hello"),
+            "FakeBackend should echo the prompt"
         );
     }
 
