@@ -31,9 +31,6 @@ tempfile = "3"
 serde_yaml = { workspace = true }
 toml = { workspace = true }
 
-# UUID generation (for LLM session IDs)
-uuid = { workspace = true }
-
 # Error handling
 thiserror = "2.0"
 

@@ -589,22 +589,8 @@ fn register_context_functions(
     orcs_table.set("exec", exec_fn)?;
 
     // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
-    // Capability-checked override: requires Capability::LLM.
-    // Uses the injected LlmBackend from app_data.
-    //
-    // opts (optional table):
-    //   { model = "claude-haiku-4-5-20251001" } → specify model
-    //   { new_session = true }    → start tracked session (returns session_id)
-    //   { resume = "<uuid>" }    → continue existing session
-    //   (none)                    → single-shot (backward compatible)
-    let llm_sandbox_root = sandbox.root().to_path_buf();
-
-    // Capture the backend from app_data at registration time.
-    let backend = lua
-        .app_data_ref::<crate::llm_command::LlmBackendWrapper>()
-        .map(|w| std::sync::Arc::clone(&w.0))
-        .unwrap_or_else(|| std::sync::Arc::new(crate::llm_command::CliBackend));
-
+    // Capability-checked override: delegates to Lua handler registered via
+    // orcs.set_llm_handler(fn).  Requires Capability::LLM.
     let llm_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         let wrapper = lua
             .app_data_ref::<ContextWrapper>()
@@ -623,10 +609,7 @@ fn register_context_functions(
         }
         drop(ctx);
 
-        let mode = crate::llm_command::parse_session_mode(opts.as_ref())?;
-        let model = crate::llm_command::parse_model(opts.as_ref())?;
-        let llm_result = backend.execute(&prompt, &mode, model.as_deref(), &llm_sandbox_root);
-        crate::llm_command::result_to_lua_table(lua, &llm_result)
+        crate::llm_command::call_llm_handler(lua, prompt, opts)
     })?;
     orcs_table.set("llm", llm_fn)?;
 

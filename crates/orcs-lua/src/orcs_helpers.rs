@@ -42,7 +42,6 @@
 //! ```
 
 use crate::error::LuaError;
-use crate::llm_command::{CliBackend, LlmBackendWrapper};
 use mlua::{Lua, LuaSerdeExt, Table};
 use orcs_runtime::sandbox::SandboxPolicy;
 use std::process::Command;
@@ -74,15 +73,11 @@ pub fn register_base_orcs_functions(
     lua: &Lua,
     sandbox: Arc<dyn SandboxPolicy>,
 ) -> Result<(), LuaError> {
-    // Set default LLM backend (CliBackend) if not already set.
-    // This can be overridden before context registration by setting a
-    // different LlmBackendWrapper in app_data.
-    if lua.app_data_ref::<LlmBackendWrapper>().is_none() {
-        lua.set_app_data(LlmBackendWrapper(Arc::new(CliBackend)));
-    }
-
     // Get or create orcs table
     let orcs_table = ensure_orcs_table(lua)?;
+
+    // Register orcs.set_llm_handler(fn) and install default Claude CLI handler.
+    crate::llm_command::register_llm_functions(lua, &orcs_table)?;
 
     // orcs.log(level, msg) - Log a message
     if orcs_table.get::<mlua::Function>("log").is_err() {

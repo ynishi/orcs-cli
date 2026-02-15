@@ -111,7 +111,7 @@ pub use hook_helpers::{
     load_hooks_from_config, register_hook_function, register_hook_stub, register_unhook_function,
     HookLoadError, HookLoadResult, LuaHook,
 };
-pub use llm_command::{set_llm_backend, CliBackend, LlmBackend, LlmResult, LlmSessionMode};
+pub use llm_command::{call_llm_handler, register_llm_functions};
 pub use loader::{LoadResult, LoadWarning, ScriptLoader};
 pub use lua_env::LuaEnv;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};
