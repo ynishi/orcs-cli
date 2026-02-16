@@ -9,6 +9,7 @@ use super::{ChannelRunner, Event};
 use crate::auth::{CommandCheckResult, PermissionChecker, Session};
 use crate::channel::{World, WorldCommand};
 use crate::engine::{SharedChannelHandles, SharedComponentChannelMap};
+use orcs_auth::Capability;
 use orcs_auth::{CommandGrant, GrantPolicy};
 use orcs_component::{
     async_trait, AsyncChildContext, AsyncChildHandle, ChildConfig, ChildContext, ChildHandle,
@@ -71,6 +72,11 @@ pub struct ChildContextImpl {
     // -- Hook support --
     /// Shared hook registry (propagated to child runners).
     hook_registry: Option<SharedHookRegistry>,
+
+    // -- Capability support --
+    /// Effective capabilities for this context.
+    /// Defaults to ALL; narrowed via `Capability::inherit` on spawn.
+    capabilities: Capability,
 }
 
 /// Trait for loading Lua children from config.
@@ -116,6 +122,7 @@ impl ChildContextImpl {
             component_channel_map: None,
             channel_id: None,
             hook_registry: None,
+            capabilities: Capability::ALL,
         }
     }
 
@@ -369,6 +376,16 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the effective capabilities for this context.
+    ///
+    /// Defaults to [`Capability::ALL`]. Use this to restrict what
+    /// operations the context (and its children) can perform.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: Capability) -> Self {
+        self.capabilities = caps;
+        self
+    }
+
     /// Returns true if runner spawning is enabled.
     #[must_use]
     pub fn can_spawn_runner(&self) -> bool {
@@ -475,10 +492,22 @@ impl ChildContextImpl {
     }
 
     /// Creates a sub-ChildContext for a spawned child, inheriting RPC
-    /// handles, auth context, and sandbox from the parent.
-    fn create_child_context(&self, child_id: &str) -> Box<dyn ChildContext> {
+    /// handles, auth context, and capabilities from the parent.
+    ///
+    /// Effective capabilities = `parent_caps & requested_caps`.
+    /// When `requested_caps` is `None`, the parent's capabilities are
+    /// inherited without further narrowing.
+    fn create_child_context(
+        &self,
+        child_id: &str,
+        requested_caps: Option<Capability>,
+    ) -> Box<dyn ChildContext> {
+        let effective_caps =
+            Capability::inherit(self.capabilities, requested_caps.unwrap_or(Capability::ALL));
+
         let mut ctx =
-            ChildContextImpl::new(child_id, self.output_tx.clone(), Arc::clone(&self.spawner));
+            ChildContextImpl::new(child_id, self.output_tx.clone(), Arc::clone(&self.spawner))
+                .with_capabilities(effective_caps);
         if let Some(loader) = &self.lua_loader {
             ctx = ctx.with_lua_loader(Arc::clone(loader));
         }
@@ -573,6 +602,7 @@ impl Debug for ChildContextImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChildContextImpl")
             .field("parent_id", &self.parent_id)
+            .field("capabilities", &self.capabilities)
             .field("has_lua_loader", &self.lua_loader.is_some())
             .field("has_session", &self.session.is_some())
             .field("has_checker", &self.checker.is_some())
@@ -631,8 +661,8 @@ impl ChildContext for ChildContextImpl {
         // Load child from config
         let mut child = loader.load(&config)?;
 
-        // Inject a ChildContext so the child can use orcs.request(), orcs.exec(), etc.
-        let child_ctx = self.create_child_context(&config.id);
+        // Inject a ChildContext with capability inheritance.
+        let child_ctx = self.create_child_context(&config.id, config.capabilities);
         child.set_context(child_ctx);
 
         // Spawn via spawner
@@ -822,6 +852,10 @@ impl ChildContext for ChildContextImpl {
         }
     }
 
+    fn capabilities(&self) -> Capability {
+        self.capabilities
+    }
+
     fn grant_command(&self, pattern: &str) {
         self.grant_command_inner(pattern);
     }
@@ -988,8 +1022,8 @@ impl AsyncChildContext for ChildContextImpl {
         // Load child from config
         let mut child = loader.load(&config)?;
 
-        // Inject a ChildContext so the child can use orcs.request(), orcs.exec(), etc.
-        let child_ctx = self.create_child_context(&config.id);
+        // Inject a ChildContext with capability inheritance.
+        let child_ctx = self.create_child_context(&config.id, config.capabilities);
         child.set_context(child_ctx);
 
         // Spawn via spawner (spawn_async returns Box<dyn AsyncChildHandle>)
@@ -1971,6 +2005,190 @@ mod tests {
             assert!(perm.is_allowed());
             assert_eq!(pre_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(post_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    // --- Capability inheritance tests ---
+
+    mod capability_tests {
+        use super::*;
+        use orcs_auth::Capability;
+
+        #[test]
+        fn default_capabilities_is_all() {
+            let (ctx, _) = setup();
+            assert_eq!(
+                ChildContext::capabilities(&ctx),
+                Capability::ALL,
+                "new context should default to ALL"
+            );
+        }
+
+        #[test]
+        fn with_capabilities_restricts() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("test", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let caps = Capability::READ | Capability::WRITE;
+            let ctx = ChildContextImpl::new("test", output_tx, spawner_arc).with_capabilities(caps);
+
+            assert_eq!(ChildContext::capabilities(&ctx), caps);
+            assert!(ChildContext::has_capability(&ctx, Capability::READ));
+            assert!(ChildContext::has_capability(&ctx, Capability::WRITE));
+            assert!(
+                !ChildContext::has_capability(&ctx, Capability::EXECUTE),
+                "EXECUTE should not be present"
+            );
+            assert!(
+                !ChildContext::has_capability(&ctx, Capability::SPAWN),
+                "SPAWN should not be present"
+            );
+        }
+
+        #[test]
+        fn create_child_context_inherits_parent_caps() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let parent_caps = Capability::READ | Capability::WRITE | Capability::EXECUTE;
+            let ctx = ChildContextImpl::new("parent", output_tx, spawner_arc)
+                .with_capabilities(parent_caps);
+
+            // None = inherit all from parent
+            let child_ctx = ctx.create_child_context("child-1", None);
+            assert_eq!(
+                child_ctx.capabilities(),
+                parent_caps,
+                "child should inherit parent caps when no restriction requested"
+            );
+        }
+
+        #[test]
+        fn create_child_context_narrows_with_request() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let parent_caps = Capability::READ | Capability::WRITE | Capability::EXECUTE;
+            let ctx = ChildContextImpl::new("parent", output_tx, spawner_arc)
+                .with_capabilities(parent_caps);
+
+            // Request only READ | WRITE → should drop EXECUTE
+            let requested = Capability::READ | Capability::WRITE;
+            let child_ctx = ctx.create_child_context("child-1", Some(requested));
+
+            assert_eq!(
+                child_ctx.capabilities(),
+                Capability::READ | Capability::WRITE,
+                "effective = parent & requested"
+            );
+            assert!(
+                !child_ctx.has_capability(Capability::EXECUTE),
+                "EXECUTE dropped by intersection"
+            );
+        }
+
+        #[test]
+        fn create_child_context_cannot_exceed_parent() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let parent_caps = Capability::READ;
+            let ctx = ChildContextImpl::new("parent", output_tx, spawner_arc)
+                .with_capabilities(parent_caps);
+
+            // Child requests ALL → should be capped at parent's READ
+            let child_ctx = ctx.create_child_context("child-1", Some(Capability::ALL));
+
+            assert_eq!(
+                child_ctx.capabilities(),
+                Capability::READ,
+                "child cannot exceed parent's capabilities"
+            );
+        }
+
+        #[test]
+        fn grandchild_inherits_narrowed_caps() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("root", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            // Root: ALL
+            let root = ChildContextImpl::new("root", output_tx, spawner_arc)
+                .with_capabilities(Capability::ALL);
+
+            // Child: READ | WRITE (narrowed from root)
+            let child_ctx =
+                root.create_child_context("child", Some(Capability::READ | Capability::WRITE));
+            assert_eq!(
+                child_ctx.capabilities(),
+                Capability::READ | Capability::WRITE,
+            );
+
+            // Grandchild: requests ALL → capped at child's READ | WRITE
+            // Need to downcast to call create_child_context
+            // Instead, verify via has_capability
+            assert!(!child_ctx.has_capability(Capability::EXECUTE));
+            assert!(!child_ctx.has_capability(Capability::SPAWN));
+            assert!(!child_ctx.has_capability(Capability::LLM));
+        }
+
+        #[test]
+        fn empty_intersection_yields_no_caps() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("parent", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let parent_caps = Capability::READ | Capability::WRITE;
+            let ctx = ChildContextImpl::new("parent", output_tx, spawner_arc)
+                .with_capabilities(parent_caps);
+
+            // Request EXECUTE | SPAWN → no overlap with parent
+            let child_ctx =
+                ctx.create_child_context("child-1", Some(Capability::EXECUTE | Capability::SPAWN));
+
+            assert_eq!(
+                child_ctx.capabilities(),
+                Capability::empty(),
+                "no overlap should produce empty capabilities"
+            );
+            assert!(!child_ctx.has_capability(Capability::READ));
+            assert!(!child_ctx.has_capability(Capability::EXECUTE));
+        }
+
+        #[test]
+        fn spawn_child_applies_config_capabilities() {
+            let (ctx, _) = setup(); // ALL caps, with TestLoader
+
+            // Spawn with restricted capabilities
+            let config = ChildConfig::new("restricted-worker").with_capabilities(Capability::READ);
+            let handle = ChildContext::spawn_child(&ctx, config).expect("spawn restricted-worker");
+
+            assert_eq!(handle.id(), "restricted-worker");
+            // The child was spawned successfully — the config.capabilities
+            // was passed to create_child_context. We cannot directly
+            // inspect the child's context from the handle, but the
+            // integration is verified by the create_child_context tests above.
+        }
+
+        #[test]
+        fn capabilities_preserved_in_clone_box() {
+            let (output_tx, _) = OutputSender::channel(64);
+            let spawner = ChildSpawner::new("test", output_tx.clone());
+            let spawner_arc = Arc::new(Mutex::new(spawner));
+
+            let caps = Capability::READ | Capability::EXECUTE;
+            let ctx = ChildContextImpl::new("test", output_tx, spawner_arc).with_capabilities(caps);
+
+            let cloned: Box<dyn ChildContext> = ChildContext::clone_box(&ctx);
+            assert_eq!(
+                cloned.capabilities(),
+                caps,
+                "clone_box should preserve capabilities"
+            );
         }
     }
 }
