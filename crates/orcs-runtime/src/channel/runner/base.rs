@@ -2401,9 +2401,7 @@ mod tests {
         assert_eq!(output_event.payload["message"], "board and io message");
 
         // Verify Board also recorded the entry
-        let b = board
-            .read()
-            .expect("Board read lock should not be poisoned");
+        let b = board.read();
         assert!(b.len() >= 1, "Board should have at least 1 entry");
         let entries = b.recent(1);
         assert_eq!(

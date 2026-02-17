@@ -48,9 +48,10 @@ use crate::channel::{ChannelHandle, Event};
 use orcs_event::{EventCategory, Request, Signal};
 use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId, RequestId};
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -59,7 +60,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// This type allows multiple components (EventBus, ClientRunner) to
 /// access the same set of channel handles for event injection and broadcast.
 ///
-/// Uses std::sync::RwLock for sync access in EventBus methods.
+/// Uses parking_lot::RwLock (no poison semantics) for sync access.
 pub type SharedChannelHandles = Arc<RwLock<HashMap<ChannelId, ChannelHandle>>>;
 
 /// Shared mapping from Component FQN to ChannelId for RPC routing.
@@ -97,9 +98,6 @@ pub struct EventBus {
     /// Shared channel handles for event injection and broadcast.
     ///
     /// This is shared with ClientRunner to enable UserInput broadcast.
-    // TODO: Replace expect("lock poisoned") with proper error handling.
-    //       All SharedChannelHandles/SharedComponentChannelMap usage should
-    //       migrate to parking_lot::RwLock (no poison) or match-based recovery.
     channel_handles: SharedChannelHandles,
     /// Maps ComponentId to ChannelId for routing RPC requests via ChannelHandle.
     ///
@@ -286,12 +284,11 @@ impl EventBus {
         let resolved_channel_id = self
             .component_channel_map
             .read()
-            .expect("component_channel_map lock poisoned")
             .get(&target.fqn())
             .copied();
         if let Some(channel_id) = resolved_channel_id {
             let handle = {
-                let handles = self.channel_handles.read().expect("lock poisoned");
+                let handles = self.channel_handles.read();
                 handles.get(&channel_id).cloned()
             };
 
@@ -407,7 +404,7 @@ impl EventBus {
     /// Call this when a new [`ChannelRunner`](crate::channel::ChannelRunner)
     /// is created to enable event injection to that channel.
     pub fn register_channel(&mut self, handle: ChannelHandle) {
-        let mut handles = self.channel_handles.write().expect("lock poisoned");
+        let mut handles = self.channel_handles.write();
         handles.insert(handle.id, handle);
     }
 
@@ -428,7 +425,6 @@ impl EventBus {
     ) {
         self.component_channel_map
             .write()
-            .expect("component_channel_map lock poisoned")
             .insert(component_id.fqn(), channel_id);
     }
 
@@ -436,12 +432,11 @@ impl EventBus {
     ///
     /// Call this when a channel is killed or completed.
     pub fn unregister_channel(&mut self, id: &ChannelId) {
-        let mut handles = self.channel_handles.write().expect("lock poisoned");
+        let mut handles = self.channel_handles.write();
         handles.remove(id);
         // Clean up component → channel mapping
         self.component_channel_map
             .write()
-            .expect("component_channel_map lock poisoned")
             .retain(|_, cid| cid != id);
     }
 
@@ -462,7 +457,7 @@ impl EventBus {
     /// Returns [`EngineError::SendFailed`] if the channel's buffer is full or closed.
     pub async fn inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
         let handle = {
-            let handles = self.channel_handles.read().expect("lock poisoned");
+            let handles = self.channel_handles.read();
             handles
                 .get(&channel_id)
                 .cloned()
@@ -483,7 +478,7 @@ impl EventBus {
     ///
     /// Returns error if channel not found, buffer full, or channel closed.
     pub fn try_inject(&self, channel_id: ChannelId, event: Event) -> Result<(), EngineError> {
-        let handles = self.channel_handles.read().expect("lock poisoned");
+        let handles = self.channel_handles.read();
         let handle = handles
             .get(&channel_id)
             .ok_or(EngineError::ChannelNotFound(channel_id))?;
@@ -528,7 +523,7 @@ impl EventBus {
             _ => {} // Continue
         }
 
-        let handles = self.channel_handles.read().expect("lock poisoned");
+        let handles = self.channel_handles.read();
         let mut delivered = 0;
         for handle in handles.values() {
             if handle.try_inject(event.clone()).is_ok() {
@@ -583,7 +578,7 @@ impl EventBus {
 
         // Collect handles first to avoid holding lock during async operations
         let handles: Vec<_> = {
-            let h = self.channel_handles.read().expect("lock poisoned");
+            let h = self.channel_handles.read();
             h.values().cloned().collect()
         };
 
@@ -612,7 +607,7 @@ impl EventBus {
     /// Returns the number of registered channels.
     #[must_use]
     pub fn channel_count(&self) -> usize {
-        let handles = self.channel_handles.read().expect("lock poisoned");
+        let handles = self.channel_handles.read();
         handles.len()
     }
 
@@ -1279,19 +1274,11 @@ mod tests {
         bus.register_component_channel(&target, channel_id);
 
         // Verify mapping exists
-        assert!(bus
-            .component_channel_map
-            .read()
-            .unwrap()
-            .contains_key(&target.fqn()));
+        assert!(bus.component_channel_map.read().contains_key(&target.fqn()));
 
         // Unregister should clean up
         bus.unregister_channel(&channel_id);
-        assert!(!bus
-            .component_channel_map
-            .read()
-            .unwrap()
-            .contains_key(&target.fqn()));
+        assert!(!bus.component_channel_map.read().contains_key(&target.fqn()));
     }
 
     // --- EventBus Hook integration tests (Step 4.3) ---

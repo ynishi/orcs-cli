@@ -395,10 +395,7 @@ impl ClientRunner {
         };
 
         // Broadcast to all channels
-        // TODO: Replace expect("lock poisoned") with proper error handling.
-        //       All SharedChannelHandles usage (here + eventbus.rs) should migrate
-        //       to parking_lot::RwLock (no poison) or match-based recovery.
-        let handles = self.channel_handles.read().expect("lock poisoned");
+        let handles = self.channel_handles.read();
         let mut delivered = 0;
         for (channel_id, handle) in handles.iter() {
             // Skip self to avoid echo
@@ -570,8 +567,8 @@ mod tests {
     use crate::channel::manager::WorldManager;
     use crate::io::IOPort;
     use orcs_types::PrincipalId;
+    use parking_lot::RwLock as ParkingRwLock;
     use std::collections::HashMap;
-    use std::sync::RwLock as StdRwLock;
 
     fn test_principal() -> Principal {
         Principal::User(PrincipalId::new())
@@ -610,7 +607,7 @@ mod tests {
         world: Arc<RwLock<World>>,
         signal_tx: &broadcast::Sender<Signal>,
     ) -> ClientRunnerConfig {
-        let channel_handles: SharedChannelHandles = Arc::new(StdRwLock::new(HashMap::new()));
+        let channel_handles: SharedChannelHandles = Arc::new(ParkingRwLock::new(HashMap::new()));
         ClientRunnerConfig {
             world_tx,
             world,

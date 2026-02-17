@@ -49,8 +49,6 @@ pub struct EventEmitter {
     /// Component ID for event source.
     source_id: ComponentId,
     /// Shared channel handles for broadcasting events to all channels.
-    // TODO: Replace expect("lock poisoned") with proper error handling.
-    //       See also eventbus.rs and client.rs for same pattern.
     shared_handles: Option<SharedChannelHandles>,
     /// Shared ComponentId → ChannelId mapping for RPC routing.
     component_channel_map: Option<SharedComponentChannelMap>,
@@ -146,15 +144,7 @@ impl EventEmitter {
                 operation: operation.to_string(),
                 payload: payload.clone(),
             };
-            match board.write() {
-                Ok(mut b) => b.append(entry),
-                Err(e) => {
-                    tracing::warn!(
-                        source = %self.source_id.fqn(),
-                        "Board write lock poisoned, skipping record: {e}"
-                    );
-                }
-            }
+            board.write().append(entry);
         }
     }
 
@@ -313,7 +303,7 @@ impl EventEmitter {
         };
 
         if let Some(handles) = &self.shared_handles {
-            let handles = handles.read().expect("lock poisoned");
+            let handles = handles.read();
             let mut delivered = 0usize;
             for handle in handles.values() {
                 if handle.try_inject(event.clone()).is_ok() {
@@ -372,13 +362,7 @@ impl Emitter for EventEmitter {
 
     fn board_recent(&self, n: usize) -> Vec<serde_json::Value> {
         match self.board.as_ref() {
-            Some(board) => match board.read() {
-                Ok(b) => b.recent_as_json(n),
-                Err(e) => {
-                    tracing::warn!("Board read lock poisoned: {e}");
-                    Vec::new()
-                }
-            },
+            Some(board) => board.read().recent_as_json(n),
             None => Vec::new(),
         }
     }
@@ -543,8 +527,9 @@ mod tests {
     fn emit_event_with_shared_handles_broadcasts() {
         use crate::channel::runner::base::ChannelHandle;
         use orcs_types::ChannelId;
+        use parking_lot::RwLock;
         use std::collections::HashMap;
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
 
         let (channel_tx, _channel_rx) = OutputSender::channel(64);
         let (signal_tx, _signal_rx) = broadcast::channel(64);
@@ -632,7 +617,7 @@ mod tests {
 
         emitter.emit_output("hello board");
 
-        let b = board.read().unwrap();
+        let b = board.read();
         assert_eq!(b.len(), 1);
         let entries = b.recent(1);
         assert_eq!(entries[0].payload["message"], "hello board");
@@ -650,7 +635,7 @@ mod tests {
 
         emitter.emit_output_with_level("warning!", "warn");
 
-        let b = board.read().unwrap();
+        let b = board.read();
         assert_eq!(b.len(), 1);
         let entries = b.recent(1);
         assert_eq!(entries[0].payload["level"], "warn");
@@ -672,7 +657,7 @@ mod tests {
             serde_json::json!({"tool": "read"}),
         );
 
-        let b = board.read().unwrap();
+        let b = board.read();
         assert_eq!(b.len(), 1);
         let entries = b.recent(1);
         assert_eq!(entries[0].operation, "complete");
@@ -789,9 +774,7 @@ mod tests {
         assert_eq!(received.payload["message"], "Board + IO test");
 
         // Should also be recorded on Board
-        let b = board
-            .read()
-            .expect("Board read lock should not be poisoned");
+        let b = board.read();
         assert_eq!(b.len(), 1, "Board should have exactly 1 entry");
         let entries = b.recent(1);
         assert_eq!(entries[0].payload["message"], "Board + IO test");

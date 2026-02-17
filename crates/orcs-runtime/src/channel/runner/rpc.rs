@@ -49,9 +49,7 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
 
     // Resolve FQN → ChannelId (with short-name fallback)
     let channel_id = {
-        let m = component_channel_map
-            .read()
-            .map_err(|e| format!("map lock poisoned: {e}"))?;
+        let m = component_channel_map.read();
         if let Some(&id) = m.get(target_fqn) {
             id
         } else if !target_fqn.contains("::") {
@@ -76,9 +74,7 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
 
     // Get ChannelHandle
     let handle = {
-        let h = shared_handles
-            .read()
-            .map_err(|e| format!("handles lock poisoned: {e}"))?;
+        let h = shared_handles.read();
         h.get(&channel_id)
             .cloned()
             .ok_or_else(|| format!("channel not found for: {target_fqn}"))?

@@ -1010,6 +1010,7 @@ dependencies = [
  "orcs-event",
  "orcs-hook",
  "orcs-types",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",

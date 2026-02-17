@@ -48,9 +48,10 @@
 
 use chrono::{DateTime, Utc};
 use orcs_types::ComponentId;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Default maximum entries in the Board.
 const DEFAULT_MAX_ENTRIES: usize = 1000;
@@ -338,12 +339,12 @@ mod tests {
         let board = shared_board();
 
         {
-            let mut b = board.write().expect("lock");
+            let mut b = board.write();
             b.append(sample_entry("tool", output_kind("info")));
         }
 
         {
-            let b = board.read().expect("lock");
+            let b = board.read();
             assert_eq!(b.len(), 1);
         }
     }
@@ -351,7 +352,7 @@ mod tests {
     #[test]
     fn shared_board_with_custom_capacity() {
         let board = shared_board_with_capacity(5);
-        let b = board.read().expect("lock");
+        let b = board.read();
         assert_eq!(b.len(), 0);
     }
 
