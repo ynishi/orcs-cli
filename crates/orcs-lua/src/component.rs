@@ -30,9 +30,10 @@ use orcs_component::{
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_runtime::sandbox::SandboxPolicy;
 use orcs_types::ComponentId;
+use parking_lot::Mutex;
 use serde_json::Value as JsonValue;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// A component implemented in Lua.
 ///
@@ -111,8 +112,8 @@ pub struct LuaComponent {
 // Justification:
 // 1. mlua is built with "send" feature (see Cargo.toml), which enables thread-safe
 //    Lua state allocation and makes the allocator thread-safe.
-// 2. The Lua runtime is wrapped in Mutex<Lua>, ensuring exclusive mutable access.
-//    All methods that access the Lua state acquire the lock first.
+// 2. The Lua runtime is wrapped in parking_lot::Mutex<Lua>, ensuring exclusive
+//    mutable access. All methods that access the Lua state acquire the lock first.
 // 3. All Lua callbacks are stored in the Lua registry via RegistryKey, which is
 //    designed for this use case. RegistryKey itself is Send.
 // 4. No raw Lua values (userdata, functions) escape the Mutex guard scope.
@@ -377,15 +378,11 @@ impl LuaComponent {
     /// Provides closure-based access to the internal Lua state.
     ///
     /// Intended for test mock injection (e.g. overriding `orcs.llm()`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the Lua mutex is poisoned.
     pub(crate) fn with_lua<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Lua) -> R,
     {
-        let lua = self.lua.lock().expect("lua mutex poisoned in with_lua");
+        let lua = self.lua.lock();
         f(&lua)
     }
 
@@ -420,19 +417,13 @@ impl LuaComponent {
 
         // Re-register orcs.output if emitter is set
         if let Some(emitter) = &self.emitter {
-            let lua = self
-                .lua
-                .lock()
-                .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
+            let lua = self.lua.lock();
             emitter_fns::register(&lua, Arc::clone(emitter))?;
         }
 
         // Re-register child context functions if child_context is set
         if let Some(ctx) = &self.child_context {
-            let lua = self
-                .lua
-                .lock()
-                .map_err(|e| LuaError::InvalidScript(format!("lua mutex poisoned: {}", e)))?;
+            let lua = self.lua.lock();
             ctx_fns::register(&lua, Arc::clone(ctx), Arc::clone(&self.sandbox))?;
         }
 
@@ -482,10 +473,7 @@ impl LuaComponent {
         let ctx_arc = Arc::new(Mutex::new(ctx));
         self.child_context = Some(Arc::clone(&ctx_arc));
 
-        let Ok(lua) = self.lua.lock() else {
-            tracing::error!(component = %self.id.fqn(), "Lua mutex poisoned in install_child_context");
-            return;
-        };
+        let lua = self.lua.lock();
 
         if let Err(e) = ctx_fns::register(&lua, ctx_arc, Arc::clone(&self.sandbox)) {
             tracing::warn!("Failed to register child context functions: {}", e);
@@ -550,10 +538,7 @@ impl Component for LuaComponent {
         }
         self.status = Status::Running;
 
-        let lua = self.lua.lock().map_err(|e| {
-            tracing::error!(error = %e, "Lua mutex poisoned");
-            ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
-        })?;
+        let lua = self.lua.lock();
 
         // Get callback from registry
         let on_request: Function = lua.registry_value(&self.on_request_key).map_err(|e| {
@@ -588,9 +573,7 @@ impl Component for LuaComponent {
         fields(component = %self.id.fqn(), signal_kind = ?signal.kind)
     )]
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        let Ok(lua) = self.lua.lock() else {
-            return SignalResponse::Ignored;
-        };
+        let lua = self.lua.lock();
 
         let Ok(on_signal): Result<Function, _> = lua.registry_value(&self.on_signal_key) else {
             return SignalResponse::Ignored;
@@ -626,10 +609,7 @@ impl Component for LuaComponent {
             return Ok(());
         };
 
-        let lua = self.lua.lock().map_err(|e| {
-            tracing::error!("Lua mutex poisoned in init: {}", e);
-            ComponentError::ExecutionFailed("lua runtime unavailable".to_string())
-        })?;
+        let lua = self.lua.lock();
 
         let init_fn: Function = lua.registry_value(init_key).map_err(|e| {
             tracing::debug!("Failed to get init from registry: {}", e);
@@ -662,9 +642,7 @@ impl Component for LuaComponent {
             return;
         };
 
-        let Ok(lua) = self.lua.lock() else {
-            return;
-        };
+        let lua = self.lua.lock();
 
         if let Ok(shutdown_fn) = lua.registry_value::<Function>(shutdown_key) {
             if let Err(e) = shutdown_fn.call::<()>(()) {
@@ -678,10 +656,7 @@ impl Component for LuaComponent {
             return Err(SnapshotError::NotSupported(self.id.fqn()));
         };
 
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| SnapshotError::InvalidData(format!("lua mutex poisoned: {e}")))?;
+        let lua = self.lua.lock();
 
         let snapshot_fn: Function = lua
             .registry_value(snapshot_key)
@@ -702,10 +677,7 @@ impl Component for LuaComponent {
 
         snapshot.validate(&self.id.fqn())?;
 
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| SnapshotError::InvalidData(format!("lua mutex poisoned: {e}")))?;
+        let lua = self.lua.lock();
 
         let restore_fn: Function = lua
             .registry_value(restore_key)
@@ -730,15 +702,9 @@ impl Component for LuaComponent {
         self.emitter = Some(Arc::clone(&emitter_arc));
 
         // Register emitter-backed Lua functions (orcs.output, orcs.emit_event)
-        if let Ok(lua) = self.lua.lock() {
-            if let Err(e) = emitter_fns::register(&lua, emitter_arc) {
-                tracing::warn!("Failed to register emitter functions: {}", e);
-            }
-        } else {
-            tracing::warn!(
-                component = %self.id.fqn(),
-                "set_emitter: Lua lock failed — noop orcs.output remains active"
-            );
+        let lua = self.lua.lock();
+        if let Err(e) = emitter_fns::register(&lua, emitter_arc) {
+            tracing::warn!("Failed to register emitter functions: {}", e);
         }
     }
 

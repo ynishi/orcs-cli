@@ -24,9 +24,10 @@ fn test_sandbox() -> Arc<dyn SandboxPolicy> {
 fn create_lua() -> Arc<Mutex<Lua>> {
     Arc::new(Mutex::new(Lua::new()))
 }
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // =============================================================================
 // Test Fixtures
@@ -106,7 +107,6 @@ impl MockChildContext {
     fn emit_messages(&self) -> Vec<String> {
         self.emit_history
             .lock()
-            .unwrap()
             .iter()
             .map(|r| r.message.clone())
             .collect()
@@ -116,7 +116,6 @@ impl MockChildContext {
     fn has_emit_containing(&self, substr: &str) -> bool {
         self.emit_history
             .lock()
-            .unwrap()
             .iter()
             .any(|r| r.message.contains(substr))
     }
@@ -125,7 +124,6 @@ impl MockChildContext {
     fn spawned_ids(&self) -> Vec<String> {
         self.spawn_history
             .lock()
-            .unwrap()
             .iter()
             .map(|r| r.id.clone())
             .collect()
@@ -165,7 +163,7 @@ impl ChildContext for MockChildContext {
 
     fn emit_output(&self, message: &str) {
         self.emit_count.fetch_add(1, Ordering::SeqCst);
-        self.emit_history.lock().unwrap().push(EmitRecord {
+        self.emit_history.lock().push(EmitRecord {
             message: message.to_string(),
             level: None,
         });
@@ -173,7 +171,7 @@ impl ChildContext for MockChildContext {
 
     fn emit_output_with_level(&self, message: &str, level: &str) {
         self.emit_count.fetch_add(1, Ordering::SeqCst);
-        self.emit_history.lock().unwrap().push(EmitRecord {
+        self.emit_history.lock().push(EmitRecord {
             message: message.to_string(),
             level: Some(level.to_string()),
         });
@@ -196,10 +194,7 @@ impl ChildContext for MockChildContext {
         }
 
         // Record spawn
-        self.spawn_history
-            .lock()
-            .unwrap()
-            .push(SpawnRecord::from(&config));
+        self.spawn_history.lock().push(SpawnRecord::from(&config));
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(MockHandle { id: config.id }))
     }
@@ -296,7 +291,7 @@ mod worker_child {
         child.run(json!({"task": "test", "iterations": 1}));
 
         // Worker should emit at least 2 messages (start + complete)
-        let emit_count = ctx_emit_history.lock().unwrap().len();
+        let emit_count = ctx_emit_history.lock().len();
         assert!(
             emit_count >= 2,
             "Expected at least 2 emissions, got {}",
@@ -306,7 +301,6 @@ mod worker_child {
         // Verify message content (worker outputs "Worker starting task: ...")
         let has_start = ctx_emit_history
             .lock()
-            .unwrap()
             .iter()
             .any(|r| r.message.contains("starting task"));
         assert!(has_start, "Should emit 'starting task' message");
@@ -377,12 +371,7 @@ mod spawner_child {
         assert!(result.is_ok(), "Run failed: {:?}", result);
 
         // Verify spawning occurred using spawn_history
-        let spawned_ids: Vec<String> = spawn_history
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
+        let spawned_ids: Vec<String> = spawn_history.lock().iter().map(|r| r.id.clone()).collect();
         assert_eq!(spawned_ids.len(), 3, "Should have spawned 3 workers");
 
         // Verify IDs are correct (spawner_child.lua uses "sub-worker-" prefix)
@@ -817,7 +806,7 @@ mod test_harness {
         child.run(json!({"task": "test-task"}));
 
         // Verify message content
-        let history = emit_history.lock().unwrap();
+        let history = emit_history.lock();
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].message, "Hello World");
         assert!(history[0].level.is_none());
@@ -854,14 +843,12 @@ mod test_harness {
         // Use emit_history directly to check content
         let has_error = emit_history
             .lock()
-            .unwrap()
             .iter()
             .any(|r| r.message.contains("Error"));
         assert!(has_error, "Should find 'Error' in messages");
 
         let has_success = emit_history
             .lock()
-            .unwrap()
             .iter()
             .any(|r| r.message.contains("Success"));
         assert!(!has_success, "Should NOT find 'Success' in messages");
@@ -892,7 +879,7 @@ mod test_harness {
         child.run(json!({}));
 
         // Verify spawn records
-        let history = spawn_history.lock().unwrap();
+        let history = spawn_history.lock();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].id, "worker-alpha");
         assert_eq!(history[1].id, "worker-beta");
@@ -923,12 +910,7 @@ mod test_harness {
 
         child.run(json!({}));
 
-        let ids: Vec<String> = spawn_history
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
+        let ids: Vec<String> = spawn_history.lock().iter().map(|r| r.id.clone()).collect();
         assert_eq!(ids, vec!["w-1", "w-2", "w-3", "w-4", "w-5"]);
     }
 

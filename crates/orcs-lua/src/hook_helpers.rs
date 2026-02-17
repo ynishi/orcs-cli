@@ -41,7 +41,7 @@ use crate::orcs_helpers::ensure_orcs_table;
 use mlua::{Function, Lua, LuaSerdeExt, Value};
 use orcs_hook::{FqlPattern, Hook, HookAction, HookContext, HookPoint, SharedHookRegistry};
 use orcs_types::ComponentId;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 // ── LuaHook ──────────────────────────────────────────────────────
 
@@ -91,10 +91,7 @@ impl LuaHook {
 
     /// Attempts to execute the hook, returning errors as `mlua::Error`.
     fn try_execute(&self, ctx: &HookContext) -> Result<HookAction, mlua::Error> {
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("lua mutex poisoned: {e}")))?;
+        let lua = self.lua.lock();
 
         let func: Function = lua.registry_value(&self.func_key)?;
         let ctx_value: Value = lua.to_value(ctx)?;

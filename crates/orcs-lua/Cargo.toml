@@ -35,6 +35,9 @@ toml = { workspace = true }
 shell-sanitize = "0.1.0"
 shell-sanitize-rules = "0.1.0"
 
+# Synchronization (no-poison Mutex)
+parking_lot = "0.12"
+
 # Error handling
 thiserror = "2.0"
 

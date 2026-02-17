@@ -14,7 +14,8 @@ use crate::tools::{tool_glob, tool_grep, tool_mkdir, tool_mv, tool_read, tool_re
 use mlua::{Lua, Table};
 use orcs_component::{Capability, ChildContext};
 use orcs_runtime::sandbox::SandboxPolicy;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Wrapper to store [`ChildContext`] in Lua's `app_data`.
 ///
@@ -27,7 +28,7 @@ pub(crate) struct ContextWrapper(pub(crate) Arc<Mutex<Box<dyn ChildContext>>>);
 ///
 /// # Errors
 ///
-/// Returns `RuntimeError` if no context is available or the mutex is poisoned.
+/// Returns `RuntimeError` if no context is available.
 pub(crate) fn with_context<F, R>(lua: &Lua, f: F) -> mlua::Result<R>
 where
     F: FnOnce(&dyn ChildContext) -> mlua::Result<R>,
@@ -35,10 +36,7 @@ where
     let wrapper = lua
         .app_data_ref::<ContextWrapper>()
         .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
-    let ctx = wrapper
-        .0
-        .lock()
-        .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+    let ctx = wrapper.0.lock();
     f(&**ctx)
 }
 

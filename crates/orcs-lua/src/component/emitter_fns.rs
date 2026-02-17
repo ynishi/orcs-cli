@@ -7,11 +7,11 @@
 //! - `orcs.board_recent(n)` — query shared Board
 //! - `orcs.request(target, operation, payload, opts?)` — Component-to-Component RPC
 
-use super::truncate_utf8;
 use crate::error::LuaError;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
 use orcs_component::Emitter;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Registers emitter-backed Lua functions into the `orcs` Lua table.
 ///
@@ -22,14 +22,7 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     // orcs.output(msg) - emit output event via emitter
     let emitter_clone = Arc::clone(&emitter);
     let output_fn = lua.create_function(move |_, msg: String| {
-        match emitter_clone.lock() {
-            Ok(em) => em.emit_output(&msg),
-            Err(e) => tracing::warn!(
-                "orcs.output: emitter lock poisoned, message dropped: {} (err: {})",
-                truncate_utf8(&msg, 100),
-                e
-            ),
-        }
+        emitter_clone.lock().emit_output(&msg);
         Ok(())
     })?;
     orcs_table.set("output", output_fn)?;
@@ -37,14 +30,7 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     // orcs.output_with_level(msg, level) - emit output with level
     let emitter_clone2 = Arc::clone(&emitter);
     let output_level_fn = lua.create_function(move |_, (msg, level): (String, String)| {
-        match emitter_clone2.lock() {
-            Ok(em) => em.emit_output_with_level(&msg, &level),
-            Err(e) => tracing::warn!(
-                "orcs.output_with_level: emitter lock poisoned, message dropped: {} (err: {})",
-                truncate_utf8(&msg, 100),
-                e
-            ),
-        }
+        emitter_clone2.lock().emit_output_with_level(&msg, &level);
         Ok(())
     })?;
     orcs_table.set("output_with_level", output_level_fn)?;
@@ -54,9 +40,9 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     let emit_event_fn = lua.create_function(
         move |lua, (category, operation, payload): (String, String, LuaValue)| {
             let json_payload: serde_json::Value = lua.from_value(payload)?;
-            if let Ok(em) = emitter_clone3.lock() {
-                em.emit_event(&category, &operation, json_payload);
-            }
+            emitter_clone3
+                .lock()
+                .emit_event(&category, &operation, json_payload);
             Ok(())
         },
     )?;
@@ -65,10 +51,7 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     // orcs.board_recent(n) -> table[] - query shared Board via Emitter trait
     let emitter_clone4 = Arc::clone(&emitter);
     let board_recent_fn = lua.create_function(move |lua, n: usize| {
-        let entries = emitter_clone4
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("emitter lock poisoned: {e}")))?
-            .board_recent(n);
+        let entries = emitter_clone4.lock().board_recent(n);
 
         let result = lua.create_table()?;
         for (i, entry) in entries.into_iter().enumerate() {
@@ -94,9 +77,7 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
                 let json_payload: serde_json::Value = lua.from_value(payload)?;
                 let timeout_ms = opts.and_then(|t| t.get::<u64>("timeout_ms").ok());
 
-                let em = emitter_clone5.lock().map_err(|e| {
-                    mlua::Error::RuntimeError(format!("emitter lock poisoned: {e}"))
-                })?;
+                let em = emitter_clone5.lock();
 
                 match em.request(&target, &operation, json_payload, timeout_ms) {
                     Ok(value) => {

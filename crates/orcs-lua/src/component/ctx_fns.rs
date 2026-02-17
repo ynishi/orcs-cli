@@ -19,7 +19,8 @@ use crate::types::{lua_to_json, serde_json_to_lua};
 use mlua::{Lua, LuaSerdeExt, Table};
 use orcs_component::{ChildConfig, ChildContext};
 use orcs_runtime::sandbox::SandboxPolicy;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Registers child-context functions into the `orcs` Lua table.
 ///
@@ -43,9 +44,7 @@ pub(super) fn register(
     let ctx_clone = Arc::clone(&ctx);
     let exec_sandbox_root = sandbox_root.clone();
     let exec_fn = lua.create_function(move |lua, cmd: String| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         // Capability gate: EXECUTE required
         if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
@@ -126,9 +125,7 @@ pub(super) fn register(
         let argv_sandbox_root = sandbox_root.clone();
         let exec_argv_fn = lua.create_function(
             move |lua, (program, args, opts): (String, Table, Option<Table>)| {
-                let ctx_guard = ctx_clone.lock().map_err(|e| {
-                    mlua::Error::RuntimeError(format!("context lock failed: {}", e))
-                })?;
+                let ctx_guard = ctx_clone.lock();
 
                 // Capability gate: EXECUTE required
                 if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
@@ -192,9 +189,7 @@ pub(super) fn register(
 
         let llm_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
             // Capability check
-            let ctx_guard = ctx_clone
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx_guard = ctx_clone.lock();
 
             if !ctx_guard.has_capability(orcs_component::Capability::LLM) {
                 let result = lua.create_table()?;
@@ -213,9 +208,7 @@ pub(super) fn register(
     // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
     let ctx_clone = Arc::clone(&ctx);
     let spawn_child_fn = lua.create_function(move |lua, config: Table| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         // Capability gate: SPAWN required
         if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {
@@ -269,9 +262,7 @@ pub(super) fn register(
     // orcs.check_command(cmd) -> { status, reason?, grant_pattern?, description? }
     let ctx_clone = Arc::clone(&ctx);
     let check_command_fn = lua.create_function(move |lua, cmd: String| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         let permission = ctx_guard.check_command_permission(&cmd);
         let result = lua.create_table()?;
@@ -298,9 +289,7 @@ pub(super) fn register(
     // orcs.grant_command(pattern) -> nil
     let ctx_clone = Arc::clone(&ctx);
     let grant_command_fn = lua.create_function(move |_, pattern: String| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         ctx_guard.grant_command(&pattern);
         tracing::info!("Lua grant_command: {}", pattern);
@@ -312,9 +301,7 @@ pub(super) fn register(
     let ctx_clone = Arc::clone(&ctx);
     let request_approval_fn =
         lua.create_function(move |_, (operation, description): (String, String)| {
-            let ctx_guard = ctx_clone
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx_guard = ctx_clone.lock();
 
             let approval_id = ctx_guard.emit_approval_request(&operation, &description);
             Ok(approval_id)
@@ -324,9 +311,7 @@ pub(super) fn register(
     // orcs.child_count() -> number
     let ctx_clone = Arc::clone(&ctx);
     let child_count_fn = lua.create_function(move |_, ()| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
         Ok(ctx_guard.child_count())
     })?;
     orcs_table.set("child_count", child_count_fn)?;
@@ -334,9 +319,7 @@ pub(super) fn register(
     // orcs.max_children() -> number
     let ctx_clone = Arc::clone(&ctx);
     let max_children_fn = lua.create_function(move |_, ()| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
         Ok(ctx_guard.max_children())
     })?;
     orcs_table.set("max_children", max_children_fn)?;
@@ -345,9 +328,7 @@ pub(super) fn register(
     let ctx_clone = Arc::clone(&ctx);
     let send_to_child_fn =
         lua.create_function(move |lua, (child_id, message): (String, mlua::Value)| {
-            let ctx_guard = ctx_clone
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx_guard = ctx_clone.lock();
 
             // Convert Lua value to JSON
             let input = lua_to_json(message, lua)?;
@@ -387,9 +368,7 @@ pub(super) fn register(
     let ctx_clone = Arc::clone(&ctx);
     let send_to_child_async_fn =
         lua.create_function(move |lua, (child_id, message): (String, mlua::Value)| {
-            let ctx_guard = ctx_clone
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx_guard = ctx_clone.lock();
 
             let input = lua_to_json(message, lua)?;
 
@@ -418,9 +397,7 @@ pub(super) fn register(
     let ctx_clone = Arc::clone(&ctx);
     let send_batch_fn =
         lua.create_function(move |lua, (ids, inputs): (mlua::Table, mlua::Table)| {
-            let ctx_guard = ctx_clone
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx_guard = ctx_clone.lock();
 
             let ids_len = ids.len()? as usize;
             let inputs_len = inputs.len()? as usize;
@@ -479,9 +456,7 @@ pub(super) fn register(
     // Results are returned in the same order as the input array.
     let ctx_clone = Arc::clone(&ctx);
     let request_batch_fn = lua.create_function(move |lua, requests: mlua::Table| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         let len = requests.len()? as usize;
         let mut batch = Vec::with_capacity(len);
@@ -528,9 +503,7 @@ pub(super) fn register(
     // Spawns a Component as a separate ChannelRunner for parallel execution
     let ctx_clone = Arc::clone(&ctx);
     let spawn_runner_fn = lua.create_function(move |lua, config: Table| {
-        let ctx_guard = ctx_clone
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx_guard = ctx_clone.lock();
 
         // Capability gate: SPAWN required
         if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {

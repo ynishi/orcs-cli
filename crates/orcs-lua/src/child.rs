@@ -35,7 +35,8 @@ use orcs_component::{
 };
 use orcs_event::{Signal, SignalResponse};
 use orcs_runtime::sandbox::SandboxPolicy;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// A child entity implemented in Lua.
 ///
@@ -124,11 +125,7 @@ impl LuaChild {
         table: Table,
         sandbox: Arc<dyn SandboxPolicy>,
     ) -> Result<Self, LuaError> {
-        let lua_guard = lua.lock().map_err(|e| {
-            LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
-                e.to_string(),
-            ))))
-        })?;
+        let lua_guard = lua.lock();
 
         // Register base orcs functions only if not already set up.
         // If the parent VM was configured via LuaEnv, calling register_base_orcs_functions
@@ -241,11 +238,7 @@ impl LuaChild {
         sandbox: Arc<dyn SandboxPolicy>,
     ) -> Result<Self, LuaError> {
         let id = id.into();
-        let lua_guard = lua.lock().map_err(|e| {
-            LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
-                e.to_string(),
-            ))))
-        })?;
+        let lua_guard = lua.lock();
 
         // Register base orcs functions only if not already set up.
         if !is_orcs_initialized(&lua_guard) {
@@ -289,11 +282,7 @@ impl LuaChild {
         script: &str,
         sandbox: Arc<dyn SandboxPolicy>,
     ) -> Result<Self, LuaError> {
-        let lua_guard = lua.lock().map_err(|e| {
-            LuaError::Runtime(mlua::Error::ExternalError(Arc::new(std::io::Error::other(
-                e.to_string(),
-            ))))
-        })?;
+        let lua_guard = lua.lock();
 
         let table: Table = lua_guard
             .load(script)
@@ -314,9 +303,7 @@ impl Identifiable for LuaChild {
 
 impl SignalReceiver for LuaChild {
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        let Ok(lua) = self.lua.lock() else {
-            return SignalResponse::Ignored;
-        };
+        let lua = self.lua.lock();
 
         // Register context functions if context is available
         // This allows on_signal to use orcs.emit_output, etc.
@@ -355,20 +342,18 @@ impl SignalReceiver for LuaChild {
 
         // Call Lua abort if available
         if let Some(abort_key) = &self.abort_key {
-            if let Ok(lua) = self.lua.lock() {
-                // Register context functions if context is available
-                // This allows abort() to use orcs.emit_output, etc.
-                if let Some(ctx) = &self.context {
-                    if let Err(e) = register_context_functions(&lua, ctx.clone_box(), &self.sandbox)
-                    {
-                        tracing::warn!("Failed to register context functions in abort: {}", e);
-                    }
+            let lua = self.lua.lock();
+            // Register context functions if context is available
+            // This allows abort() to use orcs.emit_output, etc.
+            if let Some(ctx) = &self.context {
+                if let Err(e) = register_context_functions(&lua, ctx.clone_box(), &self.sandbox) {
+                    tracing::warn!("Failed to register context functions in abort: {}", e);
                 }
+            }
 
-                if let Ok(abort_fn) = lua.registry_value::<Function>(abort_key) {
-                    if let Err(e) = abort_fn.call::<()>(()) {
-                        tracing::warn!("Lua child abort error: {}", e);
-                    }
+            if let Ok(abort_fn) = lua.registry_value::<Function>(abort_key) {
+                if let Err(e) = abort_fn.call::<()>(()) {
+                    tracing::warn!("Lua child abort error: {}", e);
                 }
             }
         }
@@ -400,13 +385,7 @@ impl RunnableChild for LuaChild {
         self.status = Status::Running;
 
         // Get Lua lock
-        let lua = match self.lua.lock() {
-            Ok(l) => l,
-            Err(e) => {
-                self.status = Status::Error;
-                return ChildResult::Err(ChildError::Internal(format!("lua lock failed: {}", e)));
-            }
-        };
+        let lua = self.lua.lock();
 
         // Register context-dependent functions if context is available
         if let Some(ctx) = &self.context {
@@ -530,10 +509,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx = wrapper.0.lock();
 
         // Capability gate: EXECUTE required
         if !ctx.has_capability(orcs_component::Capability::EXECUTE) {
@@ -612,10 +588,7 @@ fn register_context_functions(
                 .app_data_ref::<ContextWrapper>()
                 .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-            let ctx = wrapper
-                .0
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx = wrapper.0.lock();
 
             // Capability gate: EXECUTE required
             if !ctx.has_capability(orcs_component::Capability::EXECUTE) {
@@ -677,10 +650,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx = wrapper.0.lock();
 
         if !ctx.has_capability(orcs_component::Capability::LLM) {
             let result = lua.create_table()?;
@@ -701,10 +671,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx = wrapper.0.lock();
 
         // Capability gate: SPAWN required
         if !ctx.has_capability(orcs_component::Capability::SPAWN) {
@@ -751,10 +718,7 @@ fn register_context_functions(
                 .app_data_ref::<ContextWrapper>()
                 .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-            let ctx = wrapper
-                .0
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+            let ctx = wrapper.0.lock();
 
             match level {
                 Some(lvl) => ctx.emit_output_with_level(&message, &lvl),
@@ -771,10 +735,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx = wrapper.0.lock();
 
         Ok(ctx.child_count())
     })?;
@@ -786,10 +747,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+        let ctx = wrapper.0.lock();
 
         Ok(ctx.max_children())
     })?;
@@ -801,10 +759,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+        let ctx = wrapper.0.lock();
 
         let permission = ctx.check_command_permission(&cmd);
         let result = lua.create_table()?;
@@ -834,10 +789,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+        let ctx = wrapper.0.lock();
 
         ctx.grant_command(&pattern);
         tracing::info!("Lua grant_command: {}", pattern);
@@ -852,10 +804,7 @@ fn register_context_functions(
                 .app_data_ref::<ContextWrapper>()
                 .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-            let ctx = wrapper
-                .0
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+            let ctx = wrapper.0.lock();
 
             let approval_id = ctx.emit_approval_request(&operation, &description);
             Ok(approval_id)
@@ -877,10 +826,7 @@ fn register_context_functions(
                     .app_data_ref::<ContextWrapper>()
                     .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-                let ctx = wrapper
-                    .0
-                    .lock()
-                    .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+                let ctx = wrapper.0.lock();
 
                 let json_payload: serde_json::Value = lua.from_value(payload)?;
                 let timeout_ms = opts.and_then(|t| t.get::<u64>("timeout_ms").ok());
@@ -913,10 +859,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+        let ctx = wrapper.0.lock();
 
         // Convert Lua array to Vec<(target, operation, payload, timeout_ms)>
         let len = requests.len()? as usize;
@@ -968,10 +911,7 @@ fn register_context_functions(
                 .app_data_ref::<ContextWrapper>()
                 .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-            let ctx = wrapper
-                .0
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+            let ctx = wrapper.0.lock();
 
             let input = crate::types::lua_to_json(message, lua)?;
 
@@ -1014,10 +954,7 @@ fn register_context_functions(
                 .app_data_ref::<ContextWrapper>()
                 .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-            let ctx = wrapper
-                .0
-                .lock()
-                .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+            let ctx = wrapper.0.lock();
 
             let input = crate::types::lua_to_json(message, lua)?;
 
@@ -1048,10 +985,7 @@ fn register_context_functions(
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
 
-        let ctx = wrapper
-            .0
-            .lock()
-            .map_err(|e| mlua::Error::RuntimeError(format!("context lock: {e}")))?;
+        let ctx = wrapper.0.lock();
 
         // Convert Lua arrays to Vec<(String, Value)>
         let mut requests = Vec::new();
@@ -1254,7 +1188,7 @@ mod tests {
     #[test]
     fn from_table_runnable_requires_run() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let lua_guard = lua.lock().unwrap();
+        let lua_guard = lua.lock();
         let table = lua_guard.create_table().unwrap();
         table.set("id", "test").unwrap();
         // Create a simple on_signal function

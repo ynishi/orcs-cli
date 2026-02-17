@@ -12,8 +12,9 @@ use orcs_runtime::{
     ChannelConfig, ConfigResolver, IOPort, LocalFileStore, OrcsEngine, Session, SessionAsset, World,
 };
 use orcs_types::{Principal, PrincipalId};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// LuaChildLoader implementation for spawning Lua children.
 struct AppLuaChildLoader {
