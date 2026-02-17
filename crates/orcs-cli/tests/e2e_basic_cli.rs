@@ -65,8 +65,11 @@ fn profile_manager_initializes() {
 
 #[test]
 fn agent_mgr_ready_with_workers() {
+    // Use -d (debug mode) to ensure component init completes before stdin
+    // processing. Without -d, the async Ready message races with quit.
     let (mut cmd, _guard) = orcs_cmd();
-    cmd.write_stdin("q\n")
+    cmd.arg("-d")
+        .write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("[AgentMgr] Ready (worker: llm)"));
