@@ -76,7 +76,7 @@ use orcs_runtime::{
     ConfigResolver, IOInput, IOInputHandle, IOOutput, IOOutputHandle, InputCommand, InputContext,
     LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
 };
-use orcs_types::{ChannelId, Principal};
+use orcs_types::{ChannelId, Principal, PrincipalId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -260,6 +260,124 @@ impl OrcsApp {
         Ok(())
     }
 
+    /// Runs the application in non-interactive command mode.
+    ///
+    /// Sends a single command, collects output until idle, and exits.
+    /// Unlike interactive mode, raw text is sent directly without
+    /// interactive command parsing (`q`/`y`/`n` are sent as-is).
+    ///
+    /// # Output routing
+    ///
+    /// - `Normal`/`Info`/`Success`/`Debug` → stdout
+    /// - `Warn`/`Error` → stderr
+    ///
+    /// # Returns
+    ///
+    /// Exit code: 0 for success, 1 if errors occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Io`] on communication errors.
+    pub async fn run_command(&mut self, command: &str) -> Result<i32, AppError> {
+        self.engine.start();
+
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            self.engine.stop();
+            self.engine.shutdown().await;
+            return Ok(0);
+        }
+
+        // Route: @component messages use targeted injection,
+        // everything else goes through IOInput as user message.
+        if trimmed.starts_with('@') {
+            let cmd = InputParser.parse(trimmed);
+            match cmd {
+                InputCommand::ComponentMessage {
+                    ref target,
+                    ref message,
+                } => {
+                    self.handle_component_message(target, message);
+                }
+                _ => {
+                    // Bare "@" or invalid target
+                    eprintln!("Invalid component target: {trimmed}");
+                    self.engine.stop();
+                    self.engine.shutdown().await;
+                    return Ok(1);
+                }
+            }
+        } else {
+            // Send raw text directly (no interactive command parsing).
+            let io_input = IOInput::line(command);
+            if let Err(e) = self.io_input.try_send(io_input) {
+                eprintln!("Failed to send command: {e:?}");
+                self.engine.stop();
+                self.engine.shutdown().await;
+                return Ok(1);
+            }
+        }
+
+        // Collect output with idle-timeout detection.
+        //   - Before first output: wait up to MAX_WAIT (LLM may be slow to start).
+        //   - After first output:  wait up to IDLE for more (stream complete).
+        const IDLE: tokio::time::Duration = tokio::time::Duration::from_secs(3);
+        const MAX_WAIT: tokio::time::Duration = tokio::time::Duration::from_secs(120);
+
+        let start = tokio::time::Instant::now();
+        let mut received_output = false;
+        let mut exit_code: i32 = 0;
+
+        loop {
+            if start.elapsed() > MAX_WAIT {
+                tracing::warn!(
+                    "Command mode: max timeout reached ({}s)",
+                    MAX_WAIT.as_secs()
+                );
+                break;
+            }
+
+            let timeout = if received_output { IDLE } else { MAX_WAIT };
+
+            tokio::select! {
+                Some(io_out) = self.io_output.recv() => {
+                    match &io_out {
+                        IOOutput::Print { text, style } => {
+                            received_output = true;
+                            if style.is_warning_or_error() {
+                                exit_code = 1;
+                                eprintln!("{text}");
+                            } else {
+                                println!("{text}");
+                            }
+                        }
+                        IOOutput::Prompt { .. } => {
+                            // System ready for next input → command complete.
+                            break;
+                        }
+                        IOOutput::ShowApprovalRequest { .. } => {
+                            // Non-interactive mode cannot handle HIL approval.
+                            eprintln!("Command requires interactive approval. Use interactive mode.");
+                            exit_code = 1;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                () = tokio::time::sleep(timeout) => {
+                    tracing::debug!(
+                        "Command mode: timeout (received_output={received_output})",
+                    );
+                    break;
+                }
+            }
+        }
+
+        self.engine.stop();
+        self.engine.shutdown().await;
+        Ok(exit_code)
+    }
+
     /// Runs the application in interactive mode.
     ///
     /// Uses parallel execution infrastructure:
@@ -407,9 +525,14 @@ impl OrcsApp {
                 ));
             }
             InputCommand::Steer { message } => {
+                let io_id = self.engine.io_channel();
+                self.engine.signal(Signal::steer(
+                    io_id,
+                    message.as_str(),
+                    Principal::User(PrincipalId::new()),
+                ));
                 self.renderer
                     .render_output(&IOOutput::info(format!("Steer: {message}")));
-                // TODO: Implement steer
             }
             InputCommand::Empty => {
                 // Blank line - ignore

@@ -88,10 +88,9 @@ pub struct EventBus {
     request_senders: HashMap<ComponentId, mpsc::Sender<Request>>,
     /// Pending response receivers (for standalone ComponentHandle path).
     pending_responses: HashMap<RequestId, oneshot::Sender<Result<Value, EngineError>>>,
-    /// Signal broadcaster
+    /// Signal broadcaster (test-only path via `register()` / `ComponentHandle`).
     ///
-    /// TODO: Remove - Engine now owns signal_tx directly.
-    /// EventBus signal methods (signal(), signal_sender()) are unused.
+    /// Engine uses its own `signal_tx` for ChannelRunner broadcast.
     signal_tx: broadcast::Sender<Signal>,
     /// Category subscriptions: category -> set of component IDs
     subscriptions: HashMap<EventCategory, HashSet<ComponentId>>,
@@ -386,11 +385,6 @@ impl EventBus {
         }
     }
 
-    /// Broadcast signal to all components
-    pub fn signal(&self, signal: Signal) {
-        let _ = self.signal_tx.send(signal);
-    }
-
     /// Get number of registered components
     #[must_use]
     pub fn component_count(&self) -> usize {
@@ -610,13 +604,14 @@ impl EventBus {
         let handles = self.channel_handles.read();
         handles.len()
     }
+}
 
-    /// Returns the signal broadcast sender.
-    ///
-    /// Use this to create signal receivers for new channel runners.
-    #[must_use]
-    pub fn signal_sender(&self) -> broadcast::Sender<Signal> {
-        self.signal_tx.clone()
+// Test-only methods that use the standalone ComponentHandle signal path.
+#[cfg(test)]
+impl EventBus {
+    /// Broadcast signal to all components registered via `register()`.
+    pub fn signal(&self, signal: Signal) {
+        let _ = self.signal_tx.send(signal);
     }
 }
 
