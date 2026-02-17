@@ -989,6 +989,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shell-sanitize",
+ "shell-sanitize-rules",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1390,6 +1392,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shell-sanitize"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5194e7a8ef468b6486dd8b6efe65d88de783613292d37f7f080c6fc92ac62e00"
+
+[[package]]
+name = "shell-sanitize-rules"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366a197a3ea9156f4fa4947dd286fcd817390246564d37af8882ae1b2f27920c"
+dependencies = [
+ "shell-sanitize",
 ]
 
 [[package]]

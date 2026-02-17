@@ -47,6 +47,19 @@ pub(super) fn register(
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
 
+        // Capability gate: EXECUTE required
+        if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("stdout", "")?;
+            result.set(
+                "stderr",
+                "permission denied: Capability::EXECUTE not granted",
+            )?;
+            result.set("code", -1)?;
+            return Ok(result);
+        }
+
         // Permission check via check_command_permission (respects dynamic grants)
         let permission = ctx_guard.check_command_permission(&cmd);
         match &permission {
@@ -105,6 +118,71 @@ pub(super) fn register(
     })?;
     orcs_table.set("exec", exec_fn)?;
 
+    // orcs.exec_argv(program, args [, opts]) -> {ok, stdout, stderr, code}
+    // Shell-free execution: bypasses sh -c entirely.
+    // Permission-checked via Capability::EXECUTE + check_command_permission(program).
+    {
+        let ctx_clone = Arc::clone(&ctx);
+        let argv_sandbox_root = sandbox_root.clone();
+        let exec_argv_fn = lua.create_function(
+            move |lua, (program, args, opts): (String, Table, Option<Table>)| {
+                let ctx_guard = ctx_clone.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("context lock failed: {}", e))
+                })?;
+
+                // Capability gate: EXECUTE required
+                if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("stdout", "")?;
+                    result.set(
+                        "stderr",
+                        "permission denied: Capability::EXECUTE not granted",
+                    )?;
+                    result.set("code", -1)?;
+                    return Ok(result);
+                }
+
+                // Permission check on program name
+                let permission = ctx_guard.check_command_permission(&program);
+                match &permission {
+                    orcs_component::CommandPermission::Allowed => {}
+                    orcs_component::CommandPermission::Denied(reason) => {
+                        let result = lua.create_table()?;
+                        result.set("ok", false)?;
+                        result.set("stdout", "")?;
+                        result.set("stderr", format!("permission denied: {}", reason))?;
+                        result.set("code", -1)?;
+                        return Ok(result);
+                    }
+                    orcs_component::CommandPermission::RequiresApproval { .. } => {
+                        let result = lua.create_table()?;
+                        result.set("ok", false)?;
+                        result.set("stdout", "")?;
+                        result.set(
+                            "stderr",
+                            "permission denied: command requires approval (use orcs.check_command first)",
+                        )?;
+                        result.set("code", -1)?;
+                        return Ok(result);
+                    }
+                }
+                drop(ctx_guard);
+
+                tracing::debug!("Lua exec_argv (authorized): {}", program);
+
+                crate::sanitize::exec_argv_impl(
+                    lua,
+                    &program,
+                    &args,
+                    opts.as_ref(),
+                    &argv_sandbox_root,
+                )
+            },
+        )?;
+        orcs_table.set("exec_argv", exec_argv_fn)?;
+    }
+
     // Override orcs.llm with capability-checked version that delegates to Lua handler.
     // Requires Capability::LLM.  Handler is registered via orcs.set_llm_handler(fn).
     //
@@ -139,7 +217,15 @@ pub(super) fn register(
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
 
-        // Permission check
+        // Capability gate: SPAWN required
+        if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "permission denied: Capability::SPAWN not granted")?;
+            return Ok(result);
+        }
+
+        // Auth permission check
         if !ctx_guard.can_spawn_child_auth() {
             let result = lua.create_table()?;
             result.set("ok", false)?;
@@ -446,7 +532,15 @@ pub(super) fn register(
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
 
-        // Permission check
+        // Capability gate: SPAWN required
+        if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {
+            let result_table = lua.create_table()?;
+            result_table.set("ok", false)?;
+            result_table.set("error", "permission denied: Capability::SPAWN not granted")?;
+            return Ok(result_table);
+        }
+
+        // Auth permission check
         if !ctx_guard.can_spawn_runner_auth() {
             let result_table = lua.create_table()?;
             result_table.set("ok", false)?;

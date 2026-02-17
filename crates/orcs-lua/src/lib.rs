@@ -98,6 +98,7 @@ pub mod llm_command;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;
+pub mod sanitize;
 pub mod scenario;
 pub mod testing;
 pub mod tool_registry;

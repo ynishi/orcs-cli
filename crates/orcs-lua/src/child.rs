@@ -495,6 +495,7 @@ fn is_orcs_initialized(lua: &Lua) -> bool {
 /// This adds:
 /// - Capability-gated file tools (read, write, grep, glob, mkdir, remove, mv)
 /// - `orcs.exec(cmd)` - Permission-checked shell execution
+/// - `orcs.exec_argv(program, args, opts)` - Permission-checked shell-free execution
 /// - `orcs.spawn_child(config)` - Spawn a sub-child
 /// - `orcs.emit_output(message, [level])` - Emit output to parent
 /// - `orcs.child_count()` - Get current child count
@@ -533,6 +534,19 @@ fn register_context_functions(
             .0
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+        // Capability gate: EXECUTE required
+        if !ctx.has_capability(orcs_component::Capability::EXECUTE) {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("stdout", "")?;
+            result.set(
+                "stderr",
+                "permission denied: Capability::EXECUTE not granted",
+            )?;
+            result.set("code", -1)?;
+            return Ok(result);
+        }
 
         let permission = ctx.check_command_permission(&cmd);
         match &permission {
@@ -588,6 +602,73 @@ fn register_context_functions(
     })?;
     orcs_table.set("exec", exec_fn)?;
 
+    // orcs.exec_argv(program, args [, opts]) -> {ok, stdout, stderr, code}
+    // Shell-free execution: bypasses sh -c entirely.
+    // Permission-checked via Capability::EXECUTE + check_command_permission(program).
+    let sandbox_root = sandbox.root().to_path_buf();
+    let exec_argv_fn = lua.create_function(
+        move |lua, (program, args, opts): (String, Table, Option<Table>)| {
+            let wrapper = lua
+                .app_data_ref::<ContextWrapper>()
+                .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+            let ctx = wrapper
+                .0
+                .lock()
+                .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+            // Capability gate: EXECUTE required
+            if !ctx.has_capability(orcs_component::Capability::EXECUTE) {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("stdout", "")?;
+                result.set(
+                    "stderr",
+                    "permission denied: Capability::EXECUTE not granted",
+                )?;
+                result.set("code", -1)?;
+                return Ok(result);
+            }
+
+            // Permission check on program name
+            let permission = ctx.check_command_permission(&program);
+            match &permission {
+                orcs_component::CommandPermission::Allowed => {}
+                orcs_component::CommandPermission::Denied(reason) => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("stdout", "")?;
+                    result.set("stderr", format!("permission denied: {}", reason))?;
+                    result.set("code", -1)?;
+                    return Ok(result);
+                }
+                orcs_component::CommandPermission::RequiresApproval { .. } => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("stdout", "")?;
+                    result.set(
+                        "stderr",
+                        "permission denied: command requires approval (use orcs.check_command first)",
+                    )?;
+                    result.set("code", -1)?;
+                    return Ok(result);
+                }
+            }
+            drop(ctx);
+
+            tracing::debug!("Lua exec_argv (authorized): {}", program);
+
+            crate::sanitize::exec_argv_impl(
+                lua,
+                &program,
+                &args,
+                opts.as_ref(),
+                &sandbox_root,
+            )
+        },
+    )?;
+    orcs_table.set("exec_argv", exec_argv_fn)?;
+
     // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
     // Capability-checked override: delegates to Lua handler registered via
     // orcs.set_llm_handler(fn).  Requires Capability::LLM.
@@ -624,6 +705,14 @@ fn register_context_functions(
             .0
             .lock()
             .map_err(|e| mlua::Error::RuntimeError(format!("context lock failed: {}", e)))?;
+
+        // Capability gate: SPAWN required
+        if !ctx.has_capability(orcs_component::Capability::SPAWN) {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "permission denied: Capability::SPAWN not granted")?;
+            return Ok(result);
+        }
 
         // Parse config
         let id: String = config
@@ -1241,7 +1330,7 @@ mod tests {
 
     mod context_tests {
         use super::*;
-        use orcs_component::{ChildHandle, SpawnError};
+        use orcs_component::{Capability, ChildHandle, SpawnError};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         /// Mock ChildContext for testing.
@@ -1251,6 +1340,7 @@ mod tests {
             spawn_count: Arc<AtomicUsize>,
             emit_count: Arc<AtomicUsize>,
             max_children: usize,
+            capabilities: Capability,
         }
 
         impl MockContext {
@@ -1260,7 +1350,13 @@ mod tests {
                     spawn_count: Arc::new(AtomicUsize::new(0)),
                     emit_count: Arc::new(AtomicUsize::new(0)),
                     max_children: 10,
+                    capabilities: Capability::ALL,
                 }
+            }
+
+            fn with_capabilities(mut self, caps: Capability) -> Self {
+                self.capabilities = caps;
+                self
             }
         }
 
@@ -1327,12 +1423,17 @@ mod tests {
                 Ok(ChildResult::Ok(serde_json::json!({"mock": true})))
             }
 
+            fn capabilities(&self) -> Capability {
+                self.capabilities
+            }
+
             fn clone_box(&self) -> Box<dyn ChildContext> {
                 Box::new(Self {
                     parent_id: self.parent_id.clone(),
                     spawn_count: Arc::clone(&self.spawn_count),
                     emit_count: Arc::clone(&self.emit_count),
                     max_children: self.max_children,
+                    capabilities: self.capabilities,
                 })
             }
         }
@@ -1803,6 +1904,198 @@ mod tests {
 
             let result = child.run(serde_json::json!({}));
             assert!(result.is_ok());
+        }
+
+        // --- Capability gate tests ---
+
+        #[test]
+        fn exec_denied_without_execute_capability() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "exec-worker",
+                    run = function(input)
+                        local result = orcs.exec("echo hello")
+                        return { success = true, data = {
+                            ok = result.ok,
+                            stderr = result.stderr or "",
+                            code = result.code,
+                        }}
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            // READ only — no EXECUTE
+            let ctx = MockContext::new("parent").with_capabilities(Capability::READ);
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "run itself should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["ok"], false, "exec should be denied");
+                let stderr = data["stderr"].as_str().unwrap_or("");
+                assert!(
+                    stderr.contains("Capability::EXECUTE"),
+                    "stderr should mention EXECUTE, got: {}",
+                    stderr
+                );
+                assert_eq!(data["code"], -1);
+            }
+        }
+
+        #[test]
+        fn exec_allowed_with_execute_capability() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "exec-worker",
+                    run = function(input)
+                        local result = orcs.exec("echo cap-test-ok")
+                        return { success = true, data = {
+                            ok = result.ok,
+                            stdout = result.stdout or "",
+                        }}
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            // EXECUTE granted (MockContext has no auth → permissive)
+            let ctx = MockContext::new("parent").with_capabilities(Capability::EXECUTE);
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "run itself should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["ok"], true, "exec should be allowed");
+                let stdout = data["stdout"].as_str().unwrap_or("");
+                assert!(
+                    stdout.contains("cap-test-ok"),
+                    "stdout should contain output, got: {}",
+                    stdout
+                );
+            }
+        }
+
+        #[test]
+        fn spawn_child_denied_without_spawn_capability() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "spawner",
+                    run = function(input)
+                        local result = orcs.spawn_child({ id = "sub-child" })
+                        return { success = true, data = {
+                            ok = result.ok,
+                            error = result.error or "",
+                        }}
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            // READ | EXECUTE only — no SPAWN
+            let ctx = MockContext::new("parent")
+                .with_capabilities(Capability::READ | Capability::EXECUTE);
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "run itself should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["ok"], false, "spawn should be denied");
+                let error = data["error"].as_str().unwrap_or("");
+                assert!(
+                    error.contains("Capability::SPAWN"),
+                    "error should mention SPAWN, got: {}",
+                    error
+                );
+            }
+        }
+
+        #[test]
+        fn spawn_child_allowed_with_spawn_capability() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "spawner",
+                    run = function(input)
+                        local result = orcs.spawn_child({ id = "sub-child" })
+                        return { success = true, data = {
+                            ok = result.ok,
+                            id = result.id or "",
+                        }}
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            // SPAWN granted
+            let ctx = MockContext::new("parent").with_capabilities(Capability::SPAWN);
+            let spawn_count = Arc::clone(&ctx.spawn_count);
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "run itself should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["ok"], true, "spawn should be allowed");
+                assert_eq!(data["id"], "sub-child");
+            }
+            assert_eq!(
+                spawn_count.load(Ordering::SeqCst),
+                1,
+                "spawn_child should have been called"
+            );
+        }
+
+        #[test]
+        fn llm_denied_without_llm_capability() {
+            let lua = Arc::new(Mutex::new(Lua::new()));
+            let script = r#"
+                return {
+                    id = "llm-worker",
+                    run = function(input)
+                        local result = orcs.llm("hello")
+                        return { success = true, data = {
+                            ok = result.ok,
+                            error = result.error or "",
+                        }}
+                    end,
+                    on_signal = function(sig) return "Handled" end,
+                }
+            "#;
+
+            let mut child =
+                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+
+            // READ | EXECUTE — no LLM
+            let ctx = MockContext::new("parent")
+                .with_capabilities(Capability::READ | Capability::EXECUTE);
+            child.set_context(Box::new(ctx));
+
+            let result = child.run(serde_json::json!({}));
+            assert!(result.is_ok(), "run itself should succeed");
+            if let ChildResult::Ok(data) = result {
+                assert_eq!(data["ok"], false, "llm should be denied");
+                let error = data["error"].as_str().unwrap_or("");
+                assert!(
+                    error.contains("Capability::LLM"),
+                    "error should mention LLM, got: {}",
+                    error
+                );
+            }
         }
     }
 }

@@ -79,6 +79,10 @@ pub fn register_base_orcs_functions(
     // Register orcs.set_llm_handler(fn) and install default Claude CLI handler.
     crate::llm_command::register_llm_functions(lua, &orcs_table)?;
 
+    // Register sanitization primitives (always available, no Capability gate).
+    crate::sanitize::register_sanitize_functions(lua, &orcs_table)?;
+    crate::sanitize::register_exec_argv_deny(lua, &orcs_table)?;
+
     // orcs.log(level, msg) - Log a message
     if orcs_table.get::<mlua::Function>("log").is_err() {
         let log_fn = lua.create_function(|_, (level, msg): (String, String)| {
@@ -288,7 +292,21 @@ orcs.mv(src, dst) -> {ok, error}
   Move / rename file or directory.
 
 orcs.exec(cmd) -> {ok, stdout, stderr, code}
-  Execute shell command. cwd = project root.
+  Execute shell command via sh -c. cwd = project root.
+
+orcs.exec_argv(program, args [, opts]) -> {ok, stdout, stderr, code}
+  Execute command without shell. args is an array of strings.
+  opts.env_remove = {"VAR1", ...} to remove env vars.
+  opts.cwd = "path" to override working directory.
+
+orcs.sanitize_arg(s) -> {ok, value, error, violations}
+  Validate argument (rejects control chars, NUL).
+
+orcs.sanitize_path(s) -> {ok, value, error, violations}
+  Validate relative path (rejects traversal, absolute paths, control chars).
+
+orcs.sanitize_strict(s) -> {ok, value, error, violations}
+  Validate with all rules (shell meta, env expansion, glob, traversal, control).
 
 orcs.pwd
   Project root path (string).
