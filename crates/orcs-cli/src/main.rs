@@ -148,16 +148,18 @@ impl ConfigResolver for CliConfigResolver {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Setup logging: --debug flag > RUST_LOG env > default "info"
+    // Setup logging: --debug > --verbose > RUST_LOG env > default "warn"
     let filter = if args.debug {
         EnvFilter::new("debug")
+    } else if args.verbose {
+        EnvFilter::new("info")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
     fmt().with_env_filter(filter).with_target(false).init();
 
-    info!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
+    println!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
 
     let resolver = CliConfigResolver::from_args(&args);
     info!(
