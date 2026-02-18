@@ -215,8 +215,8 @@ impl WorldManager {
                             StateTransition::AwaitApproval { request_id } => {
                                 channel.await_approval(request_id)
                             }
-                            StateTransition::ResolveApproval => {
-                                channel.resolve_approval().is_some()
+                            StateTransition::ResolveApproval { approval_id } => {
+                                channel.resolve_approval(&approval_id).is_some()
                             }
                             StateTransition::Abort { reason } => channel.abort(reason),
                         }

@@ -805,7 +805,7 @@ impl OrcsApp {
             let signal = Signal::approve(&id, self.principal.clone());
             self.engine.signal(signal);
             tracing::info!(approval_id = %id, "Approved");
-            self.render_safe(&IOOutput::approved(&id));
+            // Approval feedback is displayed via ClientRunner → IOOutput::ShowApproved
 
             // Clear pending approval
             if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
@@ -829,7 +829,7 @@ impl OrcsApp {
             let signal = Signal::reject(&id, None, self.principal.clone());
             self.engine.signal(signal);
             tracing::info!(approval_id = %id, "Rejected");
-            self.render_safe(&IOOutput::rejected(&id, None));
+            // Rejection feedback is displayed via ClientRunner → IOOutput::ShowRejected
 
             // Clear pending approval
             if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {

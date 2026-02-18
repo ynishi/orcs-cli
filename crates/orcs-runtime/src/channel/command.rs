@@ -123,7 +123,10 @@ pub enum StateTransition {
         request_id: String,
     },
     /// Resolve an approval (approved).
-    ResolveApproval,
+    ResolveApproval {
+        /// ID of the approval being resolved.
+        approval_id: String,
+    },
     /// Abort with reason.
     Abort {
         /// Reason for aborting.

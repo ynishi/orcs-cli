@@ -333,11 +333,15 @@ impl ChannelMut for BaseChannel {
         }
     }
 
-    fn resolve_approval(&mut self) -> Option<String> {
+    fn resolve_approval(&mut self, approval_id: &str) -> Option<String> {
         if let ChannelState::AwaitingApproval { request_id } = &self.state {
-            let id = request_id.clone();
-            self.state = ChannelState::Running;
-            Some(id)
+            if request_id == approval_id {
+                let id = request_id.clone();
+                self.state = ChannelState::Running;
+                Some(id)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -568,12 +572,17 @@ mod tests {
 
         assert!(channel.await_approval("req-123".to_string()));
 
-        let resolved_id = channel.resolve_approval();
+        // Wrong approval_id → no match
+        assert!(channel.resolve_approval("wrong-id").is_none());
+        assert!(channel.is_awaiting_approval());
+
+        // Correct approval_id → resolves
+        let resolved_id = channel.resolve_approval("req-123");
         assert_eq!(resolved_id, Some("req-123".to_string()));
         assert!(channel.is_running());
 
         // Cannot resolve when running
-        assert!(channel.resolve_approval().is_none());
+        assert!(channel.resolve_approval("req-123").is_none());
     }
 
     #[test]

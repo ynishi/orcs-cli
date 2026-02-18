@@ -81,7 +81,11 @@ pub fn determine_channel_action(kind: &SignalKind) -> SignalAction {
         },
         SignalKind::Pause => SignalAction::Transition(StateTransition::Pause),
         SignalKind::Resume => SignalAction::Transition(StateTransition::Resume),
-        SignalKind::Approve { .. } => SignalAction::Transition(StateTransition::ResolveApproval),
+        SignalKind::Approve { approval_id } => {
+            SignalAction::Transition(StateTransition::ResolveApproval {
+                approval_id: approval_id.clone(),
+            })
+        }
         // Reject clears the pending approval but does NOT stop the channel.
         // Component handles rejection via on_signal and notifies via Emitter.
         SignalKind::Reject { .. } => SignalAction::Continue,
@@ -107,6 +111,7 @@ pub async fn send_transition(
     id: ChannelId,
     transition: StateTransition,
 ) -> bool {
+    let is_resolve_approval = matches!(transition, StateTransition::ResolveApproval { .. });
     let transition_name = format!("{:?}", transition);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let cmd = WorldCommand::UpdateState {
@@ -126,7 +131,16 @@ pub async fn send_transition(
             true
         }
         Ok(false) => {
-            warn!("Runner {}: {} rejected by World", id, transition_name);
+            // ResolveApproval rejection is expected for non-target runners
+            // (approval signals are broadcast; only the matching channel resolves).
+            if is_resolve_approval {
+                debug!(
+                    "Runner {}: {} skipped (no matching pending approval)",
+                    id, transition_name
+                );
+            } else {
+                warn!("Runner {}: {} rejected by World", id, transition_name);
+            }
             false
         }
         Err(_) => {
@@ -243,7 +257,7 @@ mod tests {
         });
         assert!(matches!(
             action,
-            SignalAction::Transition(StateTransition::ResolveApproval)
+            SignalAction::Transition(StateTransition::ResolveApproval { .. })
         ));
     }
 

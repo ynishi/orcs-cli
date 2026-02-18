@@ -155,8 +155,10 @@ pub trait ChannelMut: ChannelCore {
 
     /// Resolves approval and transitions to Running state.
     ///
-    /// Returns the request_id if succeeded, None if not in AwaitingApproval state.
-    fn resolve_approval(&mut self) -> Option<String>;
+    /// Only succeeds if the channel is in AwaitingApproval state AND
+    /// the stored `request_id` matches the given `approval_id`.
+    /// Returns the request_id if matched, None otherwise.
+    fn resolve_approval(&mut self, approval_id: &str) -> Option<String>;
 
     // === Tree Modification ===
 
