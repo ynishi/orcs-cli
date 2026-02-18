@@ -60,9 +60,11 @@
 mod app;
 pub mod builtins;
 mod error;
+mod printer_slot;
 
 pub use app::{OrcsApp, OrcsAppBuilder};
 pub use error::AppError;
+pub use printer_slot::SharedPrinterSlot;
 
 // Re-export from Plugin SDK Layer
 pub use orcs_component::{

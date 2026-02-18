@@ -68,6 +68,7 @@ mod builder;
 pub use builder::OrcsAppBuilder;
 
 use crate::AppError;
+use crate::SharedPrinterSlot;
 use orcs_event::Signal;
 use orcs_runtime::auth::{DefaultGrantStore, GrantPolicy};
 use orcs_runtime::io::{ConsoleRenderer, InputParser};
@@ -77,9 +78,10 @@ use orcs_runtime::{
     LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
 };
 use orcs_types::{ChannelId, Principal, PrincipalId};
+use rustyline::ExternalPrinter as RustylineExternalPrinter;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// Pending approval state.
 ///
@@ -99,6 +101,15 @@ enum LoopControl {
     Exit,
     /// Pause and save session before exit.
     Pause,
+}
+
+/// Event sent from the dedicated readline OS thread to the async main loop.
+#[derive(Debug)]
+enum ReadlineEvent {
+    /// User entered a line of text.
+    Line(String),
+    /// EOF (Ctrl+D on empty line).
+    Eof,
 }
 
 /// ORCS Application.
@@ -141,6 +152,11 @@ pub struct OrcsApp {
     ///
     /// Used by `@component message` syntax for targeted delivery.
     pub(super) component_routes: HashMap<String, ChannelId>,
+    /// Shared printer slot for terminal-safe output while rustyline is active.
+    ///
+    /// Shared with the tracing `MakeWriter` so that log output also routes
+    /// through ExternalPrinter during interactive mode.
+    printer_slot: SharedPrinterSlot,
 }
 
 impl OrcsApp {
@@ -258,6 +274,154 @@ impl OrcsApp {
     pub async fn load_session(&mut self, session_id: &str) -> Result<(), AppError> {
         self.session = self.store.load(session_id).await?;
         Ok(())
+    }
+
+    /// Returns the default history file path (`~/.orcs/history`).
+    fn history_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".orcs")
+            .join("history")
+    }
+
+    /// Spawns a dedicated OS thread running rustyline for line editing.
+    ///
+    /// Returns:
+    /// - `UnboundedReceiver<ReadlineEvent>` for the async loop to consume
+    /// - `Option<Box<dyn ExternalPrinter>>` for terminal-safe output during readline
+    ///
+    /// The thread saves history to disk after each entered line.
+    fn spawn_readline_thread(
+        history_path: PathBuf,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<ReadlineEvent>,
+        Option<Box<dyn RustylineExternalPrinter + Send>>,
+    ) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (printer_tx, printer_rx) =
+            std::sync::mpsc::sync_channel::<Option<Box<dyn RustylineExternalPrinter + Send>>>(1);
+
+        std::thread::Builder::new()
+            .name("orcs-readline".into())
+            .spawn(move || {
+                let config = rustyline::Config::builder().auto_add_history(true).build();
+
+                let mut rl = match rustyline::DefaultEditor::with_config(config) {
+                    Ok(editor) => editor,
+                    Err(e) => {
+                        tracing::error!("Failed to create readline editor: {e}");
+                        let _ = printer_tx.send(None);
+                        return;
+                    }
+                };
+
+                // Load history (ignore errors for first run)
+                if let Err(e) = rl.load_history(&history_path) {
+                    tracing::debug!("History load: {e} (expected on first run)");
+                }
+
+                // Create ExternalPrinter for async-side output during readline
+                let printer = rl
+                    .create_external_printer()
+                    .ok()
+                    .map(|p| Box::new(p) as Box<dyn RustylineExternalPrinter + Send>);
+                let _ = printer_tx.send(printer);
+
+                // Readline loop
+                loop {
+                    match rl.readline("orcs> ") {
+                        Ok(line) => {
+                            // Persist history after each line (resilient to process kill)
+                            let _ = rl.save_history(&history_path);
+
+                            if event_tx.send(ReadlineEvent::Line(line)).is_err() {
+                                break; // Receiver dropped → shutdown
+                            }
+                        }
+                        Err(rustyline::error::ReadlineError::Interrupted) => {
+                            // Ctrl+C → clear current line, continue
+                            continue;
+                        }
+                        Err(rustyline::error::ReadlineError::Eof) => {
+                            let _ = event_tx.send(ReadlineEvent::Eof);
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("Readline error: {e}");
+                            let _ = event_tx.send(ReadlineEvent::Eof);
+                            break;
+                        }
+                    }
+                }
+
+                // Final history save
+                let _ = rl.save_history(&history_path);
+            })
+            .expect("failed to spawn readline thread");
+
+        // Block until the readline thread sends the printer (or fails)
+        let printer = printer_rx.recv().ok().flatten();
+
+        (event_rx, printer)
+    }
+
+    /// Renders output through ExternalPrinter (if active) or ConsoleRenderer.
+    ///
+    /// During `run_interactive()`, all output must go through ExternalPrinter
+    /// to avoid corrupting rustyline's terminal state (raw mode, prompt redraw).
+    fn render_safe(&self, output: &IOOutput) {
+        if let Some(formatted) = Self::format_io_output(output, self.renderer.is_verbose()) {
+            if self.printer_slot.print(formatted) {
+                return;
+            }
+        }
+        // Fallback: direct console output (no printer installed)
+        self.renderer.render_output(output);
+    }
+
+    /// Formats an IOOutput into a terminal-ready string for ExternalPrinter.
+    ///
+    /// Returns `None` for messages that should be suppressed (e.g. Debug when not verbose).
+    fn format_io_output(output: &IOOutput, verbose: bool) -> Option<String> {
+        match output {
+            IOOutput::Print { text, style } => match style {
+                orcs_runtime::OutputStyle::Normal | orcs_runtime::OutputStyle::Info => {
+                    Some(format!("{text}\n"))
+                }
+                orcs_runtime::OutputStyle::Warn => Some(format!("[WARN] {text}\n")),
+                orcs_runtime::OutputStyle::Error => Some(format!("[ERROR] {text}\n")),
+                orcs_runtime::OutputStyle::Success => Some(format!("\x1B[32m{text}\x1B[0m\n")),
+                orcs_runtime::OutputStyle::Debug => {
+                    if verbose {
+                        Some(format!("[DEBUG] {text}\n"))
+                    } else {
+                        None
+                    }
+                }
+            },
+            IOOutput::Prompt { message } => Some(format!("{message} ")),
+            IOOutput::ShowApprovalRequest {
+                id,
+                operation,
+                description,
+            } => Some(format!(
+                "\n  [{operation}] {id} - {description}\n  Enter 'y' to approve, 'n' to reject:\n"
+            )),
+            IOOutput::ShowApproved { approval_id } => {
+                Some(format!("  \u{2713} Approved: {approval_id}\n"))
+            }
+            IOOutput::ShowRejected {
+                approval_id,
+                reason,
+            } => {
+                if let Some(reason) = reason {
+                    Some(format!("  \u{2717} Rejected: {approval_id} ({reason})\n"))
+                } else {
+                    Some(format!("  \u{2717} Rejected: {approval_id}\n"))
+                }
+            }
+            IOOutput::Clear => Some("\x1B[2J\x1B[1;1H".to_string()),
+        }
     }
 
     /// Runs the application in non-interactive command mode.
@@ -380,12 +544,11 @@ impl OrcsApp {
 
     /// Runs the application in interactive mode.
     ///
-    /// Uses parallel execution infrastructure:
-    /// - WorldManager for concurrent World access
-    /// - ChannelRunner per channel for parallel execution
-    /// - Event injection via channel handles
+    /// Uses a dedicated OS thread for rustyline (prompt, history, line editing)
+    /// and communicates with the async main loop via channels.
     ///
-    /// Reads commands from stdin and processes them until quit.
+    /// All terminal output during the loop goes through `ExternalPrinter`
+    /// to avoid corrupting rustyline's raw-mode terminal state.
     ///
     /// # Errors
     ///
@@ -395,11 +558,11 @@ impl OrcsApp {
         tracing::info!("Starting interactive mode (IO channel: {})", io_id);
 
         self.engine.start();
+
+        // Startup messages (before readline, ext_printer is None → ConsoleRenderer)
         self.renderer.render_output(&IOOutput::info(
             "Interactive mode started. Type 'q' to quit, 'help' for commands.",
         ));
-
-        // Display session status with restore information
         if self.is_resumed {
             self.renderer.render_output(&IOOutput::info(format!(
                 "Resumed session: {} ({} component(s) restored)",
@@ -410,21 +573,36 @@ impl OrcsApp {
                 .render_output(&IOOutput::info(format!("Session ID: {}", self.session.id)));
         }
 
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin).lines();
+        // Spawn readline thread and install ExternalPrinter into shared slot
+        // (tracing MakeWriter also reads this slot)
+        let (mut readline_rx, printer) = Self::spawn_readline_thread(Self::history_path());
+        if let Some(p) = printer {
+            self.printer_slot.set(p);
+        }
+
         let mut should_save = false;
 
+        // Yield to let pending component init messages (Ready, etc.) be delivered.
+        // Without this, piped stdin can race ahead of async IOOutput.
+        tokio::task::yield_now().await;
+
         loop {
-            // Poll engine once
             if !self.engine.is_running() {
                 break;
             }
 
-            // Check for stdin input and IO output
+            // biased: always drain IOOutput before processing stdin.
+            // This ensures component messages (Ready, approval requests, etc.)
+            // are displayed before the next input line is handled.
             tokio::select! {
-                line_result = reader.next_line() => {
-                    match line_result {
-                        Ok(Some(line)) => {
+                biased;
+
+                Some(io_out) = self.io_output.recv() => {
+                    self.handle_io_output(io_out);
+                }
+                event = readline_rx.recv() => {
+                    match event {
+                        Some(ReadlineEvent::Line(line)) => {
                             match self.handle_input(&line) {
                                 LoopControl::Continue => {}
                                 LoopControl::Exit => break,
@@ -434,34 +612,22 @@ impl OrcsApp {
                                 }
                             }
                         }
-                        Ok(None) => {
-                            // EOF
-                            tracing::debug!("stdin EOF");
+                        Some(ReadlineEvent::Eof) | None => {
+                            tracing::debug!("readline: EOF or channel closed");
                             break;
-                        }
-                        Err(e) => {
-                            tracing::error!("stdin error: {}", e);
-                            return Err(AppError::Io(e));
                         }
                     }
                 }
-                Some(io_out) = self.io_output.recv() => {
-                    // Display IO output from ClientRunner
-                    self.handle_io_output(io_out);
-                }
-                () = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Yield to allow engine polling
-                }
             }
-
-            tokio::task::yield_now().await;
         }
 
+        // Clear ExternalPrinter before shutdown output
+        // (tracing falls back to stderr, ConsoleRenderer writes directly)
+        self.printer_slot.clear();
+
         self.engine.stop();
-        // Await runners to complete and collect snapshots before saving
         self.engine.shutdown().await;
 
-        // Save session if paused
         if should_save {
             self.renderer
                 .render_output(&IOOutput::info("Saving session..."));
@@ -520,7 +686,7 @@ impl OrcsApp {
             }
             InputCommand::Resume => {
                 // Resume is handled at startup via --resume flag, not during interactive mode
-                self.renderer.render_output(&IOOutput::info(
+                self.render_safe(&IOOutput::info(
                     "Resume is handled at startup. Use: orcs --resume",
                 ));
             }
@@ -531,8 +697,7 @@ impl OrcsApp {
                     message.as_str(),
                     Principal::User(PrincipalId::new()),
                 ));
-                self.renderer
-                    .render_output(&IOOutput::info(format!("Steer: {message}")));
+                self.render_safe(&IOOutput::info(format!("Steer: {message}")));
             }
             InputCommand::Empty => {
                 // Blank line - ignore
@@ -583,8 +748,7 @@ impl OrcsApp {
         let io_input = IOInput::line(input);
 
         if let Err(e) = self.io_input.try_send(io_input) {
-            self.renderer
-                .render_output(&IOOutput::error(format!("Failed to send message: {e:?}")));
+            self.render_safe(&IOOutput::error(format!("Failed to send message: {e:?}")));
         }
     }
 
@@ -598,7 +762,7 @@ impl OrcsApp {
             None => {
                 let available: Vec<&str> =
                     self.component_routes.keys().map(|k| k.as_str()).collect();
-                self.renderer.render_output(&IOOutput::error(format!(
+                self.render_safe(&IOOutput::error(format!(
                     "Unknown component: @{}. Available: {}",
                     target,
                     available.join(", ")
@@ -619,7 +783,7 @@ impl OrcsApp {
                 tracing::debug!("Routed @{} to channel {}", target, channel_id);
             }
             Err(e) => {
-                self.renderer.render_output(&IOOutput::error(format!(
+                self.render_safe(&IOOutput::error(format!(
                     "Failed to route to @{}: {}",
                     target, e
                 )));
@@ -641,15 +805,14 @@ impl OrcsApp {
             let signal = Signal::approve(&id, self.principal.clone());
             self.engine.signal(signal);
             tracing::info!(approval_id = %id, "Approved");
-            self.renderer.render_output(&IOOutput::approved(&id));
+            self.render_safe(&IOOutput::approved(&id));
 
             // Clear pending approval
             if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
                 self.pending_approval = None;
             }
         } else {
-            self.renderer
-                .render_output(&IOOutput::warn("No pending approval. Use: y <id>"));
+            self.render_safe(&IOOutput::warn("No pending approval. Use: y <id>"));
         }
     }
 
@@ -666,49 +829,42 @@ impl OrcsApp {
             let signal = Signal::reject(&id, None, self.principal.clone());
             self.engine.signal(signal);
             tracing::info!(approval_id = %id, "Rejected");
-            self.renderer.render_output(&IOOutput::rejected(&id, None));
+            self.render_safe(&IOOutput::rejected(&id, None));
 
             // Clear pending approval
             if self.pending_approval.as_ref().map(|p| p.id.as_str()) == Some(id.as_str()) {
                 self.pending_approval = None;
             }
         } else {
-            self.renderer
-                .render_output(&IOOutput::warn("No pending approval. Use: n <id> [reason]"));
+            self.render_safe(&IOOutput::warn("No pending approval. Use: n <id> [reason]"));
         }
     }
 
-    /// Shows help text.
+    /// Shows help text as a single block (avoids per-line terminal redraws).
     fn show_help(&self) {
-        self.renderer.render_output(&IOOutput::info("Commands:"));
-        self.renderer.render_output(&IOOutput::info(
-            "  y [id]         - Approve pending request",
+        self.render_safe(&IOOutput::info(
+            "Commands:\n\
+             \x20 y [id]          - Approve pending request\n\
+             \x20 n [id] [reason] - Reject pending request\n\
+             \x20 p / pause       - Pause execution\n\
+             \x20 r / resume      - Resume execution\n\
+             \x20 s <message>     - Steer with instruction\n\
+             \x20 q / quit        - Quit application\n\
+             \x20 veto / stop     - Emergency stop",
         ));
-        self.renderer
-            .render_output(&IOOutput::info("  n [id] [reason]- Reject pending request"));
-        self.renderer
-            .render_output(&IOOutput::info("  p / pause      - Pause execution"));
-        self.renderer
-            .render_output(&IOOutput::info("  r / resume     - Resume execution"));
-        self.renderer
-            .render_output(&IOOutput::info("  s <message>    - Steer with instruction"));
-        self.renderer
-            .render_output(&IOOutput::info("  q / quit       - Quit application"));
-        self.renderer
-            .render_output(&IOOutput::info("  veto / stop    - Emergency stop"));
     }
 
     /// Handles IO output from ClientRunner.
     ///
     /// Updates pending_approval when an approval request is received.
+    /// Uses ExternalPrinter during interactive mode.
     fn handle_io_output(&mut self, io_out: IOOutput) {
         // Store as pending approval for "y" / "n" without ID
         if let IOOutput::ShowApprovalRequest { ref id, .. } = io_out {
             self.pending_approval = Some(PendingApproval { id: id.clone() });
         }
 
-        // Delegate rendering to ConsoleRenderer
-        self.renderer.render_output(&io_out);
+        self.render_safe(&io_out);
     }
 }
 

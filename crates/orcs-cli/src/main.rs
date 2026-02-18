@@ -20,9 +20,14 @@
 //! - `ORCS_BUILTINS_DIR`: Override builtin components directory
 //! - `ORCS_EXPERIMENTAL`: Enable experimental components (`true`/`false`)
 
+mod tracing_writer;
+
 use anyhow::Result;
 use clap::Parser;
-use orcs_app::{ConfigError, ConfigLoader, ConfigResolver, OrcsApp, OrcsConfig, ProjectSandbox};
+use orcs_app::{
+    ConfigError, ConfigLoader, ConfigResolver, OrcsApp, OrcsConfig, ProjectSandbox,
+    SharedPrinterSlot,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -148,6 +153,9 @@ impl ConfigResolver for CliConfigResolver {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Shared printer slot: links tracing output to rustyline's ExternalPrinter
+    let printer_slot = SharedPrinterSlot::new();
+
     // Setup logging: --debug > --verbose > RUST_LOG env > default "warn"
     let filter = if args.debug {
         EnvFilter::new("debug")
@@ -157,7 +165,19 @@ async fn main() -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
-    fmt().with_env_filter(filter).with_target(false).init();
+    // Open persistent log file (~/.orcs/logs/orcs.log)
+    let log_file = open_log_file();
+
+    // Single writer that tees to both:
+    //   1. ExternalPrinter (interactive) or stderr (fallback) — terminal display
+    //   2. Log file — persistent record (no information loss)
+    let writer = tracing_writer::TracingMakeWriter::new(&printer_slot, log_file);
+
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(writer)
+        .init();
 
     println!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
 
@@ -207,7 +227,9 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to create sandbox: {e}"))?,
     );
 
-    let mut builder = OrcsApp::builder(resolver).with_sandbox(sandbox);
+    let mut builder = OrcsApp::builder(resolver)
+        .with_sandbox(sandbox)
+        .with_printer_slot(printer_slot);
     if let Some(session_id) = args.resume {
         builder = builder.resume(session_id);
     }
@@ -230,6 +252,38 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Opens the persistent log file at `~/.orcs/logs/orcs.log`.
+///
+/// Returns `None` if the directory/file cannot be created (non-fatal).
+fn open_log_file() -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".orcs")
+        .join("logs");
+
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "Warning: cannot create log directory {}: {e}",
+            log_dir.display()
+        );
+        return None;
+    }
+
+    let log_path = log_dir.join("orcs.log");
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(file) => Some(Arc::new(parking_lot::Mutex::new(file))),
+        Err(e) => {
+            eprintln!("Warning: cannot open log file {}: {e}", log_path.display());
+            None
+        }
+    }
 }
 
 #[cfg(test)]

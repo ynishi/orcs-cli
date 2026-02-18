@@ -70,6 +70,8 @@ pub struct OrcsAppBuilder {
     resume_session_id: Option<String>,
     /// Sandbox policy for file operations.
     sandbox: Option<Arc<dyn orcs_runtime::sandbox::SandboxPolicy>>,
+    /// Shared printer slot for tracing + IOOutput routing.
+    printer_slot: crate::SharedPrinterSlot,
 }
 
 impl OrcsAppBuilder {
@@ -80,7 +82,18 @@ impl OrcsAppBuilder {
             resolver: Box::new(resolver),
             resume_session_id: None,
             sandbox: None,
+            printer_slot: crate::SharedPrinterSlot::new(),
         }
+    }
+
+    /// Sets a shared printer slot for tracing and IOOutput routing.
+    ///
+    /// The same slot must be passed to the tracing `MakeWriter` so that
+    /// log output routes through ExternalPrinter during interactive mode.
+    #[must_use]
+    pub fn with_printer_slot(mut self, slot: crate::SharedPrinterSlot) -> Self {
+        self.printer_slot = slot;
+        self
     }
 
     /// Sets the sandbox policy for file operations.
@@ -361,6 +374,7 @@ impl OrcsAppBuilder {
             restored_count,
             shared_grants,
             component_routes,
+            printer_slot: self.printer_slot,
         })
     }
 }

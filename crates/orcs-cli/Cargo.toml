@@ -23,6 +23,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+rustyline = { workspace = true }
+parking_lot = "0.12"
+dirs = { workspace = true }
 
 [dev-dependencies]
 orcs-component = { workspace = true }
