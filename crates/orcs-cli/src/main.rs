@@ -196,22 +196,21 @@ async fn main() -> Result<()> {
         let target = orcs_app::builtins::versioned_dir(&builtins_base);
 
         if args.force {
-            info!(path = %target.display(), "Force-installing builtins");
+            println!("Force-installing builtins to {}", target.display());
             let written = orcs_app::builtins::force_expand(&builtins_base)
                 .map_err(|e| anyhow::anyhow!("Failed to install builtins: {e}"))?;
-            info!(
+            println!(
                 "Installed {} file(s) to {}",
                 written.len(),
                 target.display()
             );
         } else {
-            info!(path = %target.display(), "Installing builtins (skip if exists)");
             let written = orcs_app::builtins::ensure_expanded(&builtins_base)
                 .map_err(|e| anyhow::anyhow!("Failed to install builtins: {e}"))?;
             if written.is_empty() {
-                info!("Builtins already installed at {}", target.display());
+                println!("Builtins already installed at {}", target.display());
             } else {
-                info!(
+                println!(
                     "Installed {} file(s) to {}",
                     written.len(),
                     target.display()
@@ -248,7 +247,10 @@ async fn main() -> Result<()> {
     } else {
         let cmd = args.command.join(" ");
         info!("Command mode: {}", cmd);
-        // TODO: Execute command
+        let exit_code = app.run_command(&cmd).await?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
     }
 
     Ok(())

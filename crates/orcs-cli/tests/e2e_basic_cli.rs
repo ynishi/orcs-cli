@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::orcs_cmd;
+use common::{orcs_cmd, spawn_and_wait_for};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
@@ -14,7 +14,8 @@ use predicates::str::contains;
 #[test]
 fn quit_immediately() {
     let (mut cmd, _guard) = orcs_cmd();
-    cmd.write_stdin("q\n")
+    cmd.arg("-d")
+        .write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("Interactive mode started"))
@@ -25,7 +26,8 @@ fn quit_immediately() {
 #[test]
 fn quit_long_form() {
     let (mut cmd, _guard) = orcs_cmd();
-    cmd.write_stdin("quit\n")
+    cmd.arg("-d")
+        .write_stdin("quit\n")
         .assert()
         .success()
         .stdout(contains("Quit requested"));
@@ -43,8 +45,10 @@ fn empty_stdin_exits_gracefully() {
 fn components_initialize() {
     // Check spawn messages (synchronous in builder, before interactive mode)
     // rather than Ready messages which race with stdin processing.
+    // Requires -d (debug mode) because spawn logs are at info! level.
     let (mut cmd, _guard) = orcs_cmd();
-    cmd.write_stdin("q\n")
+    cmd.arg("-d")
+        .write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("builtin::agent_mgr"))
@@ -63,16 +67,20 @@ fn profile_manager_initializes() {
         .stdout(contains("ProfileManager initialized"));
 }
 
+/// Verifies AgentMgr emits Ready message with worker info.
+///
+/// Uses [`spawn_and_wait_for`] instead of `write_stdin("q\n")` to avoid
+/// the stdin-vs-init race condition. See `common/mod.rs` module doc for
+/// the full explanation of why `write_stdin` is racy for async output.
 #[test]
 fn agent_mgr_ready_with_workers() {
-    // Use -d (debug mode) to ensure component init completes before stdin
-    // processing. Without -d, the async Ready message races with quit.
-    let (mut cmd, _guard) = orcs_cmd();
-    cmd.arg("-d")
-        .write_stdin("q\n")
-        .assert()
-        .success()
-        .stdout(contains("[AgentMgr] Ready (worker: llm)"));
+    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
+    let (stdout, _stderr) =
+        spawn_and_wait_for("[AgentMgr] Ready (worker: llm)", &["-d"], tmp.path());
+    assert!(
+        stdout.contains("[AgentMgr] Ready (worker: llm)"),
+        "Expected Ready message in stdout.\nstdout:\n{stdout}"
+    );
 }
 
 // ─── Worker Spawning ─────────────────────────────────────────────
@@ -167,8 +175,10 @@ fn at_unknown_component_shows_error() {
 
 #[test]
 fn skill_manager_discovers_skills() {
+    // Requires -d so that component init completes before quit is processed.
     let (mut cmd, _guard) = orcs_cmd();
-    cmd.write_stdin("q\n")
+    cmd.arg("-d")
+        .write_stdin("q\n")
         .assert()
         .success()
         .stdout(contains("SkillManager initialized"));
