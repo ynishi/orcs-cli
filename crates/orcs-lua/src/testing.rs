@@ -409,6 +409,141 @@ impl LuaTestHarness {
                 .expect("set mock orcs.tool_descriptions");
         });
     }
+
+    /// Injects a mock `orcs.spawn_runner()` that captures arguments and returns
+    /// pre-configured responses.
+    ///
+    /// Each call to `orcs.spawn_runner({script=..., id=...})` in Lua will:
+    /// 1. Push the arguments table (as JSON Value) into the captured list
+    /// 2. Return `{ok = true, fqn = <fqn>, channel_id = <channel_id>}` from the queue
+    ///    (or `{ok = false, error = "mock: no more responses"}` if queue is exhausted)
+    ///
+    /// # Arguments
+    ///
+    /// * `responses` - Queue of `(fqn, channel_id)` pairs to return
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to captured arguments for assertion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_spawn_runner_mock(
+        &self,
+        responses: Vec<(String, String)>,
+    ) -> Arc<Mutex<Vec<Value>>> {
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            let mock_fn = lua
+                .create_function(move |lua, args: mlua::Value| {
+                    let json_args: serde_json::Value = lua.from_value(args)?;
+                    captured_clone
+                        .lock()
+                        .expect("captured mutex")
+                        .push(json_args);
+
+                    let result = lua.create_table()?;
+                    let mut resps = responses.lock().expect("responses mutex");
+                    if let Some((fqn, channel_id)) = resps.pop_front() {
+                        result.set("ok", true)?;
+                        result.set("fqn", fqn)?;
+                        result.set("channel_id", channel_id)?;
+                    } else {
+                        result.set("ok", false)?;
+                        result.set("error", "mock: no more spawn_runner responses")?;
+                    }
+                    Ok(result)
+                })
+                .expect("create mock spawn_runner function");
+
+            orcs.set("spawn_runner", mock_fn)
+                .expect("set mock orcs.spawn_runner");
+        });
+
+        captured
+    }
+
+    /// Injects no-op stubs for output-related `orcs.*` functions.
+    ///
+    /// Stubs the following functions that require EventEmitter (not available
+    /// in test harness):
+    /// - `orcs.output(msg)` — captures messages
+    /// - `orcs.output_with_level(msg, level)` — captures messages
+    /// - `orcs.emit_event(category, kind, payload)` — no-op
+    /// - `orcs.board_recent(limit)` — returns empty table
+    /// - `orcs.hook(name, fn)` — no-op
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to captured output messages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_output_stubs(&self) -> Arc<Mutex<Vec<String>>> {
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let captured_clone2 = Arc::clone(&captured);
+
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            // orcs.output(msg)
+            let output_fn = lua
+                .create_function(move |_, msg: String| {
+                    captured_clone.lock().expect("captured mutex").push(msg);
+                    Ok(())
+                })
+                .expect("create output stub");
+            orcs.set("output", output_fn).expect("set output stub");
+
+            // orcs.output_with_level(msg, level)
+            let output_level_fn = lua
+                .create_function(move |_, (msg, _level): (String, String)| {
+                    captured_clone2.lock().expect("captured mutex").push(msg);
+                    Ok(())
+                })
+                .expect("create output_with_level stub");
+            orcs.set("output_with_level", output_level_fn)
+                .expect("set output_with_level stub");
+
+            // orcs.emit_event(category, kind, payload) — no-op
+            let emit_fn = lua
+                .create_function(|_, (_cat, _kind, _payload): (String, String, mlua::Value)| Ok(()))
+                .expect("create emit_event stub");
+            orcs.set("emit_event", emit_fn)
+                .expect("set emit_event stub");
+
+            // orcs.board_recent(limit) — returns empty table
+            let board_fn = lua
+                .create_function(|lua, _limit: mlua::Value| {
+                    lua.create_table().map(mlua::Value::Table)
+                })
+                .expect("create board_recent stub");
+            orcs.set("board_recent", board_fn)
+                .expect("set board_recent stub");
+
+            // orcs.hook(name, fn) — no-op
+            let hook_fn = lua
+                .create_function(|_, (_name, _callback): (String, mlua::Function)| Ok(()))
+                .expect("create hook stub");
+            orcs.set("hook", hook_fn).expect("set hook stub");
+        });
+
+        captured
+    }
 }
 
 #[cfg(test)]
@@ -774,5 +909,264 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(result["descriptions"], "## Tools\n- tool_a\n- tool_b");
+    }
+
+    // ---------------------------------------------------------------
+    // inject_spawn_runner_mock tests
+    // ---------------------------------------------------------------
+
+    // Script that calls orcs.spawn_runner() during on_request and exposes result
+    const SPAWN_RUNNER_CALLER_SCRIPT: &str = r#"
+        return {
+            id = "spawn-caller",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                local args = req.payload.spawn_args or { script = "default" }
+                local result = orcs.spawn_runner(args)
+                if result and result.ok then
+                    return {
+                        success = true,
+                        data = { fqn = result.fqn, channel_id = result.channel_id }
+                    }
+                end
+                return {
+                    success = false,
+                    error = result and result.error or "spawn_runner failed"
+                }
+            end,
+            on_signal = function(sig)
+                return "Handled"
+            end,
+        }
+    "#;
+
+    #[test]
+    fn inject_spawn_runner_mock_captures_args_and_returns_response() {
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+            .expect("spawn-caller script should load");
+
+        let captured = harness.inject_spawn_runner_mock(vec![(
+            "builtin::llm-worker".to_string(),
+            "ch-001".to_string(),
+        )]);
+
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "spawn",
+                serde_json::json!({"spawn_args": {"script": "worker.lua", "id": "llm"}}),
+            )
+            .expect("request should succeed");
+
+        // Verify captured args
+        let args = captured.lock().expect("captured mutex");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0]["script"], "worker.lua");
+        assert_eq!(args[0]["id"], "llm");
+
+        // Verify returned fqn/channel_id
+        assert_eq!(result["fqn"], "builtin::llm-worker");
+        assert_eq!(result["channel_id"], "ch-001");
+    }
+
+    #[test]
+    fn inject_spawn_runner_mock_returns_error_when_queue_exhausted() {
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+            .expect("spawn-caller script should load");
+
+        let captured = harness.inject_spawn_runner_mock(vec![]); // empty queue
+
+        let result = harness.request(
+            EventCategory::Echo,
+            "spawn",
+            serde_json::json!({"spawn_args": {"script": "x.lua"}}),
+        );
+
+        // Should fail because mock has no responses
+        assert!(result.is_err());
+
+        // Args should still be captured
+        let args = captured.lock().expect("captured mutex");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn inject_spawn_runner_mock_consumes_queue_in_order() {
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+            .expect("spawn-caller script should load");
+
+        let captured = harness.inject_spawn_runner_mock(vec![
+            ("ns::first".to_string(), "ch-A".to_string()),
+            ("ns::second".to_string(), "ch-B".to_string()),
+        ]);
+
+        let r1 = harness
+            .request(
+                EventCategory::Echo,
+                "spawn",
+                serde_json::json!({"spawn_args": {"script": "a.lua"}}),
+            )
+            .expect("first spawn should succeed");
+
+        let r2 = harness
+            .request(
+                EventCategory::Echo,
+                "spawn",
+                serde_json::json!({"spawn_args": {"script": "b.lua"}}),
+            )
+            .expect("second spawn should succeed");
+
+        // Third call exhausts queue
+        let r3 = harness.request(
+            EventCategory::Echo,
+            "spawn",
+            serde_json::json!({"spawn_args": {"script": "c.lua"}}),
+        );
+
+        assert_eq!(r1["fqn"], "ns::first");
+        assert_eq!(r1["channel_id"], "ch-A");
+        assert_eq!(r2["fqn"], "ns::second");
+        assert_eq!(r2["channel_id"], "ch-B");
+        assert!(r3.is_err());
+
+        let args = captured.lock().expect("captured mutex");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0]["script"], "a.lua");
+        assert_eq!(args[1]["script"], "b.lua");
+        assert_eq!(args[2]["script"], "c.lua");
+    }
+
+    // ---------------------------------------------------------------
+    // inject_output_stubs tests
+    // ---------------------------------------------------------------
+
+    // Script that exercises all output-related orcs.* stubs
+    const OUTPUT_STUBS_SCRIPT: &str = r#"
+        return {
+            id = "output-exerciser",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                local op = req.operation
+
+                if op == "test_output" then
+                    orcs.output("hello from output")
+                    return { success = true }
+                elseif op == "test_output_with_level" then
+                    orcs.output_with_level("warn message", "warn")
+                    return { success = true }
+                elseif op == "test_emit_event" then
+                    orcs.emit_event("TestCat", "TestKind", { key = "val" })
+                    return { success = true }
+                elseif op == "test_board_recent" then
+                    local items = orcs.board_recent(10)
+                    return { success = true, data = { count = #items } }
+                elseif op == "test_hook" then
+                    orcs.hook("before_action", function() end)
+                    return { success = true }
+                elseif op == "test_all" then
+                    orcs.output("msg1")
+                    orcs.output_with_level("msg2", "info")
+                    orcs.emit_event("Cat", "Kind", {})
+                    local b = orcs.board_recent(5)
+                    orcs.hook("h", function() end)
+                    return { success = true, data = { output_count = 2, board_size = #b } }
+                end
+                return { success = false, error = "unknown op" }
+            end,
+            on_signal = function(sig)
+                return "Handled"
+            end,
+        }
+    "#;
+
+    #[test]
+    fn inject_output_stubs_captures_output_messages() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        let captured = harness.inject_output_stubs();
+
+        harness
+            .request(EventCategory::Echo, "test_output", Value::Null)
+            .expect("test_output should succeed");
+
+        let msgs = captured.lock().expect("captured mutex");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0], "hello from output");
+    }
+
+    #[test]
+    fn inject_output_stubs_captures_output_with_level_messages() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        let captured = harness.inject_output_stubs();
+
+        harness
+            .request(EventCategory::Echo, "test_output_with_level", Value::Null)
+            .expect("test_output_with_level should succeed");
+
+        let msgs = captured.lock().expect("captured mutex");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0], "warn message");
+    }
+
+    #[test]
+    fn inject_output_stubs_emit_event_does_not_panic() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        harness.inject_output_stubs();
+
+        harness
+            .request(EventCategory::Echo, "test_emit_event", Value::Null)
+            .expect("emit_event stub should not fail");
+    }
+
+    #[test]
+    fn inject_output_stubs_board_recent_returns_empty_table() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        harness.inject_output_stubs();
+
+        let result = harness
+            .request(EventCategory::Echo, "test_board_recent", Value::Null)
+            .expect("board_recent stub should not fail");
+
+        assert_eq!(result["count"], 0);
+    }
+
+    #[test]
+    fn inject_output_stubs_hook_does_not_panic() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        harness.inject_output_stubs();
+
+        harness
+            .request(EventCategory::Echo, "test_hook", Value::Null)
+            .expect("hook stub should not fail");
+    }
+
+    #[test]
+    fn inject_output_stubs_all_stubs_work_together() {
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+            .expect("output-exerciser script should load");
+
+        let captured = harness.inject_output_stubs();
+
+        let result = harness
+            .request(EventCategory::Echo, "test_all", Value::Null)
+            .expect("all stubs should work together");
+
+        // Both output + output_with_level captured
+        let msgs = captured.lock().expect("captured mutex");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0], "msg1");
+        assert_eq!(msgs[1], "msg2");
+
+        assert_eq!(result["output_count"], 2);
+        assert_eq!(result["board_size"], 0);
     }
 }
