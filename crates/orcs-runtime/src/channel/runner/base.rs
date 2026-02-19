@@ -39,13 +39,15 @@ use super::common::{
 };
 use super::paused_queue::PausedEventQueue;
 use super::EventEmitter;
-use crate::auth::{PermissionChecker, Session};
+use crate::auth::PermissionChecker;
+use crate::auth::Session;
 use crate::channel::command::{StateTransition, WorldCommand};
 use crate::channel::config::ChannelConfig;
 use crate::channel::World;
 use crate::engine::SharedChannelHandles;
 use orcs_component::{
-    AsyncChildContext, ChildContext, Component, ComponentLoader, ComponentSnapshot, SnapshotError,
+    AsyncChildContext, ChildContext, Component, ComponentError, ComponentLoader, ComponentSnapshot,
+    SnapshotError,
 };
 use orcs_event::{EventCategory, Request, Signal, SubscriptionEntry};
 use orcs_hook::SharedHookRegistry;
@@ -314,6 +316,19 @@ impl ChannelHandle {
     }
 }
 
+/// State stored when a Component returns [`ComponentError::Suspended`].
+///
+/// Holds the original request and approval metadata so that the ChannelRunner
+/// can re-dispatch the request after the user approves.
+struct PendingApproval {
+    /// Unique ID for this approval (matches Signal routing).
+    approval_id: String,
+    /// Permission pattern to grant on approval (e.g. `"shell:*"`).
+    grant_pattern: String,
+    /// The original request to re-dispatch after approval.
+    original_request: Request,
+}
+
 /// Execution context for a single Channel.
 ///
 /// `ChannelRunner` provides the runtime environment for parallel
@@ -369,6 +384,12 @@ pub struct ChannelRunner {
     hook_registry: Option<SharedHookRegistry>,
     /// Per-component configuration from `[components.settings.<name>]`.
     component_config: serde_json::Value,
+    /// Dynamic command grants for granting permissions on approval.
+    grants: Option<Arc<dyn orcs_auth::GrantPolicy>>,
+    /// IO output sender for routing approval requests to the ClientRunner.
+    io_output_tx: Option<OutputSender>,
+    /// Pending approval state: stored when Component returns Suspended.
+    pending_approval: Option<PendingApproval>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -758,14 +779,61 @@ impl ChannelRunner {
                 return false;
             }
             SignalAction::Transition(transition) => {
-                send_transition(&self.world_tx, self.id, transition.clone()).await;
+                let is_resolve = matches!(transition, StateTransition::ResolveApproval { .. });
+                let accepted = send_transition(&self.world_tx, self.id, transition.clone()).await;
 
                 // Drain paused queue on resume
                 if matches!(transition, StateTransition::Resume) {
                     self.drain_paused_queue().await;
                 }
+
+                // On successful approval resolution, grant pattern and re-dispatch.
+                if is_resolve && accepted {
+                    self.handle_approval_resolved().await;
+                }
             }
-            SignalAction::Continue => {}
+            SignalAction::Continue => {
+                // Handle Reject: clear pending approval and notify user.
+                if let orcs_event::SignalKind::Reject {
+                    approval_id,
+                    reason,
+                } = &signal.kind
+                {
+                    if let Some(pending) = &self.pending_approval {
+                        if pending.approval_id == *approval_id {
+                            info!(
+                                approval_id = %approval_id,
+                                "approval rejected, clearing pending"
+                            );
+                            // Abort the channel to exit AwaitingApproval.
+                            send_abort(
+                                &self.world_tx,
+                                self.id,
+                                reason.as_deref().unwrap_or("rejected by user"),
+                            )
+                            .await;
+                            self.pending_approval = None;
+
+                            // Notify user.
+                            if let Some(io_tx) = &self.io_output_tx {
+                                let event = Event {
+                                    category: EventCategory::Output,
+                                    operation: "output".to_string(),
+                                    source: self.component_id.clone(),
+                                    payload: serde_json::json!({
+                                        "message": format!(
+                                            "Rejected: {}",
+                                            reason.as_deref().unwrap_or("no reason")
+                                        ),
+                                        "level": "warn",
+                                    }),
+                                };
+                                let _ = io_tx.try_send_direct(event);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // --- Post-dispatch hook ---
@@ -777,6 +845,73 @@ impl ChannelRunner {
             self.dispatch_hook(orcs_hook::HookPoint::SignalPostDispatch, post_payload);
 
         true
+    }
+
+    /// Handles post-approval: grants the permission pattern and re-dispatches the request.
+    ///
+    /// Called after a `ResolveApproval` transition succeeds (channel returns to Running).
+    /// Consumes the stored [`PendingApproval`] and:
+    /// 1. Grants the `grant_pattern` via the shared [`GrantPolicy`]
+    /// 2. Re-dispatches the original request to the Component (which will now pass permission check)
+    /// 3. Sends `ShowApproved` notification to the user
+    async fn handle_approval_resolved(&mut self) {
+        let pending = match self.pending_approval.take() {
+            Some(p) => p,
+            None => {
+                debug!("ResolveApproval accepted but no pending approval stored");
+                return;
+            }
+        };
+
+        info!(
+            approval_id = %pending.approval_id,
+            grant_pattern = %pending.grant_pattern,
+            "approval resolved, granting pattern and re-dispatching"
+        );
+
+        // 1. Grant the permission pattern.
+        if let Some(grants) = &self.grants {
+            if let Err(e) =
+                grants.grant(orcs_auth::CommandGrant::persistent(&pending.grant_pattern))
+            {
+                warn!(
+                    error = %e,
+                    pattern = %pending.grant_pattern,
+                    "failed to grant pattern after approval"
+                );
+            }
+        } else {
+            warn!("no GrantPolicy configured, cannot grant pattern");
+        }
+
+        // 2. Re-dispatch the original request.
+        let result = {
+            let mut comp = self.component.lock().await;
+            comp.on_request(&pending.original_request)
+        };
+
+        match result {
+            Ok(response) => {
+                debug!(response = ?response, "re-dispatched request succeeded after approval");
+            }
+            Err(e) => {
+                warn!(error = %e, "re-dispatched request failed after approval");
+            }
+        }
+
+        // 3. Notify user that approval was accepted.
+        if let Some(io_tx) = &self.io_output_tx {
+            let event = Event {
+                category: EventCategory::Output,
+                operation: "output".to_string(),
+                source: self.component_id.clone(),
+                payload: serde_json::json!({
+                    "message": format!("Approved: {}", pending.approval_id),
+                    "level": "info",
+                }),
+            };
+            let _ = io_tx.try_send_direct(event);
+        }
     }
 
     /// Aborts all spawned children.
@@ -834,7 +969,7 @@ impl ChannelRunner {
     /// Subscription filtering is already applied by `handle_event()` before
     /// this method is called. Direct events and paused-queue drains bypass
     /// the filter by design.
-    async fn process_event(&self, event: Event, _is_direct: bool) {
+    async fn process_event(&mut self, event: Event, _is_direct: bool) {
         // --- Pre-dispatch hook ---
         let pre_payload = serde_json::json!({
             "category": format!("{:?}", event.category),
@@ -894,6 +1029,62 @@ impl ChannelRunner {
         match result {
             Ok(response) => {
                 debug!(response = ?response, "component returned success");
+            }
+            Err(ComponentError::Suspended {
+                approval_id,
+                grant_pattern,
+                pending_request,
+            }) => {
+                info!(
+                    approval_id = %approval_id,
+                    grant_pattern = %grant_pattern,
+                    "component suspended pending approval"
+                );
+
+                // Store the pending approval for re-dispatch after approval.
+                self.pending_approval = Some(PendingApproval {
+                    approval_id: approval_id.clone(),
+                    grant_pattern,
+                    original_request: request,
+                });
+
+                // Transition channel to AwaitingApproval state.
+                send_transition(
+                    &self.world_tx,
+                    self.id,
+                    StateTransition::AwaitApproval {
+                        request_id: approval_id.clone(),
+                    },
+                )
+                .await;
+
+                // Notify user via IOOutput (ClientRunner → IOBridge → console).
+                let description = pending_request
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("command execution")
+                    .to_string();
+                let command = pending_request
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let output_event = Event {
+                    category: EventCategory::Output,
+                    operation: "approval_request".to_string(),
+                    source: self.component_id.clone(),
+                    payload: serde_json::json!({
+                        "type": "approval_request",
+                        "approval_id": approval_id,
+                        "operation": "exec",
+                        "description": format!("{}: {}", description, command),
+                        "source": self.component_id.fqn(),
+                    }),
+                };
+                if let Some(io_tx) = &self.io_output_tx {
+                    let _ = io_tx.try_send_direct(output_event);
+                }
             }
             Err(e) => {
                 warn!(error = %e, "component returned error");
@@ -1535,6 +1726,9 @@ impl ChannelRunnerBuilder {
             component_channel_map: rpc_map,
             hook_registry: self.hook_registry,
             component_config: self.component_config,
+            grants: self.grants.clone(),
+            io_output_tx: self.output_tx.clone(),
+            pending_approval: None,
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

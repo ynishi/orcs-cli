@@ -13,6 +13,7 @@
 //! | [`ExecutionFailed`](ComponentError::ExecutionFailed) | `COMPONENT_EXECUTION_FAILED` | Yes |
 //! | [`InvalidPayload`](ComponentError::InvalidPayload) | `COMPONENT_INVALID_PAYLOAD` | No |
 //! | [`Aborted`](ComponentError::Aborted) | `COMPONENT_ABORTED` | No |
+//! | [`Suspended`](ComponentError::Suspended) | `COMPONENT_SUSPENDED` | Yes |
 //!
 //! # Recoverability
 //!
@@ -48,6 +49,7 @@ use thiserror::Error;
 /// | `ExecutionFailed` | Operation failed | May retry |
 /// | `InvalidPayload` | Bad request data | Fix payload |
 /// | `Aborted` | Signal-triggered abort | Intentional |
+/// | `Suspended` | Awaiting approval | Approval flow |
 ///
 /// # Example
 ///
@@ -108,6 +110,33 @@ pub enum ComponentError {
     /// **Recoverable** - may succeed with different config.
     #[error("initialization failed: {0}")]
     InitFailed(String),
+
+    /// Execution suspended pending human approval.
+    ///
+    /// Returned by `on_request()` when a command requires permission
+    /// that hasn't been granted yet. The ChannelRunner intercepts this
+    /// error and transitions to `AwaitingApproval` state, allowing the
+    /// event loop to continue processing signals (Approve/Reject).
+    ///
+    /// On approval, the ChannelRunner grants the pattern and re-dispatches
+    /// the pending request. On rejection, the request is discarded.
+    ///
+    /// **Recoverable** - approval resolves this.
+    ///
+    /// # Fields
+    ///
+    /// - `approval_id`: Unique ID for this approval request (matches Signal routing).
+    /// - `grant_pattern`: Permission pattern to grant on approval (e.g. `"shell:*"`).
+    /// - `pending_request`: Serialized original request for re-dispatch after approval.
+    #[error("suspended pending approval: {approval_id}")]
+    Suspended {
+        /// Unique ID for this approval request.
+        approval_id: String,
+        /// Permission pattern to grant on approval.
+        grant_pattern: String,
+        /// Serialized original request for re-dispatch.
+        pending_request: serde_json::Value,
+    },
 }
 
 impl ErrorCode for ComponentError {
@@ -121,6 +150,7 @@ impl ErrorCode for ComponentError {
             Self::InvalidPayload(_) => "COMPONENT_INVALID_PAYLOAD",
             Self::Aborted => "COMPONENT_ABORTED",
             Self::InitFailed(_) => "COMPONENT_INIT_FAILED",
+            Self::Suspended { .. } => "COMPONENT_SUSPENDED",
         }
     }
 
@@ -134,6 +164,7 @@ impl ErrorCode for ComponentError {
         match self {
             Self::ExecutionFailed(_) => true,
             Self::InitFailed(_) => true,
+            Self::Suspended { .. } => true,
             Self::NotSupported(_) => false,
             Self::InvalidPayload(_) => false,
             Self::Aborted => false,
@@ -154,6 +185,11 @@ mod tests {
             ComponentError::InvalidPayload("x".into()),
             ComponentError::Aborted,
             ComponentError::InitFailed("x".into()),
+            ComponentError::Suspended {
+                approval_id: "test-001".into(),
+                grant_pattern: "shell:*".into(),
+                pending_request: serde_json::Value::Null,
+            },
         ]
     }
 
@@ -204,6 +240,66 @@ mod tests {
     }
 
     #[test]
+    fn suspended_error() {
+        let err = ComponentError::Suspended {
+            approval_id: "ap-42".into(),
+            grant_pattern: "shell:ls".into(),
+            pending_request: serde_json::json!({"op": "exec", "cmd": "ls"}),
+        };
+        assert_eq!(err.code(), "COMPONENT_SUSPENDED");
+        assert!(err.is_recoverable());
+        assert!(err.to_string().contains("suspended pending approval"));
+        assert!(err.to_string().contains("ap-42"));
+    }
+
+    #[test]
+    fn suspended_preserves_fields() {
+        let payload = serde_json::json!({"command": "rm -rf /", "args": []});
+        let err = ComponentError::Suspended {
+            approval_id: "ap-99".into(),
+            grant_pattern: "shell:rm".into(),
+            pending_request: payload.clone(),
+        };
+        match err {
+            ComponentError::Suspended {
+                approval_id,
+                grant_pattern,
+                pending_request,
+            } => {
+                assert_eq!(approval_id, "ap-99");
+                assert_eq!(grant_pattern, "shell:rm");
+                assert_eq!(pending_request, payload);
+            }
+            _ => panic!("Expected Suspended variant"),
+        }
+    }
+
+    #[test]
+    fn suspended_serialization_roundtrip() {
+        let err = ComponentError::Suspended {
+            approval_id: "ap-rt".into(),
+            grant_pattern: "tool:*".into(),
+            pending_request: serde_json::json!({"test": true}),
+        };
+        let serialized = serde_json::to_string(&err).expect("Suspended should serialize to JSON");
+        let deserialized: ComponentError =
+            serde_json::from_str(&serialized).expect("Suspended should deserialize from JSON");
+        assert_eq!(deserialized.code(), "COMPONENT_SUSPENDED");
+        match deserialized {
+            ComponentError::Suspended {
+                approval_id,
+                grant_pattern,
+                pending_request,
+            } => {
+                assert_eq!(approval_id, "ap-rt");
+                assert_eq!(grant_pattern, "tool:*");
+                assert_eq!(pending_request, serde_json::json!({"test": true}));
+            }
+            _ => panic!("Expected Suspended after roundtrip"),
+        }
+    }
+
+    #[test]
     fn error_code_prefix() {
         // All component errors should have COMPONENT_ prefix
         let errors: Vec<ComponentError> = vec![
@@ -212,6 +308,11 @@ mod tests {
             ComponentError::InvalidPayload("x".into()),
             ComponentError::Aborted,
             ComponentError::InitFailed("x".into()),
+            ComponentError::Suspended {
+                approval_id: "test-001".into(),
+                grant_pattern: "shell:*".into(),
+                pending_request: serde_json::Value::Null,
+            },
         ];
 
         for err in errors {

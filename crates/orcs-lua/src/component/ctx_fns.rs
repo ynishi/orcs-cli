@@ -17,7 +17,7 @@
 use crate::error::LuaError;
 use crate::types::{lua_to_json, serde_json_to_lua};
 use mlua::{Lua, LuaSerdeExt, Table};
-use orcs_component::{ChildConfig, ChildContext};
+use orcs_component::{ChildConfig, ChildContext, ComponentError};
 use orcs_runtime::sandbox::SandboxPolicy;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -73,16 +73,27 @@ pub(super) fn register(
                 result.set("code", -1)?;
                 return Ok(result);
             }
-            orcs_component::CommandPermission::RequiresApproval { .. } => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("stdout", "")?;
-                result.set(
-                    "stderr",
-                    "permission denied: command requires approval (use orcs.check_command first)",
-                )?;
-                result.set("code", -1)?;
-                return Ok(result);
+            orcs_component::CommandPermission::RequiresApproval {
+                grant_pattern,
+                description,
+            } => {
+                let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+                tracing::info!(
+                    approval_id = %approval_id,
+                    grant_pattern = %grant_pattern,
+                    cmd = %cmd,
+                    "exec requires approval, suspending"
+                );
+                return Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                    ComponentError::Suspended {
+                        approval_id,
+                        grant_pattern: grant_pattern.clone(),
+                        pending_request: serde_json::json!({
+                            "command": cmd,
+                            "description": description,
+                        }),
+                    },
+                )));
             }
         }
 
@@ -152,16 +163,27 @@ pub(super) fn register(
                         result.set("code", -1)?;
                         return Ok(result);
                     }
-                    orcs_component::CommandPermission::RequiresApproval { .. } => {
-                        let result = lua.create_table()?;
-                        result.set("ok", false)?;
-                        result.set("stdout", "")?;
-                        result.set(
-                            "stderr",
-                            "permission denied: command requires approval (use orcs.check_command first)",
-                        )?;
-                        result.set("code", -1)?;
-                        return Ok(result);
+                    orcs_component::CommandPermission::RequiresApproval {
+                        grant_pattern,
+                        description,
+                    } => {
+                        let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+                        tracing::info!(
+                            approval_id = %approval_id,
+                            grant_pattern = %grant_pattern,
+                            program = %program,
+                            "exec_argv requires approval, suspending"
+                        );
+                        return Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                            ComponentError::Suspended {
+                                approval_id,
+                                grant_pattern: grant_pattern.clone(),
+                                pending_request: serde_json::json!({
+                                    "command": program,
+                                    "description": description,
+                                }),
+                            },
+                        )));
                     }
                 }
                 drop(ctx_guard);

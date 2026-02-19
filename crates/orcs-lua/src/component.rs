@@ -35,6 +35,22 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Extracts a [`ComponentError::Suspended`] from a potentially nested `mlua::Error` chain.
+///
+/// Lua wraps callback errors in `CallbackError { cause }` at each call-stack level.
+/// This helper recursively unwraps `CallbackError` and checks `ExternalError` for
+/// a boxed `ComponentError::Suspended`. Returns `None` if the error is not a Suspended.
+fn extract_suspended(err: &mlua::Error) -> Option<ComponentError> {
+    match err {
+        mlua::Error::ExternalError(ext) => ext
+            .downcast_ref::<ComponentError>()
+            .filter(|ce| matches!(ce, ComponentError::Suspended { .. }))
+            .cloned(),
+        mlua::Error::CallbackError { cause, .. } => extract_suspended(cause),
+        _ => None,
+    }
+}
+
 /// A component implemented in Lua.
 ///
 /// Loads a Lua script and delegates Component trait methods to Lua functions.
@@ -551,7 +567,12 @@ impl Component for LuaComponent {
 
         // Call Lua function
         let result: LuaResponse = on_request.call(lua_req).map_err(|e| {
-            // Sanitize error message to avoid leaking internal details
+            // Propagate Suspended errors transparently — ChannelRunner needs
+            // the approval_id and grant_pattern to drive the HIL flow.
+            if let Some(suspended) = extract_suspended(&e) {
+                return suspended;
+            }
+            // Sanitize other error messages to avoid leaking internal details
             tracing::debug!("Lua on_request error: {}", e);
             ComponentError::ExecutionFailed("lua script execution failed".to_string())
         })?;
@@ -832,3 +853,90 @@ fn json_to_lua_value(lua: &Lua, value: &JsonValue) -> Result<LuaValue, mlua::Err
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod extract_suspended_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_suspended_from_external_error() {
+        let suspended = ComponentError::Suspended {
+            approval_id: "ap-1".into(),
+            grant_pattern: "shell:*".into(),
+            pending_request: serde_json::json!({"cmd": "ls"}),
+        };
+        let err = mlua::Error::ExternalError(Arc::new(suspended));
+        let result = extract_suspended(&err);
+        assert!(
+            result.is_some(),
+            "should extract Suspended from ExternalError"
+        );
+        match result.expect("already checked is_some") {
+            ComponentError::Suspended { approval_id, .. } => {
+                assert_eq!(approval_id, "ap-1");
+            }
+            other => panic!("Expected Suspended, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extracts_suspended_from_callback_error() {
+        let suspended = ComponentError::Suspended {
+            approval_id: "ap-2".into(),
+            grant_pattern: "tool:*".into(),
+            pending_request: serde_json::Value::Null,
+        };
+        let inner = mlua::Error::ExternalError(Arc::new(suspended));
+        let err = mlua::Error::CallbackError {
+            traceback: "stack trace".into(),
+            cause: Arc::new(inner),
+        };
+        let result = extract_suspended(&err);
+        assert!(
+            result.is_some(),
+            "should extract Suspended through CallbackError"
+        );
+    }
+
+    #[test]
+    fn extracts_suspended_from_nested_callback_errors() {
+        let suspended = ComponentError::Suspended {
+            approval_id: "ap-3".into(),
+            grant_pattern: "exec:*".into(),
+            pending_request: serde_json::Value::Null,
+        };
+        let inner = mlua::Error::ExternalError(Arc::new(suspended));
+        let mid = mlua::Error::CallbackError {
+            traceback: "level 1".into(),
+            cause: Arc::new(inner),
+        };
+        let outer = mlua::Error::CallbackError {
+            traceback: "level 2".into(),
+            cause: Arc::new(mid),
+        };
+        let result = extract_suspended(&outer);
+        assert!(
+            result.is_some(),
+            "should extract through nested CallbackErrors"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_suspended_component_error() {
+        let err =
+            mlua::Error::ExternalError(Arc::new(ComponentError::ExecutionFailed("timeout".into())));
+        assert!(
+            extract_suspended(&err).is_none(),
+            "ExecutionFailed should not match"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_runtime_error() {
+        let err = mlua::Error::RuntimeError("some error".into());
+        assert!(
+            extract_suspended(&err).is_none(),
+            "RuntimeError should not match"
+        );
+    }
+}

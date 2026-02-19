@@ -44,6 +44,9 @@ thiserror = "2.0"
 # Logging
 tracing = "0.1"
 
+# ID generation
+uuid = { workspace = true }
+
 # Async runtime (for non-blocking process execution)
 tokio = { version = "1", features = ["process", "rt"] }
 
