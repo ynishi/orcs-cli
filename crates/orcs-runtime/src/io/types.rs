@@ -195,6 +195,17 @@ pub enum IOOutput {
         reason: Option<String>,
     },
 
+    /// Notify that a component has started processing.
+    ///
+    /// Displayed to the user so they know the system is working
+    /// (especially important for LLM calls that take time).
+    ShowProcessing {
+        /// Component name (e.g. `"claude_cli"`).
+        component: String,
+        /// Operation being processed (e.g. `"input"`).
+        operation: String,
+    },
+
     /// Clear the display.
     Clear,
 }
@@ -277,6 +288,15 @@ impl IOOutput {
     pub fn approved(approval_id: impl Into<String>) -> Self {
         Self::ShowApproved {
             approval_id: approval_id.into(),
+        }
+    }
+
+    /// Creates a ShowProcessing output.
+    #[must_use]
+    pub fn processing(component: impl Into<String>, operation: impl Into<String>) -> Self {
+        Self::ShowProcessing {
+            component: component.into(),
+            operation: operation.into(),
         }
     }
 
@@ -415,6 +435,21 @@ mod tests {
     fn io_output_prompt() {
         let prompt = IOOutput::prompt("Enter value:");
         assert!(matches!(prompt, IOOutput::Prompt { .. }));
+    }
+
+    #[test]
+    fn io_output_processing() {
+        let processing = IOOutput::processing("claude_cli", "input");
+        match processing {
+            IOOutput::ShowProcessing {
+                component,
+                operation,
+            } => {
+                assert_eq!(component, "claude_cli");
+                assert_eq!(operation, "input");
+            }
+            other => panic!("Expected ShowProcessing, got {:?}", other),
+        }
     }
 
     #[test]

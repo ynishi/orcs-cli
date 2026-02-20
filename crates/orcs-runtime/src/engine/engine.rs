@@ -41,7 +41,7 @@ use crate::channel::{
 };
 use crate::io::IOPort;
 use crate::Principal;
-use orcs_component::{Component, ComponentSnapshot};
+use orcs_component::{Component, ComponentLoader, ComponentSnapshot};
 use orcs_event::Signal;
 use orcs_hook::SharedHookRegistry;
 use orcs_types::{ChannelId, ComponentId};
@@ -335,6 +335,7 @@ impl OrcsEngine {
     /// - Event emission (signal broadcasting)
     /// - Output routing to IO channel
     /// - Child spawning via LuaChildLoader
+    /// - Component loading for spawn_runner_from_script
     ///
     /// # Arguments
     ///
@@ -342,6 +343,7 @@ impl OrcsEngine {
     /// * `component` - The Component to bind
     /// * `output_tx` - Optional channel for Output event routing
     /// * `lua_loader` - Optional loader for spawning Lua children
+    /// * `component_loader` - Optional loader for spawning Components as runners
     ///
     /// # Returns
     ///
@@ -352,6 +354,7 @@ impl OrcsEngine {
         component: Box<dyn Component>,
         output_tx: Option<OutputSender>,
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
+        component_loader: Option<Arc<dyn ComponentLoader>>,
     ) -> ChannelHandle {
         let signal_rx = self.signal_tx.subscribe();
         let component_id = component.id().clone();
@@ -379,6 +382,11 @@ impl OrcsEngine {
         let has_child_spawner = lua_loader.is_some();
         if has_child_spawner {
             builder = builder.with_child_spawner(lua_loader);
+        }
+
+        // Enable component loader for spawn_runner_from_script
+        if let Some(loader) = component_loader {
+            builder = builder.with_component_loader(loader);
         }
 
         let (runner, handle) = self.apply_hook_registry(builder).build();
@@ -588,6 +596,7 @@ impl OrcsEngine {
     /// - Event emission (signal broadcasting)
     /// - Output routing to IO channel
     /// - Child spawning via LuaChildLoader
+    /// - Component loading for spawn_runner_from_script
     /// - Session-based permission checking
     ///
     /// # Arguments
@@ -596,6 +605,7 @@ impl OrcsEngine {
     /// * `component` - The Component to bind
     /// * `output_tx` - Optional channel for Output event routing
     /// * `lua_loader` - Optional loader for spawning Lua children
+    /// * `component_loader` - Optional loader for spawning Components as runners
     /// * `session` - Session for permission checking
     /// * `checker` - Permission checker policy
     ///
@@ -609,6 +619,7 @@ impl OrcsEngine {
         component: Box<dyn Component>,
         output_tx: Option<OutputSender>,
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
+        component_loader: Option<Arc<dyn ComponentLoader>>,
         session: Arc<crate::Session>,
         checker: Arc<dyn crate::auth::PermissionChecker>,
         grants: Arc<dyn orcs_auth::GrantPolicy>,
@@ -619,6 +630,7 @@ impl OrcsEngine {
             component,
             output_tx,
             lua_loader,
+            component_loader,
             session,
             checker,
             grants,
@@ -638,6 +650,7 @@ impl OrcsEngine {
         component: Box<dyn Component>,
         output_tx: Option<OutputSender>,
         lua_loader: Option<Arc<dyn LuaChildLoader>>,
+        component_loader: Option<Arc<dyn ComponentLoader>>,
         session: Arc<crate::Session>,
         checker: Arc<dyn crate::auth::PermissionChecker>,
         grants: Arc<dyn orcs_auth::GrantPolicy>,
@@ -674,6 +687,11 @@ impl OrcsEngine {
         let has_child_spawner = lua_loader.is_some();
         if has_child_spawner {
             builder = builder.with_child_spawner(lua_loader);
+        }
+
+        // Enable component loader for spawn_runner_from_script
+        if let Some(loader) = component_loader {
+            builder = builder.with_component_loader(loader);
         }
 
         // Restore from initial snapshot if provided (session resume)

@@ -617,3 +617,609 @@ mod e2e_workflow {
         assert_eq!(child_ctx.child_count(), 1);
     }
 }
+
+// =============================================================================
+// spawn_runner Registration Tests (World + handles + map)
+// =============================================================================
+
+mod spawn_runner_registration {
+    use super::*;
+    use orcs_runtime::engine::{SharedChannelHandles, SharedComponentChannelMap};
+    use parking_lot::RwLock as PLRwLock;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    /// Creates the full infrastructure needed to test spawn_runner:
+    /// WorldManager, shared_handles, component_channel_map, and a
+    /// parent ChildContextImpl that has all RPC + runner support wired up.
+    async fn setup_spawn_runner_env() -> (
+        tokio::task::JoinHandle<()>,
+        mpsc::Sender<WorldCommand>,
+        Arc<RwLock<World>>,
+        broadcast::Sender<Signal>,
+        orcs_types::ChannelId,
+        SharedChannelHandles,
+        SharedComponentChannelMap,
+    ) {
+        let mut world = World::new();
+        let parent_channel = world.create_channel(ChannelConfig::interactive());
+
+        let (manager, world_tx) = WorldManager::with_world(world);
+        let world_handle = manager.world();
+        let manager_task = tokio::spawn(manager.run());
+
+        let (signal_tx, _) = broadcast::channel(64);
+
+        let shared_handles: SharedChannelHandles = Arc::new(PLRwLock::new(HashMap::new()));
+        let component_channel_map: SharedComponentChannelMap =
+            Arc::new(PLRwLock::new(HashMap::new()));
+
+        (
+            manager_task,
+            world_tx,
+            world_handle,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        )
+    }
+
+    fn create_parent_context(
+        parent_channel: orcs_types::ChannelId,
+        world_tx: &mpsc::Sender<WorldCommand>,
+        world: &Arc<RwLock<World>>,
+        signal_tx: &broadcast::Sender<Signal>,
+        shared_handles: &SharedChannelHandles,
+        component_channel_map: &SharedComponentChannelMap,
+    ) -> ChildContextImpl {
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        // Elevated session so spawn_runner auth check passes
+        let session =
+            orcs_runtime::auth::Session::new(Principal::User(orcs_types::PrincipalId::new()))
+                .elevate(Duration::from_secs(60));
+
+        ChildContextImpl::new("test-parent", output_tx, spawner_arc)
+            .with_runner_support(world_tx.clone(), Arc::clone(world), signal_tx.clone())
+            .with_rpc_support(
+                Arc::clone(shared_handles),
+                Arc::clone(component_channel_map),
+                parent_channel,
+            )
+            .with_session(session)
+            .with_checker(Arc::new(orcs_runtime::auth::DefaultPolicy))
+    }
+
+    async fn teardown(
+        manager_task: tokio::task::JoinHandle<()>,
+        world_tx: mpsc::Sender<WorldCommand>,
+    ) {
+        let _ = world_tx.send(WorldCommand::Shutdown).await;
+        let _ = manager_task.await;
+    }
+
+    #[tokio::test]
+    async fn spawn_runner_registers_in_shared_handles_and_map() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        let component = Box::new(SpawnerComponent::new("agent-alpha"));
+        let (channel_id, ready_rx) = ctx
+            .spawn_runner(component)
+            .expect("spawn_runner should succeed");
+
+        // Wait for registration to complete via ready notification
+        let _ = ready_rx.await;
+
+        // Verify shared_handles contains the spawned channel
+        {
+            let handles = shared_handles.read();
+            assert!(
+                handles.contains_key(&channel_id),
+                "shared_handles should contain spawned channel {}",
+                channel_id
+            );
+        }
+
+        // Verify component_channel_map contains the FQN mapping
+        {
+            let map = component_channel_map.read();
+            let fqn = "builtin::agent-alpha";
+            assert!(
+                map.contains_key(fqn),
+                "component_channel_map should contain FQN '{}'",
+                fqn
+            );
+            assert_eq!(
+                map.get(fqn).copied(),
+                Some(channel_id),
+                "FQN should map to the correct channel_id"
+            );
+        }
+
+        // Verify World has the channel registered
+        {
+            let w = world.read().await;
+            assert!(
+                w.get(&channel_id).is_some(),
+                "World should contain channel {}",
+                channel_id
+            );
+        }
+
+        // Cleanup: send veto to stop the spawned runner
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto signal");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_runner_cleans_up_on_exit() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        let component = Box::new(SpawnerComponent::new("ephemeral-agent"));
+        let (channel_id, ready_rx) = ctx
+            .spawn_runner(component)
+            .expect("spawn_runner should succeed");
+
+        // Wait for registration to complete via ready notification
+        let _ = ready_rx.await;
+
+        // Confirm registration happened
+        assert!(
+            shared_handles.read().contains_key(&channel_id),
+            "precondition: handle should be registered"
+        );
+        assert!(
+            component_channel_map
+                .read()
+                .contains_key("builtin::ephemeral-agent"),
+            "precondition: FQN should be registered"
+        );
+
+        // Send veto to stop the runner → triggers cleanup
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto signal");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify cleanup: handle removed
+        assert!(
+            !shared_handles.read().contains_key(&channel_id),
+            "shared_handles should NOT contain channel after runner exit"
+        );
+
+        // Verify cleanup: FQN removed
+        assert!(
+            !component_channel_map
+                .read()
+                .contains_key("builtin::ephemeral-agent"),
+            "component_channel_map should NOT contain FQN after runner exit"
+        );
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_runner_without_rpc_support_still_works() {
+        let (manager_task, world_tx, world, signal_tx, _parent_channel, _, _) =
+            setup_spawn_runner_env().await;
+
+        // Create context WITHOUT rpc_support (no shared_handles / map)
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-no-rpc", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        let session =
+            orcs_runtime::auth::Session::new(Principal::User(orcs_types::PrincipalId::new()))
+                .elevate(Duration::from_secs(60));
+
+        let ctx = ChildContextImpl::new("test-no-rpc", output_tx, spawner_arc)
+            .with_runner_support(world_tx.clone(), Arc::clone(&world), signal_tx.clone())
+            .with_session(session)
+            .with_checker(Arc::new(orcs_runtime::auth::DefaultPolicy));
+
+        // spawn_runner requires channel_id for parent → this context
+        // has no channel_id set, so it should fail gracefully.
+        let component = Box::new(SpawnerComponent::new("no-rpc-agent"));
+        let result = ctx.spawn_runner(component);
+
+        assert!(
+            result.is_err(),
+            "spawn_runner without channel_id should return error"
+        );
+        let err = result.expect_err("expected SpawnError");
+        assert!(
+            err.to_string().contains("parent channel_id"),
+            "error should mention parent channel_id, got: {}",
+            err
+        );
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_runner_denied_without_elevated_session() {
+        let (manager_task, world_tx, world, signal_tx, parent_channel, handles, map) =
+            setup_spawn_runner_env().await;
+
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-unpriv", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        // Non-elevated session → should be denied
+        let session =
+            orcs_runtime::auth::Session::new(Principal::User(orcs_types::PrincipalId::new()));
+
+        let ctx = ChildContextImpl::new("test-unpriv", output_tx, spawner_arc)
+            .with_runner_support(world_tx.clone(), Arc::clone(&world), signal_tx.clone())
+            .with_rpc_support(Arc::clone(&handles), Arc::clone(&map), parent_channel)
+            .with_session(session)
+            .with_checker(Arc::new(orcs_runtime::auth::DefaultPolicy));
+
+        let component = Box::new(SpawnerComponent::new("denied-agent"));
+        let result = ctx.spawn_runner(component);
+
+        assert!(result.is_err(), "should deny non-elevated spawn_runner");
+        let err = result.expect_err("expected SpawnError");
+        assert!(
+            err.to_string().contains("elevated privilege"),
+            "error should mention elevated privilege, got: {}",
+            err
+        );
+
+        teardown(manager_task, world_tx).await;
+    }
+}
+
+// =============================================================================
+// spawn_runner RPC Tests (end-to-end: spawn → register → RPC → response)
+// =============================================================================
+
+mod spawn_runner_rpc {
+    use super::*;
+    use orcs_component::ChildContext;
+    use orcs_runtime::engine::{SharedChannelHandles, SharedComponentChannelMap};
+    use parking_lot::RwLock as PLRwLock;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    async fn setup_spawn_runner_env() -> (
+        tokio::task::JoinHandle<()>,
+        mpsc::Sender<WorldCommand>,
+        Arc<RwLock<World>>,
+        broadcast::Sender<Signal>,
+        orcs_types::ChannelId,
+        SharedChannelHandles,
+        SharedComponentChannelMap,
+    ) {
+        let mut world = World::new();
+        let parent_channel = world.create_channel(ChannelConfig::interactive());
+
+        let (manager, world_tx) = WorldManager::with_world(world);
+        let world_handle = manager.world();
+        let manager_task = tokio::spawn(manager.run());
+
+        let (signal_tx, _) = broadcast::channel(64);
+
+        let shared_handles: SharedChannelHandles = Arc::new(PLRwLock::new(HashMap::new()));
+        let component_channel_map: SharedComponentChannelMap =
+            Arc::new(PLRwLock::new(HashMap::new()));
+
+        (
+            manager_task,
+            world_tx,
+            world_handle,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        )
+    }
+
+    fn create_parent_context(
+        parent_channel: orcs_types::ChannelId,
+        world_tx: &mpsc::Sender<WorldCommand>,
+        world: &Arc<RwLock<World>>,
+        signal_tx: &broadcast::Sender<Signal>,
+        shared_handles: &SharedChannelHandles,
+        component_channel_map: &SharedComponentChannelMap,
+    ) -> ChildContextImpl {
+        let (output_tx, _output_rx) = OutputSender::channel(64);
+        let spawner = ChildSpawner::new("test-parent", output_tx.clone());
+        let spawner_arc = Arc::new(Mutex::new(spawner));
+
+        let session =
+            orcs_runtime::auth::Session::new(Principal::User(orcs_types::PrincipalId::new()))
+                .elevate(Duration::from_secs(60));
+
+        ChildContextImpl::new("test-parent", output_tx, spawner_arc)
+            .with_runner_support(world_tx.clone(), Arc::clone(world), signal_tx.clone())
+            .with_rpc_support(
+                Arc::clone(shared_handles),
+                Arc::clone(component_channel_map),
+                parent_channel,
+            )
+            .with_session(session)
+            .with_checker(Arc::new(orcs_runtime::auth::DefaultPolicy))
+    }
+
+    async fn teardown(
+        manager_task: tokio::task::JoinHandle<()>,
+        world_tx: mpsc::Sender<WorldCommand>,
+    ) {
+        let _ = world_tx.send(WorldCommand::Shutdown).await;
+        let _ = manager_task.await;
+    }
+
+    /// Spawn a Component via spawn_runner, then verify RPC request
+    /// is routed to its on_request and the response echoes back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_runner_rpc_echo() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        let component = Box::new(SpawnerComponent::new("rpc-echo"));
+        let (_channel_id, ready_rx) = ctx
+            .spawn_runner(component)
+            .expect("spawn_runner should succeed");
+
+        // Wait for World + handles + map registration
+        let _ = ready_rx.await;
+
+        // Send RPC request via ChildContext::request()
+        let result = ctx.request(
+            "builtin::rpc-echo",
+            "echo",
+            json!({"msg": "hello from rpc test"}),
+            Some(2000),
+        );
+
+        let response = result.expect("RPC should succeed");
+        assert_eq!(
+            response["msg"], "hello from rpc test",
+            "Component should echo the payload back"
+        );
+
+        // Cleanup
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        teardown(manager_task, world_tx).await;
+    }
+
+    /// Spawn two Components via spawn_runner, verify each responds
+    /// independently to RPC requests addressed to its own FQN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_runner_multiple_components_independent_rpc() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        // Spawn two independent Components
+        let comp_a = Box::new(SpawnerComponent::new("worker-alpha"));
+        let (id_a, ready_a) = ctx
+            .spawn_runner(comp_a)
+            .expect("spawn alpha should succeed");
+
+        let comp_b = Box::new(SpawnerComponent::new("worker-beta"));
+        let (id_b, ready_b) = ctx.spawn_runner(comp_b).expect("spawn beta should succeed");
+
+        // Wait for both to register
+        let _ = ready_a.await;
+        let _ = ready_b.await;
+
+        // Verify independent registration
+        assert_ne!(id_a, id_b, "channel IDs should be unique");
+        assert!(
+            component_channel_map
+                .read()
+                .contains_key("builtin::worker-alpha"),
+            "alpha FQN should be registered"
+        );
+        assert!(
+            component_channel_map
+                .read()
+                .contains_key("builtin::worker-beta"),
+            "beta FQN should be registered"
+        );
+
+        // RPC to alpha
+        let resp_a = ctx
+            .request(
+                "builtin::worker-alpha",
+                "process",
+                json!({"from": "alpha"}),
+                Some(2000),
+            )
+            .expect("RPC to alpha should succeed");
+        assert_eq!(resp_a["from"], "alpha");
+
+        // RPC to beta
+        let resp_b = ctx
+            .request(
+                "builtin::worker-beta",
+                "process",
+                json!({"from": "beta"}),
+                Some(2000),
+            )
+            .expect("RPC to beta should succeed");
+        assert_eq!(resp_b["from"], "beta");
+
+        // Cleanup
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        teardown(manager_task, world_tx).await;
+    }
+
+    /// RPC to a non-existent FQN should return an error containing
+    /// "component not found".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_to_unknown_fqn_returns_error() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        // No Component spawned — RPC to non-existent FQN should fail
+        let result = ctx.request("builtin::nonexistent", "echo", json!({}), Some(1000));
+
+        assert!(result.is_err(), "RPC to unknown FQN should return error");
+        let err = result.expect_err("expected error string");
+        assert!(
+            err.contains("not found"),
+            "error should indicate component not found, got: {}",
+            err
+        );
+
+        teardown(manager_task, world_tx).await;
+    }
+
+    /// After a spawned runner exits (veto), its FQN is cleaned up and
+    /// subsequent RPC requests return an error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_after_component_exit_returns_error() {
+        let (
+            manager_task,
+            world_tx,
+            world,
+            signal_tx,
+            parent_channel,
+            shared_handles,
+            component_channel_map,
+        ) = setup_spawn_runner_env().await;
+
+        let ctx = create_parent_context(
+            parent_channel,
+            &world_tx,
+            &world,
+            &signal_tx,
+            &shared_handles,
+            &component_channel_map,
+        );
+
+        let component = Box::new(SpawnerComponent::new("ephemeral"));
+        let (_channel_id, ready_rx) = ctx
+            .spawn_runner(component)
+            .expect("spawn_runner should succeed");
+
+        let _ = ready_rx.await;
+
+        // Verify it's reachable while alive
+        let result = ctx.request("builtin::ephemeral", "ping", json!({}), Some(2000));
+        assert!(
+            result.is_ok(),
+            "RPC should succeed while Component is alive"
+        );
+
+        // Send veto to stop the runner → triggers cleanup
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // FQN should be cleaned up after runner exit
+        assert!(
+            !component_channel_map
+                .read()
+                .contains_key("builtin::ephemeral"),
+            "FQN should be removed after runner exit"
+        );
+
+        // RPC to stopped Component should fail
+        let result = ctx.request("builtin::ephemeral", "ping", json!({}), Some(1000));
+        assert!(
+            result.is_err(),
+            "RPC to stopped Component should return error"
+        );
+
+        teardown(manager_task, world_tx).await;
+    }
+}

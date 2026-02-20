@@ -508,6 +508,22 @@ impl ClientRunner {
 
     /// Handles Output category events by sending to IOBridge.
     async fn handle_output_event(&self, event: &Event) {
+        // Check for processing notification events
+        if event.payload.get("type").and_then(|v| v.as_str()) == Some("processing") {
+            let component = event
+                .payload
+                .get("component")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let operation = event
+                .payload
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("request");
+            let _ = self.io_bridge.show_processing(component, operation).await;
+            return;
+        }
+
         // Check for approval_request type events
         if event.payload.get("type").and_then(|v| v.as_str()) == Some("approval_request") {
             let approval_id = event.payload["approval_id"].as_str().unwrap_or("");

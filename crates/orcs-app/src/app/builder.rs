@@ -306,6 +306,14 @@ impl OrcsAppBuilder {
             } else {
                 None
             };
+            let component_loader: Option<Arc<dyn orcs_component::ComponentLoader>> =
+                if hints.child_spawner {
+                    Some(Arc::new(orcs_lua::LuaComponentLoader::new(Arc::clone(
+                        &sandbox,
+                    ))))
+                } else {
+                    None
+                };
 
             // Look up initial snapshot for this component (session resume)
             let initial_snapshot = session_asset.get_snapshot(&component_id.fqn()).cloned();
@@ -325,6 +333,7 @@ impl OrcsAppBuilder {
                 Box::new(component),
                 output_tx,
                 lua_loader,
+                component_loader,
                 session,
                 Arc::clone(&auth_checker),
                 grants,

@@ -247,6 +247,17 @@ impl IOBridge {
         self.io_port.send(output).await
     }
 
+    /// Displays a processing notification.
+    pub async fn show_processing(
+        &self,
+        component: &str,
+        operation: &str,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<IOOutput>> {
+        self.io_port
+            .send(IOOutput::processing(component, operation))
+            .await
+    }
+
     /// Displays an approval request.
     pub async fn show_approval_request(
         &self,
@@ -481,6 +492,28 @@ mod tests {
 
         let output = output_handle.recv().await.unwrap();
         assert!(matches!(output, IOOutput::Print { .. }));
+    }
+
+    #[tokio::test]
+    async fn show_processing() {
+        let (bridge, _input_handle, mut output_handle) = setup();
+
+        bridge
+            .show_processing("claude_cli", "input")
+            .await
+            .expect("send should succeed");
+
+        let output = output_handle.recv().await.expect("should receive output");
+        match output {
+            IOOutput::ShowProcessing {
+                component,
+                operation,
+            } => {
+                assert_eq!(component, "claude_cli");
+                assert_eq!(operation, "input");
+            }
+            other => panic!("Expected ShowProcessing, got {:?}", other),
+        }
     }
 
     #[tokio::test]

@@ -420,6 +420,10 @@ impl OrcsApp {
                     Some(format!("  \u{2717} Rejected: {approval_id}\n"))
                 }
             }
+            IOOutput::ShowProcessing {
+                component,
+                operation,
+            } => Some(format!("  [{component}] Processing ({operation})...\n")),
             IOOutput::Clear => Some("\x1B[2J\x1B[1;1H".to_string()),
         }
     }

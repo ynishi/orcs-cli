@@ -235,6 +235,24 @@ impl World {
     /// assert_eq!(world.get(&child).unwrap().config().max_privilege(), MaxPrivilege::Standard);
     /// ```
     pub fn spawn_with(&mut self, parent: ChannelId, config: ChannelConfig) -> Option<ChannelId> {
+        let id = ChannelId::new();
+        self.spawn_with_id(parent, id, config)
+    }
+
+    /// Spawns a new child channel with a pre-determined [`ChannelId`].
+    ///
+    /// Same as [`spawn_with()`](Self::spawn_with), but the caller provides the
+    /// [`ChannelId`] instead of having one generated.  This is required when the
+    /// caller needs to know the ID before the World is updated (e.g. to pass
+    /// the ID into a `tokio::spawn` closure).
+    ///
+    /// Returns `Some(id)` on success, `None` if the parent does not exist.
+    pub fn spawn_with_id(
+        &mut self,
+        parent: ChannelId,
+        id: ChannelId,
+        config: ChannelConfig,
+    ) -> Option<ChannelId> {
         // Get parent channel for inheritance
         let parent_channel = self.channels.get(&parent)?;
         let parent_config = *parent_channel.config();
@@ -248,7 +266,6 @@ impl World {
         // Apply privilege inheritance
         let inherited_config = config.inherit_from(&parent_config);
 
-        let id = ChannelId::new();
         let channel = Channel::new_with_ancestors(
             id,
             parent,

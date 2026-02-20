@@ -520,9 +520,10 @@ pub(super) fn register(
     })?;
     orcs_table.set("request_batch", request_batch_fn)?;
 
-    // orcs.spawn_runner(config) -> { ok, channel_id, error }
+    // orcs.spawn_runner(config) -> { ok, channel_id, fqn, error }
     // config = { script = "...", id = "optional-id" }
-    // Spawns a Component as a separate ChannelRunner for parallel execution
+    // Spawns a Component as a separate ChannelRunner for parallel execution.
+    // The returned `fqn` can be used immediately with orcs.request(fqn, ...).
     let ctx_clone = Arc::clone(&ctx);
     let spawn_runner_fn = lua.create_function(move |lua, config: Table| {
         let ctx_guard = ctx_clone.lock();
@@ -556,9 +557,10 @@ pub(super) fn register(
 
         let result_table = lua.create_table()?;
         match ctx_guard.spawn_runner_from_script(&script, id.as_deref()) {
-            Ok(channel_id) => {
+            Ok((channel_id, fqn)) => {
                 result_table.set("ok", true)?;
                 result_table.set("channel_id", channel_id.to_string())?;
+                result_table.set("fqn", fqn)?;
             }
             Err(e) => {
                 result_table.set("ok", false)?;

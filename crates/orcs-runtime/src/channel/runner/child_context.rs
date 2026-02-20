@@ -395,21 +395,30 @@ impl ChildContextImpl {
     /// Spawns a Component as a separate ChannelRunner.
     ///
     /// This creates a new Channel in the World and spawns a ChannelRunner
-    /// to execute the Component in parallel.
+    /// to execute the Component in parallel. The spawned Component:
+    /// - Is registered in World, shared_handles, and component_channel_map
+    /// - Can receive RPC via `orcs.request(fqn, ...)`
+    /// - Can spawn its own children/Components (Nested spawn)
+    /// - Inherits auth context and capabilities from the parent
     ///
     /// # Arguments
     ///
-    /// * `component` - The Component to run
+    /// * `component` - The Component to run (arbitrary — not a copy of the parent)
     ///
     /// # Returns
     ///
-    /// The ChannelId of the spawned runner.
+    /// A tuple of `(ChannelId, oneshot::Receiver<()>)`. The receiver fires
+    /// when the async registration (World + handles + map) is complete and
+    /// the Component is ready to receive RPC requests.
     ///
     /// # Errors
     ///
     /// - [`SpawnError::Internal`] if runner spawning is not enabled
     /// - [`SpawnError::Internal`] if permission check fails (requires elevated session)
-    pub fn spawn_runner(&self, component: Box<dyn Component>) -> Result<ChannelId, SpawnError> {
+    pub fn spawn_runner(
+        &self,
+        component: Box<dyn Component>,
+    ) -> Result<(ChannelId, tokio::sync::oneshot::Receiver<()>), SpawnError> {
         // Permission check: requires elevated session
         if !self.can_spawn_runner_auth() {
             tracing::warn!(
@@ -432,9 +441,15 @@ impl ChildContextImpl {
             SpawnError::Internal("runner spawning not enabled (no signal_tx)".into())
         })?;
 
-        // Create a new channel ID
+        // Pre-generate the channel ID so the caller can use it immediately.
         let channel_id = ChannelId::new();
         let component_id = component.id().clone();
+        let component_fqn = component_id.fqn();
+
+        // Determine the parent channel for World registration.
+        let parent_channel_id = self.channel_id.ok_or_else(|| {
+            SpawnError::Internal("spawn_runner requires a parent channel_id".into())
+        })?;
 
         // Clone what we need for the spawned task
         let world_tx_clone = world_tx.clone();
@@ -449,18 +464,90 @@ impl ChildContextImpl {
         let grants_clone = self.grants.clone();
         let hook_registry_clone = self.hook_registry.clone();
 
+        // Clone RPC resources so the spawned runner participates in the
+        // event mesh and is reachable via FQN-based RPC.
+        let shared_handles_clone = self.shared_handles.clone();
+        let component_channel_map_clone = self.component_channel_map.clone();
+
+        // Clone loaders so the spawned Component can spawn its own
+        // children (spawn_child) and nested Components (spawn_runner).
+        let lua_loader_clone = self.lua_loader.clone();
+        let component_loader_clone = self.component_loader.clone();
+
+        // Ready notification: fires after World + handles + map registration
+        // completes, signalling the Component is reachable via RPC.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
         // Spawn the runner in a new task
         tokio::spawn(async move {
-            // Build the ChannelRunner with auth context propagation
+            // --- 1. Register channel in World ---
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = world_tx_clone
+                .send(WorldCommand::SpawnWithId {
+                    parent: parent_channel_id,
+                    id: channel_id,
+                    config: crate::channel::ChannelConfig::default(),
+                    reply: reply_tx,
+                })
+                .await
+            {
+                tracing::error!(
+                    "spawn_runner: failed to send SpawnWithId for {}: {}",
+                    component_fqn,
+                    e
+                );
+                return;
+            }
+            match reply_rx.await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::error!(
+                        "spawn_runner: SpawnWithId failed (parent {} not found) for {}",
+                        parent_channel_id,
+                        component_fqn
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "spawn_runner: SpawnWithId reply dropped for {}: {}",
+                        component_fqn,
+                        e
+                    );
+                    return;
+                }
+            }
+
+            // --- 2. Build the ChannelRunner ---
             let mut builder = ChannelRunner::builder(
                 channel_id,
-                world_tx_clone,
+                world_tx_clone.clone(),
                 world_clone,
                 signal_rx,
                 component,
             )
             .with_emitter(signal_tx_clone)
             .with_output_channel(output_tx);
+
+            // Enable RPC inbound so other Components can reach this one
+            // via orcs.request(fqn, ...).
+            builder = builder.with_request_channel();
+
+            // Propagate shared handles / component map so the spawned
+            // runner can broadcast events and issue outbound RPC.
+            if let Some(ref handles) = shared_handles_clone {
+                builder = builder.with_shared_handles(Arc::clone(handles));
+            }
+            if let Some(ref map) = component_channel_map_clone {
+                builder = builder.with_component_channel_map(Arc::clone(map));
+            }
+
+            // Enable child/runner spawning so the spawned Component can
+            // spawn its own children and nested Components with arbitrary scripts.
+            builder = builder.with_child_spawner(lua_loader_clone);
+            if let Some(loader) = component_loader_clone {
+                builder = builder.with_component_loader(loader);
+            }
 
             // Propagate auth context to child runner
             if let Some(session) = session_clone {
@@ -477,18 +564,48 @@ impl ChildContextImpl {
                 builder = builder.with_hook_registry(registry);
             }
 
-            let (runner, _handle) = builder.build();
+            let (runner, handle) = builder.build();
+
+            // --- 3. Register ChannelHandle in shared_handles ---
+            // This makes the spawned runner reachable for event injection
+            // and Extension event broadcast.
+            if let Some(ref handles) = shared_handles_clone {
+                handles.write().insert(channel_id, handle);
+            }
+
+            // --- 4. Register FQN → ChannelId in component_channel_map ---
+            // This makes the spawned runner addressable via orcs.request(fqn, ...).
+            if let Some(ref map) = component_channel_map_clone {
+                map.write().insert(component_fqn.clone(), channel_id);
+            }
 
             tracing::info!(
-                "Spawned child runner: channel={}, component={} (auth propagated)",
+                "Spawned child runner: channel={}, component={} (World registered, RPC enabled)",
                 channel_id,
-                component_id.fqn()
+                component_fqn
             );
 
+            // Signal that registration is complete — the Component is now
+            // reachable via orcs.request(fqn, ...).
+            let _ = ready_tx.send(());
+
             runner.run().await;
+
+            // --- 5. Cleanup on runner exit ---
+            if let Some(ref handles) = shared_handles_clone {
+                handles.write().remove(&channel_id);
+            }
+            if let Some(ref map) = component_channel_map_clone {
+                map.write().remove(&component_fqn);
+            }
+            tracing::info!(
+                "Child runner exited: channel={}, component={} (cleanup done)",
+                channel_id,
+                component_fqn
+            );
         });
 
-        Ok(channel_id)
+        Ok((channel_id, ready_rx))
     }
 
     /// Creates a sub-ChildContext for a spawned child, inheriting RPC
@@ -814,7 +931,7 @@ impl ChildContext for ChildContextImpl {
         &self,
         script: &str,
         id: Option<&str>,
-    ) -> Result<ChannelId, SpawnError> {
+    ) -> Result<(ChannelId, String), SpawnError> {
         // Get component loader
         let loader = self
             .component_loader
@@ -823,9 +940,41 @@ impl ChildContext for ChildContextImpl {
 
         // Create component from script
         let component = loader.load_from_script(script, id)?;
+        let fqn = component.id().fqn();
 
-        // Spawn as runner
-        self.spawn_runner(component)
+        // Spawn as runner and wait for registration to complete.
+        // The async task registers in World, shared_handles, and
+        // component_channel_map. We block until ready so the caller
+        // can immediately use orcs.request(fqn, ...).
+        let (channel_id, ready_rx) = self.spawn_runner(component)?;
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+                    Ok(Ok(())) => {
+                        tracing::debug!(
+                            "spawn_runner_from_script: {} ready (channel={})",
+                            fqn,
+                            channel_id
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(
+                            "spawn_runner_from_script: ready channel dropped for {}",
+                            fqn
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "spawn_runner_from_script: registration timeout for {}",
+                            fqn
+                        );
+                    }
+                }
+            })
+        });
+
+        Ok((channel_id, fqn))
     }
 
     fn can_execute_command(&self, cmd: &str) -> bool {

@@ -495,7 +495,9 @@ pub trait ChildContext: Send + Sync + Debug {
     ///
     /// # Returns
     ///
-    /// The ChannelId of the spawned runner, or an error if spawning failed.
+    /// A tuple of `(ChannelId, fqn_string)` for the spawned runner,
+    /// or an error if spawning failed. The FQN enables immediate
+    /// `orcs.request(fqn, ...)` communication.
     ///
     /// # Default Implementation
     ///
@@ -505,7 +507,7 @@ pub trait ChildContext: Send + Sync + Debug {
         &self,
         _script: &str,
         _id: Option<&str>,
-    ) -> Result<ChannelId, SpawnError> {
+    ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "runner spawning not supported by this context".into(),
         ))

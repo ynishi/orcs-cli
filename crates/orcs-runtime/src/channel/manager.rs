@@ -186,6 +186,25 @@ impl WorldManager {
                 let _ = reply.send(result);
             }
 
+            WorldCommand::SpawnWithId {
+                parent,
+                id,
+                config,
+                reply,
+            } => {
+                let result = {
+                    let mut world = self.world.write().await;
+                    world.spawn_with_id(parent, id, config)
+                };
+                debug!(
+                    "SpawnWithId command: parent={}, id={}, success={}",
+                    parent,
+                    id,
+                    result.is_some()
+                );
+                let _ = reply.send(result.is_some());
+            }
+
             WorldCommand::Kill { id, reason } => {
                 let mut world = self.world.write().await;
                 world.kill(id, reason.clone());

@@ -997,13 +997,34 @@ impl ChannelRunner {
             }
         };
 
+        // Capture before move into Request::new.
+        let is_user_input = event.category == EventCategory::UserInput;
+        let event_operation = event.operation.clone();
+
         let request = Request::new(
             event.category,
-            &event.operation,
+            &event_operation,
             event.source,
             self.id,
             request_payload,
         );
+
+        // Notify user that processing has started (UserInput only).
+        if is_user_input {
+            if let Some(io_tx) = &self.io_output_tx {
+                let notify = Event {
+                    category: EventCategory::Output,
+                    operation: "processing".to_string(),
+                    source: self.component_id.clone(),
+                    payload: serde_json::json!({
+                        "type": "processing",
+                        "component": &self.component_id.name,
+                        "operation": &event_operation,
+                    }),
+                };
+                let _ = io_tx.try_send_direct(notify);
+            }
+        }
 
         let result = {
             let mut comp = self.component.lock().await;
@@ -1013,12 +1034,12 @@ impl ChannelRunner {
         // --- Post-dispatch hook ---
         let post_payload = match &result {
             Ok(response) => serde_json::json!({
-                "operation": &event.operation,
+                "operation": &event_operation,
                 "response": response,
                 "success": true,
             }),
             Err(e) => serde_json::json!({
-                "operation": &event.operation,
+                "operation": &event_operation,
                 "error": e.to_string(),
                 "success": false,
             }),
@@ -1727,7 +1748,7 @@ impl ChannelRunnerBuilder {
             hook_registry: self.hook_registry,
             component_config: self.component_config,
             grants: self.grants.clone(),
-            io_output_tx: self.output_tx.clone(),
+            io_output_tx: io_output_tx.clone(),
             pending_approval: None,
         };
 

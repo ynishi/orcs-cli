@@ -75,10 +75,13 @@ fn profile_manager_initializes() {
 #[test]
 fn agent_mgr_ready_with_workers() {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
-    let (stdout, _stderr) =
-        spawn_and_wait_for("[AgentMgr] Ready (worker: llm)", &["-d"], tmp.path());
+    let (stdout, _stderr) = spawn_and_wait_for(
+        "[AgentMgr] Ready (worker: builtin::llm-worker)",
+        &["-d"],
+        tmp.path(),
+    );
     assert!(
-        stdout.contains("[AgentMgr] Ready (worker: llm)"),
+        stdout.contains("[AgentMgr] Ready (worker: builtin::llm-worker)"),
         "Expected Ready message in stdout.\nstdout:\n{stdout}"
     );
 }

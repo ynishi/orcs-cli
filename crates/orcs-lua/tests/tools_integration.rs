@@ -416,7 +416,7 @@ impl ChildContext for CapMockContext {
         &self,
         _script: &str,
         _id: Option<&str>,
-    ) -> Result<ChannelId, SpawnError> {
+    ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal("not supported".into()))
     }
     fn clone_box(&self) -> Box<dyn ChildContext> {

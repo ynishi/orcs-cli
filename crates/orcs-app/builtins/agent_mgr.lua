@@ -2,8 +2,11 @@
 -- Agent Manager component: routes UserInput to specialized workers.
 --
 -- Architecture:
---   agent_mgr (Router)
---     └── llm-worker    — default handler, calls Claude Code CLI via orcs.llm()
+--   agent_mgr (Router Component)
+--     └── llm-worker (Independent Component, spawned via orcs.spawn_runner())
+--         — communicates via orcs.request() RPC
+--         — has own Lua VM, event loop, and ChannelRunner
+--         — calls Claude Code CLI via orcs.llm()
 --
 -- @command routing:
 --   @shell <cmd>           → builtin::shell (passthrough)
@@ -27,13 +30,20 @@
 
 -- === Worker Scripts ===
 
--- LLM Worker: fetches skill catalog for context, then calls Claude Code CLI.
+-- LLM Worker: spawned as an independent Component via orcs.spawn_runner().
+-- Has its own Lua VM, event loop, and ChannelRunner. Communicates via RPC.
+-- Fetches skill catalog for context, then calls Claude Code CLI.
 -- Prompt assembly respects `prompt_placement` strategy passed from parent.
 local llm_worker_script = [[
 return {
     id = "llm-worker",
+    namespace = "builtin",
+    subscriptions = {},  -- RPC-only: no event subscriptions needed
 
-    run = function(input)
+    -- Independent Component: receives work via on_request (RPC).
+    -- operation="process" is the primary entrypoint from agent_mgr.
+    on_request = function(request)
+        local input = request.payload or {}
         local message = input.message or ""
 
         -- Session resumption: skip full prompt assembly, send message directly
@@ -126,7 +136,7 @@ return {
         if tool_desc ~= "" then
             system_parts[#system_parts + 1] = tool_desc
         end
-        -- @command reference (passed from parent dispatch_llm)
+        -- @command reference (passed from parent via RPC payload)
         local cmd_ref = input.command_reference or ""
         if cmd_ref ~= "" then
             system_parts[#system_parts + 1] = cmd_ref
@@ -231,6 +241,10 @@ local MAX_REACT_ITERATIONS = 5  -- Max tool-use loop iterations before returning
 
 -- Component settings (populated from config in init())
 local component_settings = {}
+
+-- FQN of the spawned LLM worker Component (set in init()).
+-- Used by dispatch_llm() to send RPC requests.
+local llm_worker_fqn = nil
 
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
@@ -440,12 +454,18 @@ local function fetch_history_context()
     return ""
 end
 
---- Default route: send to llm-worker with ReAct loop.
+--- Default route: send to llm-worker via RPC with ReAct loop.
 --- On each iteration, the LLM response is scanned for @-prefixed commands
 --- directed at registered routes. Commands are executed and results fed back
 --- via --resume (session continuity) until the LLM produces a final answer
 --- (no more commands) or the iteration limit is reached.
 local function dispatch_llm(message)
+    -- Guard: llm-worker must be initialized
+    if not llm_worker_fqn then
+        orcs.output_with_level("[AgentMgr] Error: LLM worker not initialized", "error")
+        return { success = false, error = "llm worker not initialized" }
+    end
+
     -- Gather history in parent context (emitter function, unavailable to children)
     local history_context = fetch_history_context()
 
@@ -466,33 +486,29 @@ local function dispatch_llm(message)
     local current_message = message
 
     for iteration = 1, MAX_REACT_ITERATIONS do
-        -- Build input for llm-worker
-        local input = {
+        -- Build RPC payload for llm-worker
+        local payload = {
             message = current_message,
             prompt_placement = placement,
         }
         if session_id then
             -- Continuation: llm-worker will skip prompt assembly and just --resume
-            input.session_id = session_id
+            payload.session_id = session_id
         else
             -- First call: include history and @command reference for full prompt assembly
-            input.history_context = history_context
-            input.command_reference = command_reference
+            payload.history_context = history_context
+            payload.command_reference = command_reference
         end
 
-        local result = orcs.send_to_child("llm-worker", input)
-        if not result or not result.ok then
+        -- RPC to llm-worker Component (independent ChannelRunner)
+        local result = orcs.request(llm_worker_fqn, "process", payload)
+        if not result or not result.success then
             local err = (result and result.error) or "unknown"
             orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
             return { success = false, error = err }
         end
 
-        local data = result.result or {}
-        if data.error then
-            orcs.output_with_level("[AgentMgr] Error: " .. data.error, "error")
-            return { success = false, error = data.error }
-        end
-
+        local data = result.data or {}
         local response = data.response or "no response"
         session_id = data.session_id
         total_cost = total_cost + (data.cost or 0)
@@ -631,13 +647,16 @@ return {
         local placement = component_settings.prompt_placement or "both"
         orcs.log("info", "agent_mgr initializing (prompt_placement=" .. placement .. ")...")
 
-        -- Spawn LLM worker (default handler)
-        local llm = orcs.spawn_child({
-            id = "llm-worker",
+        -- Spawn LLM worker as an independent Component via spawn_runner().
+        -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
+        -- wait for World registration (ready notification via oneshot channel).
+        -- When this call returns, the Component is fully registered and RPC-reachable.
+        local llm = orcs.spawn_runner({
             script = llm_worker_script,
         })
         if llm.ok then
-            orcs.log("info", "spawned llm-worker")
+            llm_worker_fqn = llm.fqn
+            orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
         else
             orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
         end
@@ -664,7 +683,7 @@ return {
             end
         end
 
-        orcs.output("[AgentMgr] Ready (worker: llm)")
+        orcs.output("[AgentMgr] Ready (worker: " .. (llm_worker_fqn or "failed") .. ")")
         orcs.log("info", "agent_mgr initialized")
     end,
 

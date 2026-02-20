@@ -60,6 +60,21 @@ pub enum WorldCommand {
         reply: oneshot::Sender<Option<ChannelId>>,
     },
 
+    /// Spawn a new child channel with a pre-determined [`ChannelId`].
+    ///
+    /// Same as [`Spawn`] but the caller supplies the ID.
+    /// Used by `spawn_runner` which needs the ID before the World is updated.
+    SpawnWithId {
+        /// Parent channel ID.
+        parent: ChannelId,
+        /// Pre-determined channel ID for the new channel.
+        id: ChannelId,
+        /// Configuration for the new channel.
+        config: ChannelConfig,
+        /// Reply channel: `true` on success, `false` if parent doesn't exist.
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Kill a channel and all its descendants.
     ///
     /// Removes the channel from the World entirely.

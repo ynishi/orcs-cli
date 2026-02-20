@@ -128,6 +128,15 @@ impl ConsoleRenderer {
                     eprintln!("  \u{2717} Rejected: {}", approval_id);
                 }
             }
+            IOOutput::ShowProcessing {
+                component,
+                operation,
+            } => {
+                use std::io::Write;
+                let mut out = std::io::stderr().lock();
+                let _ = writeln!(out, "  [{component}] Processing ({operation})...");
+                let _ = out.flush();
+            }
             IOOutput::Clear => {
                 // ANSI escape code to clear screen
                 eprint!("\x1B[2J\x1B[1;1H");
