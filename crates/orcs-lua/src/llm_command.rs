@@ -1781,6 +1781,116 @@ mod tests {
         );
     }
 
+    // ── E2E tests (require running Ollama) ──────────────────────────────
+
+    /// E2E: single-turn call to real Ollama server.
+    /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_single_turn -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires running Ollama server"]
+    fn e2e_ollama_single_turn() {
+        let lua = Lua::new();
+        let opts = lua.create_table().expect("create opts");
+        opts.set("provider", "ollama").expect("set provider");
+        opts.set("model", "qwen2.5-coder:1.5b").expect("set model");
+        opts.set("timeout", 30u64).expect("set timeout");
+        opts.set("max_retries", 0u32).expect("set max_retries");
+
+        let result = llm_request_impl(&lua, ("Say exactly: HELLO_ORCS".into(), Some(opts)))
+            .expect("should not panic");
+
+        let ok = result.get::<bool>("ok").expect("get ok");
+        assert!(ok, "should succeed with running Ollama");
+
+        let content: String = result.get("content").expect("get content");
+        assert!(!content.is_empty(), "content should not be empty");
+
+        let session_id: String = result.get("session_id").expect("get session_id");
+        assert!(
+            session_id.starts_with("sess-"),
+            "should have session_id, got: {}",
+            session_id
+        );
+
+        let model: String = result.get("model").expect("get model");
+        assert!(
+            model.contains("qwen"),
+            "model should contain qwen, got: {}",
+            model
+        );
+
+        eprintln!("[E2E] ok={ok} model={model} session_id={session_id}");
+        eprintln!("[E2E] content: {content}");
+    }
+
+    /// E2E: multi-turn session with real Ollama server.
+    /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_multi_turn -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires running Ollama server"]
+    fn e2e_ollama_multi_turn() {
+        let lua = Lua::new();
+
+        // Turn 1
+        let opts1 = lua.create_table().expect("create opts");
+        opts1.set("provider", "ollama").expect("set provider");
+        opts1.set("model", "qwen2.5-coder:1.5b").expect("set model");
+        opts1.set("timeout", 30u64).expect("set timeout");
+        opts1
+            .set("system_prompt", "You are a helpful assistant. Be concise.")
+            .expect("set system_prompt");
+
+        let r1 = llm_request_impl(
+            &lua,
+            (
+                "My name is ORCS_TEST_USER. Remember it.".into(),
+                Some(opts1),
+            ),
+        )
+        .expect("turn 1 should not panic");
+
+        assert!(
+            r1.get::<bool>("ok").expect("get ok"),
+            "turn 1 should succeed"
+        );
+        let sid: String = r1.get("session_id").expect("get session_id");
+        let content1: String = r1.get("content").expect("get content");
+        eprintln!("[E2E turn 1] session={sid} content: {content1}");
+
+        // Turn 2: use same session
+        let opts2 = lua.create_table().expect("create opts");
+        opts2.set("provider", "ollama").expect("set provider");
+        opts2.set("model", "qwen2.5-coder:1.5b").expect("set model");
+        opts2.set("timeout", 30u64).expect("set timeout");
+        opts2
+            .set("session_id", sid.as_str())
+            .expect("set session_id");
+
+        let r2 = llm_request_impl(&lua, ("What is my name?".into(), Some(opts2)))
+            .expect("turn 2 should not panic");
+
+        assert!(
+            r2.get::<bool>("ok").expect("get ok"),
+            "turn 2 should succeed"
+        );
+        let sid2: String = r2.get("session_id").expect("get session_id");
+        assert_eq!(sid, sid2, "session_id should be preserved across turns");
+
+        let content2: String = r2.get("content").expect("get content");
+        eprintln!("[E2E turn 2] content: {content2}");
+
+        // Verify session store has history
+        let store = lua
+            .app_data_ref::<SessionStore>()
+            .expect("store should exist");
+        let history = store.0.get(&sid).expect("session should exist");
+        // Turn 1: user + assistant = 2, Turn 2: user + assistant = 2, total = 4
+        assert_eq!(
+            history.len(),
+            4,
+            "session should have 4 messages (2 turns), got: {}",
+            history.len()
+        );
+    }
+
     #[test]
     fn session_load_returns_count() {
         let lua = Lua::new();
