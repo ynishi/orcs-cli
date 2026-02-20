@@ -67,6 +67,7 @@ bitflags! {
     /// | [`EXECUTE`](Self::EXECUTE) | `orcs.exec` |
     /// | [`SPAWN`](Self::SPAWN) | `orcs.spawn_child`, `orcs.spawn_runner` |
     /// | [`LLM`](Self::LLM) | `orcs.llm` |
+    /// | [`HTTP`](Self::HTTP) | `orcs.http` |
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct Capability: u16 {
         /// Read files: `orcs.read`, `orcs.grep`, `orcs.glob`
@@ -81,6 +82,8 @@ bitflags! {
         const SPAWN   = 0b0001_0000;
         /// Call LLM: `orcs.llm`
         const LLM     = 0b0010_0000;
+        /// HTTP requests: `orcs.http`
+        const HTTP    = 0b0100_0000;
     }
 }
 
@@ -92,7 +95,8 @@ impl Capability {
     pub const ALL: Self = Self::FILE_ALL
         .union(Self::EXECUTE)
         .union(Self::SPAWN)
-        .union(Self::LLM);
+        .union(Self::LLM)
+        .union(Self::HTTP);
 
     /// Computes the effective capabilities for a child.
     ///
@@ -156,6 +160,9 @@ impl Capability {
         if self.contains(Self::LLM) {
             names.push("LLM");
         }
+        if self.contains(Self::HTTP) {
+            names.push("HTTP");
+        }
         names
     }
 
@@ -172,6 +179,7 @@ impl Capability {
     /// assert_eq!(Capability::parse("read"), Some(Capability::READ));
     /// assert_eq!(Capability::parse("EXECUTE"), Some(Capability::EXECUTE));
     /// assert_eq!(Capability::parse("exec"), Some(Capability::EXECUTE));
+    /// assert_eq!(Capability::parse("http"), Some(Capability::HTTP));
     /// assert_eq!(Capability::parse("unknown"), None);
     /// ```
     #[must_use]
@@ -183,6 +191,7 @@ impl Capability {
             "EXECUTE" | "EXEC" => Some(Self::EXECUTE),
             "SPAWN" => Some(Self::SPAWN),
             "LLM" => Some(Self::LLM),
+            "HTTP" => Some(Self::HTTP),
             "ALL" => Some(Self::ALL),
             "FILE_ALL" => Some(Self::FILE_ALL),
             _ => None,
@@ -244,6 +253,7 @@ mod tests {
         assert!(Capability::ALL.contains(Capability::EXECUTE));
         assert!(Capability::ALL.contains(Capability::SPAWN));
         assert!(Capability::ALL.contains(Capability::LLM));
+        assert!(Capability::ALL.contains(Capability::HTTP));
     }
 
     #[test]
@@ -254,6 +264,7 @@ mod tests {
         assert!(!Capability::FILE_ALL.contains(Capability::EXECUTE));
         assert!(!Capability::FILE_ALL.contains(Capability::SPAWN));
         assert!(!Capability::FILE_ALL.contains(Capability::LLM));
+        assert!(!Capability::FILE_ALL.contains(Capability::HTTP));
     }
 
     #[test]
