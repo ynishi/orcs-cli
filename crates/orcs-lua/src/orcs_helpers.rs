@@ -79,6 +79,9 @@ pub fn register_base_orcs_functions(
     // Register orcs.set_llm_handler(fn) and install default Claude CLI handler.
     crate::llm_command::register_llm_functions(lua, &orcs_table)?;
 
+    // Register orcs.http() deny stub (overridden by ctx_fns/child with Capability::HTTP).
+    crate::http_command::register_http_deny_stub(lua, &orcs_table)?;
+
     // Register sanitization primitives (always available, no Capability gate).
     crate::sanitize::register_sanitize_functions(lua, &orcs_table)?;
     crate::sanitize::register_exec_argv_deny(lua, &orcs_table)?;
@@ -307,6 +310,13 @@ orcs.sanitize_path(s) -> {ok, value, error, violations}
 
 orcs.sanitize_strict(s) -> {ok, value, error, violations}
   Validate with all rules (shell meta, env expansion, glob, traversal, control).
+
+orcs.http(method, url [, opts]) -> {ok, status, headers, body, error, error_kind}
+  HTTP request via ureq. method = "GET"/"POST"/"PUT"/"DELETE"/"PATCH"/"HEAD".
+  opts.headers = {name=value, ...} request headers.
+  opts.body = "..." request body string.
+  opts.timeout = 30 timeout in seconds (default 30).
+  error_kind = "timeout"/"dns"/"connection_refused"/"tls"/"too_large"/"network"/"permission_denied".
 
 orcs.pwd
   Project root path (string).

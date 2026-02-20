@@ -94,6 +94,7 @@ mod child;
 mod component;
 mod error;
 pub mod hook_helpers;
+pub mod http_command;
 pub mod llm_command;
 mod loader;
 mod lua_env;

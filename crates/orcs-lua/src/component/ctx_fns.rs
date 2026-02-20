@@ -226,6 +226,30 @@ pub(super) fn register(
         orcs_table.set("llm", llm_fn)?;
     }
 
+    // Override orcs.http with capability-checked version.
+    // Requires Capability::HTTP. Delegates to http_command::http_request_impl.
+    //
+    // orcs.http(method, url [, opts]) -> { ok, status?, headers?, body?, error?, error_kind? }
+    {
+        let ctx_clone = Arc::clone(&ctx);
+
+        let http_fn = lua.create_function(move |lua, args: (String, String, Option<Table>)| {
+            let ctx_guard = ctx_clone.lock();
+
+            if !ctx_guard.has_capability(orcs_component::Capability::HTTP) {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", "permission denied: Capability::HTTP not granted")?;
+                result.set("error_kind", "permission_denied")?;
+                return Ok(result);
+            }
+            drop(ctx_guard);
+
+            crate::http_command::http_request_impl(lua, args)
+        })?;
+        orcs_table.set("http", http_fn)?;
+    }
+
     // orcs.spawn_child(config) -> { ok, id, handle, error }
     // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
     let ctx_clone = Arc::clone(&ctx);

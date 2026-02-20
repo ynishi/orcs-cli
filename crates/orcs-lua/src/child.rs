@@ -664,6 +664,29 @@ fn register_context_functions(
     })?;
     orcs_table.set("llm", llm_fn)?;
 
+    // orcs.http(method, url [, opts]) -> { ok, status?, headers?, body?, error?, error_kind? }
+    // Capability-checked override: delegates to http_command::http_request_impl.
+    // Requires Capability::HTTP.
+    let http_fn = lua.create_function(|lua, args: (String, String, Option<Table>)| {
+        let wrapper = lua
+            .app_data_ref::<ContextWrapper>()
+            .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
+
+        let ctx = wrapper.0.lock();
+
+        if !ctx.has_capability(orcs_component::Capability::HTTP) {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "permission denied: Capability::HTTP not granted")?;
+            result.set("error_kind", "permission_denied")?;
+            return Ok(result);
+        }
+        drop(ctx);
+
+        crate::http_command::http_request_impl(lua, args)
+    })?;
+    orcs_table.set("http", http_fn)?;
+
     // orcs.spawn_child(config) -> { ok, id, error }
     // config = { id = "child-id", script = "..." } or { id = "child-id", path = "..." }
     let spawn_child_fn = lua.create_function(|lua, config: Table| {

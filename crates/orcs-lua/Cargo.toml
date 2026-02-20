@@ -41,6 +41,9 @@ parking_lot = "0.12"
 # Error handling
 thiserror = "2.0"
 
+# HTTP client (blocking, lightweight)
+ureq = { workspace = true }
+
 # Logging
 tracing = "0.1"
 
