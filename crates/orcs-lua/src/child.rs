@@ -642,10 +642,10 @@ fn register_context_functions(
     )?;
     orcs_table.set("exec_argv", exec_argv_fn)?;
 
-    // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
-    // Capability-checked override: delegates to Lua handler registered via
-    // orcs.set_llm_handler(fn).  Requires Capability::LLM.
-    let llm_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
+    // orcs.llm(prompt [, opts]) -> { ok, content?, model?, session_id?, error?, error_kind? }
+    // Capability-checked override: delegates to llm_command::llm_request_impl.
+    // Requires Capability::LLM.
+    let llm_fn = lua.create_function(move |lua, args: (String, Option<Table>)| {
         let wrapper = lua
             .app_data_ref::<ContextWrapper>()
             .ok_or_else(|| mlua::Error::RuntimeError("no context available".into()))?;
@@ -656,11 +656,12 @@ fn register_context_functions(
             let result = lua.create_table()?;
             result.set("ok", false)?;
             result.set("error", "permission denied: Capability::LLM not granted")?;
+            result.set("error_kind", "permission_denied")?;
             return Ok(result);
         }
         drop(ctx);
 
-        crate::llm_command::call_llm_handler(lua, prompt, opts)
+        crate::llm_command::llm_request_impl(lua, args)
     })?;
     orcs_table.set("llm", llm_fn)?;
 

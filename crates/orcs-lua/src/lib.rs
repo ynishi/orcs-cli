@@ -113,7 +113,7 @@ pub use hook_helpers::{
     load_hooks_from_config, register_hook_function, register_hook_stub, register_unhook_function,
     HookLoadError, HookLoadResult, LuaHook,
 };
-pub use llm_command::{call_llm_handler, register_llm_functions};
+pub use llm_command::{llm_request_impl, register_llm_deny_stub};
 pub use loader::{LoadResult, LoadWarning, ScriptLoader};
 pub use lua_env::LuaEnv;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};

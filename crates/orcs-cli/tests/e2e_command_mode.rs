@@ -42,29 +42,70 @@ fn command_mode_at_shell_routes_but_needs_approval() {
 // ─── Mock LLM Pipeline (full command mode) ──────────────────────
 
 /// Sends a plain message in command mode (no @prefix).
-/// agent_mgr dispatches to llm-worker → mock claude → stdout.
+/// agent_mgr dispatches to llm-worker → mock HTTP LLM server → stdout.
 ///
-/// Uses a mock `claude` script that returns instantly.
-/// Verifies: user input → agent_mgr → dispatch_llm → mock claude
+/// Uses a mock HTTP server returning Ollama-format JSON instantly.
+/// Verifies: user input → agent_mgr → dispatch_llm → mock HTTP
 ///   → orcs.output(response) → Emitter → IOPort → stdout
 #[test]
 fn command_mode_llm_pipeline() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::process::{Command, Stdio};
+    use std::thread;
 
     let tmp = tempfile::tempdir().expect("create temp dir");
     let bin = assert_cmd::cargo::cargo_bin!("orcs");
 
-    // Create a mock `claude` script that returns a known response.
-    let mock_claude = tmp.path().join("claude");
-    std::fs::write(&mock_claude, "#!/bin/sh\necho \"CMD_MODE_RESPONSE_99\"\n")
-        .expect("write mock claude script");
-    std::fs::set_permissions(&mock_claude, std::fs::Permissions::from_mode(0o755))
-        .expect("set mock claude executable");
+    // Start a mock HTTP server that mimics Ollama's POST /api/chat response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock HTTP server");
+    let mock_port = listener.local_addr().expect("get mock port").port();
+    let mock_base_url = format!("http://127.0.0.1:{}", mock_port);
 
-    // Prepend tmpdir to PATH so orcs finds our mock claude first.
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let mock_path = format!("{}:{}", tmp.path().display(), original_path);
+    let server_thread = thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let req_str = String::from_utf8_lossy(&request);
+                if let Some(header_end) = req_str.find("\r\n\r\n") {
+                    let headers = &req_str[..header_end];
+                    let content_length: usize = headers
+                        .lines()
+                        .find(|l| l.to_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if request.len() >= body_start + content_length {
+                        break;
+                    }
+                }
+            }
+
+            let ollama_response = r#"{"model":"mock-model","message":{"role":"assistant","content":"CMD_MODE_RESPONSE_99"},"done":true,"done_reason":"stop"}"#;
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                ollama_response.len(),
+                ollama_response
+            );
+            let _ = stream.write_all(http_response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
 
     let child = Command::new(&bin)
         .arg("-d")
@@ -72,10 +113,7 @@ fn command_mode_llm_pipeline() {
         .arg(tmp.path())
         // The trailing args form the command
         .arg("test_cmd_mode_msg")
-        .env("PATH", &mock_path)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .env_remove("CLAUDE_CODE_SSE_PORT")
+        .env("ORCS_LLM_BASE_URL", &mock_base_url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,6 +125,7 @@ fn command_mode_llm_pipeline() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    drop(server_thread);
 
     // Dump for debugging
     let dump_dir = std::env::temp_dir().join("orcs_cmd_mode_dump");

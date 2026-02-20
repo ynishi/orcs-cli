@@ -76,8 +76,8 @@ pub fn register_base_orcs_functions(
     // Get or create orcs table
     let orcs_table = ensure_orcs_table(lua)?;
 
-    // Register orcs.set_llm_handler(fn) and install default Claude CLI handler.
-    crate::llm_command::register_llm_functions(lua, &orcs_table)?;
+    // Register orcs.llm() deny stub (overridden by ctx_fns/child with Capability::LLM).
+    crate::llm_command::register_llm_deny_stub(lua, &orcs_table)?;
 
     // Register orcs.http() deny stub (overridden by ctx_fns/child with Capability::HTTP).
     crate::http_command::register_http_deny_stub(lua, &orcs_table)?;

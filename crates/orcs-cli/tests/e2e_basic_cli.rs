@@ -221,20 +221,20 @@ fn blank_lines_are_ignored() {
 // ─── User Message → dispatch_llm → orcs.output ──────────────────────
 
 /// Sends a plain message (no @prefix) so agent_mgr routes to dispatch_llm.
-/// dispatch_llm runs the llm-worker → orcs.llm() → claude CLI.
+/// dispatch_llm runs the llm-worker → orcs.llm() → HTTP LLM API.
 ///
-/// Uses a **mock claude script** that returns instantly with a known response,
+/// Uses a **mock HTTP server** that returns an Ollama-format response instantly,
 /// eliminating external dependency on a real LLM and making the test fast
 /// (~3 seconds instead of minutes).
 ///
 /// Verifies the full success pipeline:
 ///   user input → agent_mgr → dispatch_llm → llm-worker → orcs.llm()
-///   → mock claude → orcs.output(response) → Emitter → output_tx
+///   → mock HTTP server → orcs.output(response) → Emitter → output_tx
 ///   → ConsoleRenderer → stdout
 #[test]
 fn dispatch_llm_output_reaches_stdout() {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::PermissionsExt;
+    use std::net::TcpListener;
     use std::process::{Command, Stdio};
     use std::sync::mpsc as std_mpsc;
     use std::thread;
@@ -243,25 +243,69 @@ fn dispatch_llm_output_reaches_stdout() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let bin = assert_cmd::cargo::cargo_bin!("orcs");
 
-    // Create a mock `claude` script that returns a known response instantly.
-    let mock_claude = tmp.path().join("claude");
-    std::fs::write(&mock_claude, "#!/bin/sh\necho \"MOCK_LLM_RESPONSE_42\"\n")
-        .expect("write mock claude script");
-    std::fs::set_permissions(&mock_claude, std::fs::Permissions::from_mode(0o755))
-        .expect("set mock claude executable");
+    // Start a mock HTTP server that mimics Ollama's POST /api/chat response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock HTTP server");
+    let mock_port = listener.local_addr().expect("get mock port").port();
+    let mock_base_url = format!("http://127.0.0.1:{}", mock_port);
 
-    // Prepend tmpdir to PATH so orcs finds our mock claude first.
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let mock_path = format!("{}:{}", tmp.path().display(), original_path);
+    // Mock server thread: accepts one connection, returns Ollama-format JSON.
+    let server_thread = thread::spawn(move || {
+        // Accept connections until the test ends.
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+
+            // Read request headers (we don't need to parse them carefully).
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                // Check if we've received the full request (headers + body).
+                // Simple heuristic: look for double CRLF marking end of headers,
+                // then read Content-Length bytes of body.
+                let req_str = String::from_utf8_lossy(&request);
+                if let Some(header_end) = req_str.find("\r\n\r\n") {
+                    // Check Content-Length
+                    let headers = &req_str[..header_end];
+                    let content_length: usize = headers
+                        .lines()
+                        .find(|l| l.to_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if request.len() >= body_start + content_length {
+                        break;
+                    }
+                }
+            }
+
+            // Return Ollama-format JSON response.
+            let ollama_response = r#"{"model":"mock-model","message":{"role":"assistant","content":"MOCK_LLM_RESPONSE_42"},"done":true,"done_reason":"stop"}"#;
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                ollama_response.len(),
+                ollama_response
+            );
+            let _ = stream.write_all(http_response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
 
     let mut child = Command::new(&bin)
         .arg("-d")
         .arg("--builtins-dir")
         .arg(tmp.path())
-        .env("PATH", &mock_path)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .env_remove("CLAUDE_CODE_SSE_PORT")
+        .env("ORCS_LLM_BASE_URL", &mock_base_url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -309,11 +353,11 @@ fn dispatch_llm_output_reaches_stdout() {
         buf
     });
 
-    // Send user message — agent_mgr will dispatch to llm-worker → mock claude.
+    // Send user message — agent_mgr will dispatch to llm-worker → mock HTTP server.
     writeln!(stdin, "test_msg_e2e").expect("write user message");
     stdin.flush().expect("flush message to stdin");
 
-    // Wait for dispatch_llm to complete. Mock claude returns instantly,
+    // Wait for dispatch_llm to complete. Mock server returns instantly,
     // so this should complete in a few seconds.
     let max_wait = Duration::from_secs(30);
     let dispatch_completed = done_rx.recv_timeout(max_wait).is_ok();
@@ -324,6 +368,7 @@ fn dispatch_llm_output_reaches_stdout() {
 
     let stdout = stdout_thread.join().expect("join stdout thread");
     let stderr = stderr_thread.join().expect("join stderr thread");
+    drop(server_thread);
 
     // Dump output for post-mortem inspection.
     let dump_dir = std::env::temp_dir().join("orcs_e2e_dump");

@@ -202,14 +202,15 @@ pub(super) fn register(
         orcs_table.set("exec_argv", exec_argv_fn)?;
     }
 
-    // Override orcs.llm with capability-checked version that delegates to Lua handler.
-    // Requires Capability::LLM.  Handler is registered via orcs.set_llm_handler(fn).
+    // Override orcs.llm with capability-checked version that delegates to
+    // llm_command::llm_request_impl (multi-provider HTTP client).
+    // Requires Capability::LLM.
     //
-    // orcs.llm(prompt [, opts]) -> { ok, content?, error?, session_id? }
+    // orcs.llm(prompt [, opts]) -> { ok, content?, model?, session_id?, error?, error_kind? }
     {
         let ctx_clone = Arc::clone(&ctx);
 
-        let llm_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
+        let llm_fn = lua.create_function(move |lua, args: (String, Option<Table>)| {
             // Capability check
             let ctx_guard = ctx_clone.lock();
 
@@ -217,11 +218,12 @@ pub(super) fn register(
                 let result = lua.create_table()?;
                 result.set("ok", false)?;
                 result.set("error", "permission denied: Capability::LLM not granted")?;
+                result.set("error_kind", "permission_denied")?;
                 return Ok(result);
             }
             drop(ctx_guard);
 
-            crate::llm_command::call_llm_handler(lua, prompt, opts)
+            crate::llm_command::llm_request_impl(lua, args)
         })?;
         orcs_table.set("llm", llm_fn)?;
     }
