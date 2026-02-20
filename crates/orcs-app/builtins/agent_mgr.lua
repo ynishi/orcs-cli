@@ -46,10 +46,26 @@ return {
         local input = request.payload or {}
         local message = input.message or ""
 
+        -- Build LLM opts from config passed via RPC payload
+        local function build_llm_opts(input)
+            local opts = {}
+            local llm_cfg = input.llm_config or {}
+            if llm_cfg.provider   then opts.provider    = llm_cfg.provider end
+            if llm_cfg.model      then opts.model       = llm_cfg.model end
+            if llm_cfg.base_url   then opts.base_url    = llm_cfg.base_url end
+            if llm_cfg.api_key    then opts.api_key     = llm_cfg.api_key end
+            if llm_cfg.temperature then opts.temperature = llm_cfg.temperature end
+            if llm_cfg.max_tokens then opts.max_tokens  = llm_cfg.max_tokens end
+            if llm_cfg.timeout    then opts.timeout     = llm_cfg.timeout end
+            return opts
+        end
+
         -- Session resumption: skip full prompt assembly, send message directly
         if input.session_id and input.session_id ~= "" then
             orcs.log("debug", "llm-worker: resuming session " .. input.session_id:sub(1, 20))
-            local llm_resp = orcs.llm(message, { session_id = input.session_id })
+            local opts = build_llm_opts(input)
+            opts.session_id = input.session_id
+            local llm_resp = orcs.llm(message, opts)
             if llm_resp and llm_resp.ok then
                 return {
                     success = true,
@@ -201,10 +217,11 @@ return {
             #f_system, #f_task, #f_guard, #console_block
         ))
 
-        -- 5. Call Claude Code CLI (headless, JSON output)
+        -- 5. Call LLM via orcs.llm() with provider/model from config
         -- Note: session_id is handled by the early-return path above;
         -- this path is always a fresh first call.
-        local llm_resp = orcs.llm(prompt)
+        local llm_opts = build_llm_opts(input)
+        local llm_resp = orcs.llm(prompt, llm_opts)
         if llm_resp and llm_resp.ok then
             return {
                 success = true,
@@ -479,6 +496,23 @@ local function dispatch_llm(message)
     -- Build @command reference for LLM instructions
     local command_reference = build_command_reference()
 
+    -- Extract LLM-specific config (llm_* keys → config table without prefix)
+    local llm_config = {}
+    local llm_key_map = {
+        llm_provider    = "provider",
+        llm_model       = "model",
+        llm_base_url    = "base_url",
+        llm_api_key     = "api_key",
+        llm_temperature = "temperature",
+        llm_max_tokens  = "max_tokens",
+        llm_timeout     = "timeout",
+    }
+    for src_key, dst_key in pairs(llm_key_map) do
+        if component_settings[src_key] ~= nil then
+            llm_config[dst_key] = component_settings[src_key]
+        end
+    end
+
     local session_id = nil
     local last_response = nil
     local last_response_shown = false
@@ -490,6 +524,7 @@ local function dispatch_llm(message)
         local payload = {
             message = current_message,
             prompt_placement = placement,
+            llm_config = llm_config,
         }
         if session_id then
             -- Continuation: llm-worker will skip prompt assembly and just --resume
@@ -645,7 +680,12 @@ return {
         end
 
         local placement = component_settings.prompt_placement or "both"
-        orcs.log("info", "agent_mgr initializing (prompt_placement=" .. placement .. ")...")
+        local llm_provider = component_settings.llm_provider or "(default)"
+        local llm_model = component_settings.llm_model or "(default)"
+        orcs.log("info", string.format(
+            "agent_mgr initializing (prompt_placement=%s, llm=%s/%s)...",
+            placement, llm_provider, llm_model
+        ))
 
         -- Spawn LLM worker as an independent Component via spawn_runner().
         -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
