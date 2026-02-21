@@ -66,6 +66,9 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 /// Maximum delay between retries (seconds).
 const RETRY_MAX_DELAY_SECS: u64 = 30;
 
+/// Default maximum number of tool-loop turns (resolve mode).
+const DEFAULT_MAX_TOOL_TURNS: u32 = 10;
+
 // ── Provider ───────────────────────────────────────────────────────────
 
 /// Supported LLM providers.
@@ -180,6 +183,13 @@ struct LlmOpts {
     max_retries: u32,
     /// Whether to send IntentDefs as tools to the LLM (default: true).
     tools: bool,
+    /// Whether to auto-resolve intents in Rust (default: false).
+    /// When true, tool_call intents are dispatched automatically and
+    /// results are fed back to the LLM in a multi-turn loop.
+    /// When false, intents are returned to Lua for manual dispatch.
+    resolve: bool,
+    /// Maximum number of tool-loop turns before stopping (default: 10).
+    max_tool_turns: u32,
 }
 
 impl LlmOpts {
@@ -226,6 +236,14 @@ impl LlmOpts {
             .and_then(|o| o.get::<bool>("tools").ok())
             .unwrap_or(true);
 
+        let resolve = opts
+            .and_then(|o| o.get::<bool>("resolve").ok())
+            .unwrap_or(false);
+
+        let max_tool_turns = opts
+            .and_then(|o| o.get::<u32>("max_tool_turns").ok())
+            .unwrap_or(DEFAULT_MAX_TOOL_TURNS);
+
         Ok(Self {
             provider,
             base_url,
@@ -238,6 +256,8 @@ impl LlmOpts {
             timeout,
             max_retries,
             tools,
+            resolve,
+            max_tool_turns,
         })
     }
 }
@@ -499,26 +519,11 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     // Session management: get or create session
     let session_id = resolve_session_id(lua, &llm_opts.session_id);
 
-    // Build messages from session history + current prompt
-    let messages = build_messages(lua, &session_id, &prompt, &llm_opts);
-
     // Build tools JSON from IntentRegistry (when opts.tools is true)
     let tools_json = if llm_opts.tools {
         build_tools_for_provider(lua, llm_opts.provider)
     } else {
         None
-    };
-
-    // Build request body
-    let request_body = match build_request_body(&llm_opts, &messages, tools_json.as_ref()) {
-        Ok(body) => body,
-        Err(e) => {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("error", e)?;
-            result.set("error_kind", "request_build_error")?;
-            return Ok(result);
-        }
     };
 
     // Build URL
@@ -528,78 +533,98 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         llm_opts.provider.chat_path()
     );
 
-    // Configure ureq agent (reused across retries)
+    // Configure ureq agent (reused across retries and tool turns)
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(llm_opts.timeout)))
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
-    let body_str = request_body.to_string();
-    tracing::debug!(
-        "llm request: {} {} ({}B)",
-        llm_opts.provider.chat_path(),
-        llm_opts.model,
-        body_str.len()
-    );
+    // ── First turn: build messages from history + prompt ──
+    let mut messages = build_messages(lua, &session_id, &prompt, &llm_opts);
 
-    // Execute with retry loop
-    for attempt in 0..=llm_opts.max_retries {
-        // Build request fresh each attempt (send() consumes self)
-        let mut req = agent.post(&url);
-        req = req.header("Content-Type", "application/json");
-
-        match llm_opts.provider {
-            Provider::Ollama => {}
-            Provider::OpenAI => {
-                if let Some(ref key) = llm_opts.api_key {
-                    req = req.header("Authorization", &format!("Bearer {}", key));
-                }
-            }
-            Provider::Anthropic => {
-                if let Some(ref key) = llm_opts.api_key {
-                    req = req.header("x-api-key", key);
-                }
-                req = req.header("anthropic-version", "2023-06-01");
-            }
-        }
-
-        match req.send(body_str.as_bytes()) {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if attempt < llm_opts.max_retries && should_retry_status(status) {
-                    let delay = compute_retry_delay(&resp, attempt);
-                    tracing::debug!(
-                        "LLM HTTP {status}, retry {}/{} after {delay:?}",
-                        attempt + 1,
-                        llm_opts.max_retries
-                    );
-                    drop(resp);
-                    std::thread::sleep(delay);
-                    continue;
-                }
-                return parse_response(lua, resp, &llm_opts, &session_id, &prompt);
-            }
+    // ── Tool loop ──
+    // Each iteration: build body → send → parse → if tool_use && resolve → dispatch → append results → repeat
+    for tool_turn in 0..=llm_opts.max_tool_turns {
+        let request_body = match build_request_body(&llm_opts, &messages, tools_json.as_ref()) {
+            Ok(body) => body,
             Err(e) => {
-                if attempt < llm_opts.max_retries && is_retryable_transport(&e) {
-                    let delay = exponential_backoff(attempt);
-                    tracing::debug!(
-                        "LLM transport error, retry {}/{} after {delay:?}",
-                        attempt + 1,
-                        llm_opts.max_retries
-                    );
-                    std::thread::sleep(delay);
-                    continue;
-                }
-                return build_error_result(lua, e, &session_id);
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", e)?;
+                result.set("error_kind", "request_build_error")?;
+                return Ok(result);
             }
+        };
+
+        let body_str = request_body.to_string();
+        tracing::debug!(
+            "llm request turn={}: {} {} ({}B)",
+            tool_turn,
+            llm_opts.provider.chat_path(),
+            llm_opts.model,
+            body_str.len()
+        );
+
+        // Send with retry
+        let resp = match send_with_retry(&agent, &url, &llm_opts, &body_str) {
+            Ok(resp) => resp,
+            Err(SendError::Transport(e)) => return build_error_result(lua, e, &session_id),
+        };
+
+        // Parse response
+        let parsed_resp = match parse_response_body(lua, resp, &llm_opts, &session_id)? {
+            ResponseOrError::Parsed(p) => p,
+            ResponseOrError::ErrorTable(t) => return Ok(t),
+        };
+
+        let is_tool_use = parsed_resp.stop_reason == StopReason::ToolUse;
+        let should_resolve = is_tool_use && llm_opts.resolve && !parsed_resp.intents.is_empty();
+
+        if should_resolve && tool_turn < llm_opts.max_tool_turns {
+            // ── Auto-resolve: dispatch intents and continue loop ──
+
+            // Build assistant message with ContentBlocks (preserves tool_use blocks)
+            let assistant_blocks = build_assistant_content_blocks(&parsed_resp);
+            messages.push(Message {
+                role: "assistant".to_string(),
+                content: assistant_blocks.clone(),
+            });
+            append_message(lua, &session_id, "assistant", assistant_blocks);
+
+            // Dispatch each intent and collect tool results
+            let tool_result_content = dispatch_intents_to_results(lua, &parsed_resp.intents)?;
+            messages.push(Message {
+                role: "user".to_string(),
+                content: tool_result_content.clone(),
+            });
+            append_message(lua, &session_id, "user", tool_result_content);
+
+            tracing::debug!(
+                "tool turn {}: resolved {} intents, continuing",
+                tool_turn,
+                parsed_resp.intents.len()
+            );
+            continue;
         }
+
+        // ── Final response: return to Lua ──
+        // For non-resolve mode or final turn: store text-only in session
+        update_session(lua, &session_id, &prompt, &parsed_resp.content);
+
+        return build_lua_result(lua, &parsed_resp, &llm_opts, &session_id);
     }
 
-    // Safety fallback (last iteration always returns above)
+    // Tool loop exhausted
     let result = lua.create_table()?;
     result.set("ok", false)?;
-    result.set("error", "retry loop exhausted")?;
-    result.set("error_kind", "internal")?;
+    result.set(
+        "error",
+        format!(
+            "tool loop exceeded max_tool_turns ({})",
+            llm_opts.max_tool_turns
+        ),
+    )?;
+    result.set("error_kind", "tool_loop_limit")?;
     result.set("session_id", session_id)?;
     Ok(result)
 }
@@ -670,7 +695,7 @@ fn build_messages(lua: &Lua, session_id: &str, prompt: &str, opts: &LlmOpts) -> 
     messages
 }
 
-/// Store assistant response and user message in session history.
+/// Store assistant response and user message in session history (text-only).
 fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &str) {
     if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
         let history = store.0.entry(session_id.to_string()).or_default();
@@ -681,6 +706,18 @@ fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &s
         history.push(Message {
             role: "assistant".to_string(),
             content: MessageContent::Text(assistant_msg.to_string()),
+        });
+        lua.set_app_data(store);
+    }
+}
+
+/// Append a single message to session history (supports ContentBlock::Blocks).
+fn append_message(lua: &Lua, session_id: &str, role: &str, content: MessageContent) {
+    if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
+        let history = store.0.entry(session_id.to_string()).or_default();
+        history.push(Message {
+            role: role.to_string(),
+            content,
         });
         lua.set_app_data(store);
     }
@@ -941,16 +978,89 @@ fn stop_reason_to_str(reason: &StopReason) -> &'static str {
     }
 }
 
+// ── HTTP Send ─────────────────────────────────────────────────────────
+
+/// Error type for send_with_retry.
+enum SendError {
+    Transport(ureq::Error),
+}
+
+/// Send an HTTP request with retry logic. Returns the raw response on success.
+fn send_with_retry(
+    agent: &ureq::Agent,
+    url: &str,
+    opts: &LlmOpts,
+    body_str: &str,
+) -> Result<ureq::http::Response<ureq::Body>, SendError> {
+    for attempt in 0..=opts.max_retries {
+        let mut req = agent.post(url);
+        req = req.header("Content-Type", "application/json");
+
+        match opts.provider {
+            Provider::Ollama => {}
+            Provider::OpenAI => {
+                if let Some(ref key) = opts.api_key {
+                    req = req.header("Authorization", &format!("Bearer {}", key));
+                }
+            }
+            Provider::Anthropic => {
+                if let Some(ref key) = opts.api_key {
+                    req = req.header("x-api-key", key);
+                }
+                req = req.header("anthropic-version", "2023-06-01");
+            }
+        }
+
+        match req.send(body_str.as_bytes()) {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if attempt < opts.max_retries && should_retry_status(status) {
+                    let delay = compute_retry_delay(&resp, attempt);
+                    tracing::debug!(
+                        "LLM HTTP {status}, retry {}/{} after {delay:?}",
+                        attempt + 1,
+                        opts.max_retries
+                    );
+                    drop(resp);
+                    std::thread::sleep(delay);
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                if attempt < opts.max_retries && is_retryable_transport(&e) {
+                    let delay = exponential_backoff(attempt);
+                    tracing::debug!(
+                        "LLM transport error, retry {}/{} after {delay:?}",
+                        attempt + 1,
+                        opts.max_retries
+                    );
+                    std::thread::sleep(delay);
+                    continue;
+                }
+                return Err(SendError::Transport(e));
+            }
+        }
+    }
+    // Unreachable: loop always returns
+    unreachable!("retry loop exhausted without returning")
+}
+
 // ── Response Parsers ───────────────────────────────────────────────────
 
-/// Parse a successful HTTP response and extract the assistant's reply.
-fn parse_response(
+/// Either a parsed response or an error Lua table.
+enum ResponseOrError {
+    Parsed(ParsedLlmResponse),
+    ErrorTable(Table),
+}
+
+/// Parse HTTP response body into ParsedLlmResponse or error table.
+fn parse_response_body(
     lua: &Lua,
     mut resp: ureq::http::Response<ureq::Body>,
     opts: &LlmOpts,
     session_id: &str,
-    user_prompt: &str,
-) -> mlua::Result<Table> {
+) -> mlua::Result<ResponseOrError> {
     let status = resp.status().as_u16();
 
     // Read body
@@ -965,7 +1075,7 @@ fn parse_response(
                 result.set("error", "response body exceeds size limit")?;
                 result.set("error_kind", "too_large")?;
                 result.set("session_id", session_id)?;
-                return Ok(result);
+                return Ok(ResponseOrError::ErrorTable(result));
             }
             Ok(_) => String::from_utf8(buf).map_err(|_| {
                 mlua::Error::RuntimeError("LLM response body is not valid UTF-8".into())
@@ -976,7 +1086,7 @@ fn parse_response(
                 result.set("error", format!("failed to read response body: {}", e))?;
                 result.set("error_kind", "network")?;
                 result.set("session_id", session_id)?;
-                return Ok(result);
+                return Ok(ResponseOrError::ErrorTable(result));
             }
         }
     };
@@ -991,7 +1101,7 @@ fn parse_response(
         )?;
         result.set("error_kind", classify_http_status(status))?;
         result.set("session_id", session_id)?;
-        return Ok(result);
+        return Ok(ResponseOrError::ErrorTable(result));
     }
 
     // Parse JSON
@@ -1012,18 +1122,120 @@ fn parse_response(
             result.set("error", e)?;
             result.set("error_kind", "parse_error")?;
             result.set("session_id", session_id)?;
-            return Ok(result);
+            return Ok(ResponseOrError::ErrorTable(result));
         }
     };
 
-    // Update session history (text portion only)
-    update_session(lua, session_id, user_prompt, &parsed.content);
+    Ok(ResponseOrError::Parsed(parsed))
+}
 
-    // Build success response
+// ── Resolve-flow Helpers ──────────────────────────────────────────────
+
+/// Build MessageContent::Blocks from a ParsedLlmResponse for session storage.
+///
+/// Reconstructs the assistant message as ContentBlocks so that tool_use blocks
+/// are preserved in session history for multi-turn tool loops.
+fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> MessageContent {
+    use orcs_types::intent::ContentBlock;
+
+    let mut blocks = Vec::new();
+
+    // Add text block if non-empty
+    if !parsed.content.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: parsed.content.clone(),
+        });
+    }
+
+    // Add tool_use blocks from intents
+    for intent in &parsed.intents {
+        blocks.push(ContentBlock::ToolUse {
+            id: intent.id.clone(),
+            name: intent.name.clone(),
+            input: intent.params.clone(),
+        });
+    }
+
+    if blocks.is_empty() {
+        MessageContent::Text(String::new())
+    } else {
+        MessageContent::Blocks(blocks)
+    }
+}
+
+/// Dispatch intents via `orcs.dispatch()` and collect ToolResult content blocks.
+///
+/// Each intent is dispatched through the Lua `orcs.dispatch(name, params)` function.
+/// The result (or error) is wrapped into a `ContentBlock::ToolResult` for the next
+/// LLM turn.
+fn dispatch_intents_to_results(
+    lua: &Lua,
+    intents: &[ActionIntent],
+) -> mlua::Result<MessageContent> {
+    use orcs_types::intent::ContentBlock;
+
+    let orcs: Table = lua.globals().get("orcs")?;
+    let dispatch_fn: mlua::Function = orcs.get("dispatch")?;
+
+    let mut blocks = Vec::new();
+
+    for intent in intents {
+        let params_lua = serde_json_to_lua(&intent.params, lua)?;
+        let dispatch_result: mlua::Result<Table> =
+            dispatch_fn.call((intent.name.as_str(), params_lua));
+
+        let (content_str, is_error) = match dispatch_result {
+            Ok(tbl) => {
+                let ok: bool = tbl.get("ok").unwrap_or(false);
+                if ok {
+                    // Serialize the result table data
+                    let data: Option<mlua::Value> = tbl.get("data").ok();
+                    let text = match data {
+                        Some(mlua::Value::String(s)) => {
+                            s.to_str().map_or_else(|_| String::new(), |b| b.to_string())
+                        }
+                        Some(v) => {
+                            // Convert Lua value to JSON for structured data
+                            serde_json::to_string(&lua_value_to_json(v))
+                                .unwrap_or_else(|_| "{}".to_string())
+                        }
+                        None => "ok".to_string(),
+                    };
+                    (text, false)
+                } else {
+                    let err: String = tbl
+                        .get("error")
+                        .unwrap_or_else(|_| "dispatch failed".to_string());
+                    (err, true)
+                }
+            }
+            Err(e) => (format!("dispatch error: {e}"), true),
+        };
+
+        blocks.push(ContentBlock::ToolResult {
+            tool_use_id: intent.id.clone(),
+            content: content_str,
+            is_error: Some(is_error),
+        });
+    }
+
+    Ok(MessageContent::Blocks(blocks))
+}
+
+/// Build the final Lua result table from a ParsedLlmResponse.
+fn build_lua_result(
+    lua: &Lua,
+    parsed: &ParsedLlmResponse,
+    opts: &LlmOpts,
+    session_id: &str,
+) -> mlua::Result<Table> {
     let result = lua.create_table()?;
     result.set("ok", true)?;
-    result.set("content", parsed.content)?;
-    result.set("model", parsed.model.unwrap_or_else(|| opts.model.clone()))?;
+    result.set("content", parsed.content.as_str())?;
+    result.set(
+        "model",
+        parsed.model.as_deref().unwrap_or(opts.model.as_str()),
+    )?;
     result.set("session_id", session_id)?;
     result.set("stop_reason", stop_reason_to_str(&parsed.stop_reason))?;
 
@@ -1041,6 +1253,47 @@ fn parse_response(
     }
 
     Ok(result)
+}
+
+/// Convert a Lua value to serde_json::Value (best-effort).
+fn lua_value_to_json(val: mlua::Value) -> serde_json::Value {
+    match val {
+        mlua::Value::Nil => serde_json::Value::Null,
+        mlua::Value::Boolean(b) => serde_json::Value::Bool(b),
+        mlua::Value::Integer(n) => serde_json::json!(n),
+        mlua::Value::Number(n) => serde_json::json!(n),
+        mlua::Value::String(s) => {
+            serde_json::Value::String(s.to_str().map_or_else(|_| String::new(), |b| b.to_string()))
+        }
+        mlua::Value::Table(t) => {
+            // Check if it's an array (sequential integer keys starting from 1)
+            let len = t.raw_len();
+            if len > 0 {
+                let arr: Vec<serde_json::Value> = (1..=len)
+                    .filter_map(|i| t.get::<mlua::Value>(i).ok())
+                    .map(lua_value_to_json)
+                    .collect();
+                serde_json::Value::Array(arr)
+            } else {
+                let mut map = serde_json::Map::new();
+                if let Ok(pairs) = t
+                    .pairs::<mlua::Value, mlua::Value>()
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    for (k, v) in pairs {
+                        if let mlua::Value::String(ks) = k {
+                            let key = ks
+                                .to_str()
+                                .map_or_else(|_| String::new(), |b| b.to_string());
+                            map.insert(key, lua_value_to_json(v));
+                        }
+                    }
+                }
+                serde_json::Value::Object(map)
+            }
+        }
+        _ => serde_json::Value::Null,
+    }
 }
 
 // ── Error Helpers ──────────────────────────────────────────────────────
@@ -1313,6 +1566,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
             role: "user".into(),
@@ -1341,6 +1596,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
             role: "user".into(),
@@ -1366,6 +1623,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![
             Message {
@@ -1403,6 +1662,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         // messages might include a system message from non-Anthropic path,
         // but Anthropic builder should filter it out.
@@ -1446,6 +1707,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
             role: "user".into(),
@@ -1733,6 +1996,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -1760,6 +2025,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -1788,6 +2055,8 @@ mod tests {
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
             tools: true,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
 
         let msgs = build_messages(&lua, &sid, "second question", &opts);
@@ -2408,5 +2677,305 @@ mod tests {
             2,
             "should report 2 sessions loaded"
         );
+    }
+
+    // ── Resolve-flow unit tests ───────────────────────────────────────
+
+    #[test]
+    fn build_assistant_content_blocks_text_only() {
+        let parsed = ParsedLlmResponse {
+            content: "Hello".to_string(),
+            model: None,
+            stop_reason: StopReason::EndTurn,
+            intents: vec![],
+        };
+        let blocks = build_assistant_content_blocks(&parsed);
+        assert_eq!(
+            blocks.text().expect("should have text"),
+            "Hello",
+            "text-only response should produce text block"
+        );
+    }
+
+    #[test]
+    fn build_assistant_content_blocks_with_intents() {
+        use orcs_types::intent::ContentBlock;
+
+        let parsed = ParsedLlmResponse {
+            content: "Let me read that file.".to_string(),
+            model: None,
+            stop_reason: StopReason::ToolUse,
+            intents: vec![ActionIntent {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                params: serde_json::json!({"path": "/tmp/test.txt"}),
+                meta: Default::default(),
+            }],
+        };
+        let blocks = build_assistant_content_blocks(&parsed);
+        match blocks {
+            MessageContent::Blocks(ref b) => {
+                assert_eq!(b.len(), 2, "should have text + tool_use blocks");
+                assert!(
+                    matches!(&b[0], ContentBlock::Text { text } if text == "Let me read that file."),
+                    "first block should be text"
+                );
+                assert!(
+                    matches!(&b[1], ContentBlock::ToolUse { id, name, .. } if id == "call_1" && name == "read_file"),
+                    "second block should be tool_use"
+                );
+            }
+            _ => panic!("expected Blocks variant"),
+        }
+    }
+
+    #[test]
+    fn build_assistant_content_blocks_empty_content_with_intent() {
+        let parsed = ParsedLlmResponse {
+            content: String::new(),
+            model: None,
+            stop_reason: StopReason::ToolUse,
+            intents: vec![ActionIntent {
+                id: "call_1".to_string(),
+                name: "list_files".to_string(),
+                params: serde_json::json!({}),
+                meta: Default::default(),
+            }],
+        };
+        let blocks = build_assistant_content_blocks(&parsed);
+        match blocks {
+            MessageContent::Blocks(ref b) => {
+                assert_eq!(
+                    b.len(),
+                    1,
+                    "should have only tool_use block (no empty text)"
+                );
+            }
+            _ => panic!("expected Blocks variant"),
+        }
+    }
+
+    #[test]
+    fn build_lua_result_basic() {
+        let lua = Lua::new();
+        let parsed = ParsedLlmResponse {
+            content: "Hello world".to_string(),
+            model: Some("test-model".to_string()),
+            stop_reason: StopReason::EndTurn,
+            intents: vec![],
+        };
+        let opts = LlmOpts {
+            provider: Provider::Ollama,
+            base_url: "http://localhost:11434".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: None,
+            system_prompt: None,
+            session_id: None,
+            temperature: None,
+            max_tokens: None,
+            timeout: DEFAULT_TIMEOUT_SECS,
+            max_retries: DEFAULT_MAX_RETRIES,
+            tools: false,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+        };
+        let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
+            .expect("build_lua_result should succeed");
+        assert!(result.get::<bool>("ok").expect("get ok"));
+        assert_eq!(
+            result.get::<String>("content").expect("get content"),
+            "Hello world"
+        );
+        assert_eq!(
+            result.get::<String>("model").expect("get model"),
+            "test-model"
+        );
+        assert_eq!(
+            result.get::<String>("session_id").expect("get session_id"),
+            "sess-test"
+        );
+        assert_eq!(
+            result
+                .get::<String>("stop_reason")
+                .expect("get stop_reason"),
+            "end_turn"
+        );
+    }
+
+    #[test]
+    fn build_lua_result_with_intents() {
+        let lua = Lua::new();
+        let parsed = ParsedLlmResponse {
+            content: "".to_string(),
+            model: None,
+            stop_reason: StopReason::ToolUse,
+            intents: vec![
+                ActionIntent {
+                    id: "c1".to_string(),
+                    name: "tool_a".to_string(),
+                    params: serde_json::json!({"x": 1}),
+                    meta: Default::default(),
+                },
+                ActionIntent {
+                    id: "c2".to_string(),
+                    name: "tool_b".to_string(),
+                    params: serde_json::json!({}),
+                    meta: Default::default(),
+                },
+            ],
+        };
+        let opts = LlmOpts {
+            provider: Provider::Ollama,
+            base_url: "http://localhost:11434".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: None,
+            system_prompt: None,
+            session_id: None,
+            temperature: None,
+            max_tokens: None,
+            timeout: DEFAULT_TIMEOUT_SECS,
+            max_retries: DEFAULT_MAX_RETRIES,
+            tools: false,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+        };
+        let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
+            .expect("build_lua_result should succeed");
+        let intents: Table = result.get("intents").expect("should have intents");
+        assert_eq!(intents.raw_len(), 2, "should have 2 intents");
+
+        let first: Table = intents.get(1).expect("get first intent");
+        assert_eq!(first.get::<String>("id").expect("id"), "c1");
+        assert_eq!(first.get::<String>("name").expect("name"), "tool_a");
+    }
+
+    #[test]
+    fn lua_value_to_json_primitives() {
+        assert_eq!(lua_value_to_json(mlua::Value::Nil), serde_json::Value::Null);
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Boolean(true)),
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Integer(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Number(3.14)),
+            serde_json::json!(3.14)
+        );
+    }
+
+    #[test]
+    fn lua_value_to_json_table_as_object() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("key", "value").expect("set key");
+        let json = lua_value_to_json(mlua::Value::Table(tbl));
+        assert_eq!(json, serde_json::json!({"key": "value"}));
+    }
+
+    #[test]
+    fn lua_value_to_json_table_as_array() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set(1, "a").expect("set 1");
+        tbl.set(2, "b").expect("set 2");
+        let json = lua_value_to_json(mlua::Value::Table(tbl));
+        assert_eq!(json, serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn llm_opts_resolve_defaults() {
+        let lua = Lua::new();
+        let opts_tbl = lua.create_table().expect("create table");
+        let opts = LlmOpts::from_lua(Some(&opts_tbl)).expect("parse opts");
+        assert!(!opts.resolve, "resolve should default to false");
+        assert_eq!(
+            opts.max_tool_turns, DEFAULT_MAX_TOOL_TURNS,
+            "max_tool_turns should default"
+        );
+    }
+
+    #[test]
+    fn llm_opts_resolve_custom() {
+        let lua = Lua::new();
+        let opts_tbl = lua.create_table().expect("create table");
+        opts_tbl.set("resolve", true).expect("set resolve");
+        opts_tbl
+            .set("max_tool_turns", 3u32)
+            .expect("set max_tool_turns");
+        let opts = LlmOpts::from_lua(Some(&opts_tbl)).expect("parse opts");
+        assert!(opts.resolve, "resolve should be true");
+        assert_eq!(opts.max_tool_turns, 3, "max_tool_turns should be 3");
+    }
+
+    #[test]
+    fn append_message_stores_in_session() {
+        let lua = Lua::new();
+        ensure_session_store(&lua);
+        let session_id = "test-session";
+
+        // Create session
+        if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
+            store.0.insert(session_id.to_string(), Vec::new());
+            lua.set_app_data(store);
+        }
+
+        // Append a text message
+        append_message(
+            &lua,
+            session_id,
+            "user",
+            MessageContent::Text("hello".to_string()),
+        );
+
+        // Verify
+        let store = lua
+            .app_data_ref::<SessionStore>()
+            .expect("store should exist");
+        let history = store.0.get(session_id).expect("session should exist");
+        assert_eq!(history.len(), 1, "should have 1 message");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(
+            history[0].content.text().expect("should have text"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn append_message_stores_blocks() {
+        use orcs_types::intent::ContentBlock;
+
+        let lua = Lua::new();
+        ensure_session_store(&lua);
+        let session_id = "test-blocks";
+
+        if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
+            store.0.insert(session_id.to_string(), Vec::new());
+            lua.set_app_data(store);
+        }
+
+        let blocks = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "thinking".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "/tmp/f"}),
+            },
+        ]);
+        append_message(&lua, session_id, "assistant", blocks);
+
+        let store = lua
+            .app_data_ref::<SessionStore>()
+            .expect("store should exist");
+        let history = store.0.get(session_id).expect("session should exist");
+        assert_eq!(history.len(), 1);
+        match &history[0].content {
+            MessageContent::Blocks(b) => assert_eq!(b.len(), 2, "should have 2 content blocks"),
+            _ => panic!("expected Blocks variant"),
+        }
     }
 }
