@@ -71,7 +71,7 @@ pub struct SessionAsset {
     /// Granted command patterns (restored on session resume).
     ///
     /// These are the commands that were approved via HIL during previous
-    /// sessions. On resume, they are restored into the [`GrantPolicy`]
+    /// sessions. On resume, they are restored into the `GrantPolicy`
     /// so the user doesn't need to re-approve the same commands.
     #[serde(default)]
     pub granted_commands: Vec<CommandGrant>,
@@ -166,7 +166,7 @@ impl SessionAsset {
     /// Saves granted commands (replaces existing).
     ///
     /// Call this before persisting the session to capture the current
-    /// grant state from a [`GrantPolicy`].
+    /// grant state from a `GrantPolicy`.
     pub fn save_grants(&mut self, grants: Vec<CommandGrant>) {
         if self.granted_commands != grants {
             self.granted_commands = grants;

@@ -42,33 +42,33 @@
 //!
 //! Internal permission management:
 //!
-//! - [`Session`](auth::Session): Principal + PrivilegeLevel context
-//! - [`PrivilegeLevel`](auth::PrivilegeLevel): Standard or Elevated
-//! - [`PermissionChecker`](auth::PermissionChecker): Policy trait
+//! - [`Session`] — Principal + PrivilegeLevel context
+//! - [`PrivilegeLevel`] — Standard or Elevated
+//! - [`PermissionChecker`] — Policy trait
 //!
-//! Note: [`Principal`](orcs_types::Principal) is in `orcs-types` for Plugin SDK access.
+//! Note: [`Principal`] is in `orcs-types` for Plugin SDK access.
 //!
 //! ## [`channel`] - Parallel Execution
 //!
 //! Channel lifecycle management:
 //!
-//! - [`Channel`](channel::Channel): Execution unit with state
-//! - [`World`](channel::World): Channel tree manager
-//! - [`ChannelState`](channel::ChannelState): Running/Completed/Aborted
+//! - [`Channel`] — Execution unit with state
+//! - [`World`] — Channel tree manager
+//! - [`ChannelState`] — Running/Completed/Aborted
 //!
 //! ## [`engine`] - Core Runtime
 //!
 //! Main runtime infrastructure:
 //!
-//! - [`OrcsEngine`](engine::OrcsEngine): Main runtime loop
-//! - [`EventBus`](engine::EventBus): Message routing
-//! - [`ComponentHandle`](engine::ComponentHandle): Component communication
+//! - [`OrcsEngine`] — Main runtime loop
+//! - [`EventBus`] — Message routing
+//! - [`ComponentHandle`] — Component communication
 //!
 //! ## [`components`] - Builtin Components
 //!
 //! Core components for the runtime:
 //!
-//! - [`HilComponent`](components::HilComponent): Human-in-the-Loop approval
+//! - [`HilComponent`] — Human-in-the-Loop approval
 //!
 //! ## [`io`] - Human I/O
 //!
@@ -81,8 +81,8 @@
 //!
 //! Hierarchical configuration with layered merging:
 //!
-//! - [`OrcsConfig`](config::OrcsConfig): Unified configuration type
-//! - [`ConfigLoader`](config::ConfigLoader): Multi-source config loader
+//! - [`OrcsConfig`]: Unified configuration type
+//! - [`ConfigLoader`]: Multi-source config loader
 //!
 //! Configuration priority: Environment > Project > Global > Default
 //!
@@ -90,8 +90,8 @@
 //!
 //! Session data storage (separate from config):
 //!
-//! - [`SessionAsset`](session::SessionAsset): Conversation history, snapshots
-//! - [`SessionStore`](session::SessionStore): Storage abstraction
+//! - [`SessionAsset`]: Conversation history, snapshots
+//! - [`SessionStore`]: Storage abstraction
 //!
 //! # Why This Separation?
 //!

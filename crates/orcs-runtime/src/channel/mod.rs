@@ -38,7 +38,7 @@
 //!
 //! Each channel runs in its own tokio task via [`ChannelRunner`]:
 //!
-//! - **Event injection**: External events arrive via [`ChannelHandle::inject()`]
+//! - **Event injection**: External events arrive via `ChannelHandle::inject()`
 //! - **Signal broadcast**: Signals reach all runners via broadcast channel
 //! - **World modification**: Changes go through [`WorldCommand`] queue
 //! - **Read access**: Parallel reads via `Arc<RwLock<World>>`

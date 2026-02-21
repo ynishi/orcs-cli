@@ -100,7 +100,7 @@ impl Drop for TracingWriter {
     }
 }
 
-/// Strips ANSI escape sequences (CSI sequences: ESC [ ... <final byte>).
+/// Strips ANSI escape sequences (CSI sequences: ESC `[` ... `<final byte>`).
 fn strip_ansi(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;

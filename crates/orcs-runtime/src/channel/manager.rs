@@ -65,6 +65,8 @@ pub type WorldCommandSender = mpsc::Sender<WorldCommand>;
 /// through a command queue. This enables multiple [`ChannelRunner`]s
 /// to modify the World without holding locks.
 ///
+/// [`ChannelRunner`]: super::ChannelRunner
+///
 /// # Thread Safety
 ///
 /// - **Reads**: Via `Arc<RwLock<World>>` clone (parallel reads allowed)

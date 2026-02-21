@@ -73,8 +73,8 @@
 //! |-------|---------|
 //! | [`Component`] | EventBus participant with request handling |
 //! | [`Child`] | Managed entity (no direct EventBus access) |
-//! | [`Agent`] | Reactive child (subscribes to events) |
-//! | [`Skill`] | Auto-triggered child |
+//! | `Agent` | Reactive child (subscribes to events) |
+//! | `Skill` | Auto-triggered child |
 //!
 //! # Human as Superpower
 //!
@@ -188,7 +188,7 @@
 //! # Crate Structure
 //!
 //! - [`Component`] - EventBus participant trait
-//! - [`Child`], [`Agent`], [`Skill`] - Managed entity traits
+//! - [`Child`], `Agent`, `Skill` - Managed entity traits
 //! - [`Identifiable`], [`SignalReceiver`], [`Statusable`] - Core traits
 //! - [`Status`], [`StatusDetail`], [`Progress`] - Status types
 //! - [`ComponentError`] - Error types

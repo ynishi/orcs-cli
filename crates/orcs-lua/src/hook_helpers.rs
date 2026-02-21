@@ -302,7 +302,7 @@ fn parse_action_table(
 /// - `component_id` — the owning component (for `register_owned()`)
 ///
 /// The registered hooks are automatically cleaned up when
-/// [`HookRegistry::unregister_by_owner()`] is called with the same
+/// `HookRegistry::unregister_by_owner()` is called with the same
 /// component ID (typically on component shutdown).
 ///
 /// # Errors
@@ -465,7 +465,7 @@ pub fn register_unhook_function(lua: &Lua, registry: SharedHookRegistry) -> Resu
 /// Error from loading a single hook definition.
 #[derive(Debug)]
 pub struct HookLoadError {
-    /// Label of the hook that failed (id or "<anonymous>").
+    /// Label of the hook that failed (id or `<anonymous>`).
     pub hook_label: String,
     /// Description of the error.
     pub error: String,
@@ -488,7 +488,7 @@ pub struct HookLoadResult {
     pub errors: Vec<HookLoadError>,
 }
 
-/// Loads hooks from a [`HooksConfig`] into a [`SharedHookRegistry`].
+/// Loads hooks from a `HooksConfig` into a [`SharedHookRegistry`].
 ///
 /// For each enabled hook definition:
 /// - `handler_inline`: Evaluates the inline Lua code as a function

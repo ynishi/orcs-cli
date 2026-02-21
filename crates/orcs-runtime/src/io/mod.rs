@@ -38,12 +38,12 @@
 //!
 //! # Module Structure
 //!
-//! - [`types`] - IO types ([`IOInput`], [`IOOutput`], [`OutputStyle`])
-//! - [`port`] - IO port and handles ([`IOPort`], [`IOInputHandle`], [`IOOutputHandle`])
-//! - [`input`] - Input commands ([`InputCommand`])
-//! - [`parser`] - Input parsing ([`InputParser`])
-//! - [`console`] - Console I/O ([`Console`], [`ConsoleInputReader`])
-//! - [`renderer`] - Console rendering ([`ConsoleRenderer`])
+//! - `types` - IO types ([`IOInput`], [`IOOutput`], [`OutputStyle`])
+//! - `port` - IO port and handles ([`IOPort`], [`IOInputHandle`], [`IOOutputHandle`])
+//! - `input` - Input commands ([`InputCommand`])
+//! - `parser` - Input parsing ([`InputParser`])
+//! - `console` - Console I/O ([`Console`], [`ConsoleInputReader`])
+//! - `renderer` - Console rendering ([`ConsoleRenderer`])
 //!
 //! # Example
 //!

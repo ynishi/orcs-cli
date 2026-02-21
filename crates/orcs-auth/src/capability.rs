@@ -168,7 +168,7 @@ impl Capability {
 
     /// Parses a capability name string (case-insensitive).
     ///
-    /// Unlike [`Flags::from_name`] (exact match), this accepts
+    /// Unlike `Flags::from_name` (exact match), this accepts
     /// lowercase input and aliases like "EXEC" for "EXECUTE".
     ///
     /// # Example

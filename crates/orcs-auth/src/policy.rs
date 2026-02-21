@@ -24,8 +24,8 @@
 //!
 //! | Layer | Type | Controls |
 //! |-------|------|----------|
-//! | [`Capability`] | Bitflags | What operations are allowed |
-//! | [`SandboxPolicy`] | Trait | Where operations can target |
+//! | [`crate::Capability`] | Bitflags | What operations are allowed |
+//! | [`crate::SandboxPolicy`] | Trait | Where operations can target |
 //! | [`PermissionPolicy`] | Trait (THIS) | Who can act, with what privilege |
 
 use crate::{CommandPermission, Session};

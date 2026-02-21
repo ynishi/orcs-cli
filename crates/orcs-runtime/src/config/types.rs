@@ -80,7 +80,7 @@ impl OrcsConfig {
     /// Returns global config fields as a JSON value for Lua component injection.
     ///
     /// This is injected into each component's `init(cfg)` table under the `_global` key
-    /// by [`OrcsAppBuilder::build()`], so Lua components can access it as `cfg._global`.
+    /// by `OrcsAppBuilder::build()`, so Lua components can access it as `cfg._global`.
     ///
     /// # Included fields
     ///
@@ -426,7 +426,7 @@ pub struct ComponentsConfig {
     /// # Global Config (`cfg._global`)
     ///
     /// Every component receives global config under `cfg._global`, injected
-    /// by [`OrcsAppBuilder::build()`]. See [`OrcsConfig::global_config_for_lua()`]
+    /// by `OrcsAppBuilder::build()`. See [`OrcsConfig::global_config_for_lua()`]
     /// for the full field list. Components access it as:
     ///
     /// ```lua

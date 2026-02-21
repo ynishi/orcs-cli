@@ -421,7 +421,7 @@ pub trait ChildContext: Send + Sync + Debug {
 
     /// Sends input to a child asynchronously (fire-and-forget).
     ///
-    /// Unlike [`send_to_child`], this method returns immediately without
+    /// Unlike [`send_to_child`](Self::send_to_child), this method returns immediately without
     /// waiting for the child to complete. The child runs in a background
     /// thread and its output flows through `emit_output` automatically.
     ///

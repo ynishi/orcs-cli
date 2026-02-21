@@ -12,8 +12,8 @@
 //! ```
 //!
 //! `CommandPermission` is used by:
-//! - [`ChildContext::check_command_permission()`](orcs_component) — trait boundary
-//! - [`PermissionPolicy::check_command_permission()`] — abstract policy
+//! - `ChildContext::check_command_permission()` (in `orcs-component`) — trait boundary
+//! - [`crate::PermissionPolicy::check_command_permission()`] — abstract policy
 //!
 //! `CommandCheckResult` extends this with HIL-specific fields and stays in `orcs-runtime`.
 

@@ -332,9 +332,9 @@ pub trait Component: Send + Sync {
         RuntimeHints::default()
     }
 
-    /// Returns this component as a [`Packageable`] if supported.
+    /// Returns this component as a [`Packageable`](crate::Packageable) if supported.
     ///
-    /// Override this method in components that implement [`Packageable`]
+    /// Override this method in components that implement [`Packageable`](crate::Packageable)
     /// to enable package management.
     ///
     /// # Default
@@ -344,9 +344,9 @@ pub trait Component: Send + Sync {
         None
     }
 
-    /// Returns this component as a mutable [`Packageable`] if supported.
+    /// Returns this component as a mutable [`Packageable`](crate::Packageable) if supported.
     ///
-    /// Override this method in components that implement [`Packageable`]
+    /// Override this method in components that implement [`Packageable`](crate::Packageable)
     /// to enable package installation/uninstallation.
     ///
     /// # Default
@@ -362,7 +362,7 @@ pub trait Component: Send + Sync {
     /// - The owning Channel (for IO output)
     /// - All Components (via signal broadcast)
     ///
-    /// Called by [`ClientRunner`] during component initialization.
+    /// Called by `ClientRunner` during component initialization.
     ///
     /// # Default
     ///

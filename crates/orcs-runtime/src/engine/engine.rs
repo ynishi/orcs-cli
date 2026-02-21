@@ -641,7 +641,7 @@ impl OrcsEngine {
 
     /// Spawns a ChannelRunner with full auth and an optional initial snapshot.
     ///
-    /// Same as [`spawn_runner_full_auth`] but accepts an optional
+    /// Same as [`Self::spawn_runner_full_auth`] but accepts an optional
     /// [`ComponentSnapshot`] to restore before `init()` (session resume).
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_runner_full_auth_with_snapshot(
@@ -730,8 +730,8 @@ impl OrcsEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::ChannelNotFound`] if channel doesn't exist,
-    /// or [`EngineError::SendFailed`] if the buffer is full.
+    /// Returns `EngineError::ChannelNotFound` if channel doesn't exist,
+    /// or `EngineError::SendFailed` if the buffer is full.
     pub fn inject_event(
         &self,
         channel_id: ChannelId,
@@ -930,7 +930,7 @@ impl OrcsEngine {
 
     /// Returns a reference to snapshots collected during graceful shutdown.
     ///
-    /// Populated by [`shutdown_parallel()`] when runners complete their
+    /// Populated by `shutdown_parallel()` when runners complete their
     /// shutdown sequence. Keyed by component FQN.
     ///
     /// # Usage

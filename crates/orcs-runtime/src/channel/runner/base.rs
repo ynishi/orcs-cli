@@ -109,7 +109,7 @@ impl InboundEvent {
     }
 }
 
-/// Opaque handle for sending events into a channel as [`InboundEvent::Direct`].
+/// Opaque handle for sending events into a channel as `InboundEvent::Direct`.
 ///
 /// All events sent through `OutputSender` bypass the subscription filter
 /// on the receiving [`ChannelRunner`]. Use [`OutputSender::channel()`] to
@@ -166,7 +166,7 @@ impl OutputSender {
 
 /// Receiver end of an [`OutputSender`] channel.
 ///
-/// Unwraps [`InboundEvent`] internally, returning plain [`Event`] values.
+/// Unwraps `InboundEvent` internally, returning plain [`Event`] values.
 /// Created via [`OutputSender::channel()`].
 pub struct OutputReceiver {
     inner: mpsc::Receiver<InboundEvent>,
@@ -851,7 +851,7 @@ impl ChannelRunner {
     ///
     /// Called after a `ResolveApproval` transition succeeds (channel returns to Running).
     /// Consumes the stored [`PendingApproval`] and:
-    /// 1. Grants the `grant_pattern` via the shared [`GrantPolicy`]
+    /// 1. Grants the `grant_pattern` via the shared `GrantPolicy`
     /// 2. Re-dispatches the original request to the Component (which will now pass permission check)
     /// 3. Sends `ShowApproved` notification to the user
     async fn handle_approval_resolved(&mut self) {
@@ -1385,7 +1385,7 @@ impl ChannelRunnerBuilder {
     /// Sets the session for permission checking.
     ///
     /// Takes ownership of a Session and wraps it in Arc.
-    /// For sharing a Session across multiple runners, use [`with_session_arc`].
+    /// For sharing a Session across multiple runners, use [`Self::with_session_arc`].
     ///
     /// When set, operations like `orcs.exec()`, `spawn_child()`, and `spawn_runner()`
     /// will be checked against the session's privilege level.
@@ -1486,7 +1486,7 @@ impl ChannelRunnerBuilder {
     /// Enables the request channel for Component-to-Component RPC.
     ///
     /// When enabled, the runner's [`ChannelHandle`] will accept
-    /// [`RequestEnvelope`]s via `send_request()`, allowing other
+    /// `RequestEnvelope`s via `send_request()`, allowing other
     /// Components to call this Component's `on_request()` and receive
     /// a response.
     #[must_use]

@@ -1,7 +1,7 @@
 //! Dynamic command permission grants.
 //!
 //! Provides types for granting and revoking command execution permissions
-//! at runtime. This is the **dynamic** counterpart to [`Capability`] (static WHAT).
+//! at runtime. This is the **dynamic** counterpart to [`crate::Capability`] (static WHAT).
 //!
 //! # Auth Model
 //!

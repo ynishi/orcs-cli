@@ -101,7 +101,7 @@ pub struct EventBus {
     /// Maps ComponentId to ChannelId for routing RPC requests via ChannelHandle.
     ///
     /// Shared with EventEmitter instances to enable `orcs.request()` from Lua.
-    /// Populated by [`register_component_channel()`] when Engine spawns runners.
+    /// Populated by `register_component_channel()` when Engine spawns runners.
     component_channel_map: SharedComponentChannelMap,
     /// Shared hook registry for dispatching EventBus hooks.
     hook_registry: Option<SharedHookRegistry>,
@@ -180,7 +180,7 @@ impl EventBus {
     /// Register component with subscriptions.
     ///
     /// The component will receive requests matching any of the specified
-    /// categories when using [`publish`] for category-based routing.
+    /// categories when using `publish` for category-based routing.
     ///
     /// # Arguments
     ///
@@ -404,7 +404,7 @@ impl EventBus {
 
     /// Registers a Component FQN → ChannelId mapping for RPC routing.
     ///
-    /// After registration, [`request()`] will route requests targeting
+    /// After registration, `request()` will route requests targeting
     /// this Component through the ChannelHandle's request channel
     /// instead of the standalone ComponentHandle path.
     ///

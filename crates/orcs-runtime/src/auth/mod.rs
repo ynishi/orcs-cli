@@ -4,7 +4,7 @@
 //! This module provides runtime-specific implementations:
 //!
 //! - [`DefaultPolicy`]: Concrete [`PermissionChecker`] with session-based access control
-//! - [`DefaultGrantStore`]: Concrete [`GrantPolicy`](orcs_auth::GrantPolicy) (in-memory grant store)
+//! - [`DefaultGrantStore`]: Concrete [`GrantPolicy`] (in-memory grant store)
 //! - [`CommandCheckResult`]: HIL-aware command check result (with `ApprovalRequest`)
 //!
 //! # Architecture

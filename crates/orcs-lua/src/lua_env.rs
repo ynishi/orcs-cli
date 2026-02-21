@@ -362,6 +362,72 @@ mod tests {
         assert_eq!(result, "");
     }
 
+    #[test]
+    fn sandbox_os_execute_removed() {
+        let env = LuaEnv::new(test_sandbox());
+        let lua = env.create_lua().expect("create_lua");
+
+        let result: String = lua
+            .load(r#"return type(os.execute)"#)
+            .eval()
+            .expect("eval os.execute type");
+        assert_eq!(result, "nil", "os.execute must be removed");
+    }
+
+    #[test]
+    fn sandbox_os_remove_removed() {
+        let env = LuaEnv::new(test_sandbox());
+        let lua = env.create_lua().expect("create_lua");
+
+        let result: String = lua
+            .load(r#"return type(os.remove)"#)
+            .eval()
+            .expect("eval os.remove type");
+        assert_eq!(result, "nil", "os.remove must be removed");
+    }
+
+    #[test]
+    fn sandbox_dofile_removed() {
+        let env = LuaEnv::new(test_sandbox());
+        let lua = env.create_lua().expect("create_lua");
+
+        let result: String = lua
+            .load(r#"return type(dofile)"#)
+            .eval()
+            .expect("eval dofile type");
+        assert_eq!(result, "nil", "dofile must be removed");
+    }
+
+    #[test]
+    fn sandbox_load_removed() {
+        let env = LuaEnv::new(test_sandbox());
+        let lua = env.create_lua().expect("create_lua");
+
+        let result: String = lua
+            .load(r#"return type(load)"#)
+            .eval()
+            .expect("eval load type");
+        assert_eq!(result, "nil", "load must be removed");
+    }
+
+    #[test]
+    fn sandbox_os_safe_functions_preserved() {
+        let env = LuaEnv::new(test_sandbox());
+        let lua = env.create_lua().expect("create_lua");
+
+        let result: String = lua
+            .load(r#"return type(os.time)"#)
+            .eval()
+            .expect("eval os.time type");
+        assert_eq!(result, "function", "os.time must be preserved");
+
+        let result: String = lua
+            .load(r#"return type(os.clock)"#)
+            .eval()
+            .expect("eval os.clock type");
+        assert_eq!(result, "function", "os.clock must be preserved");
+    }
+
     // ─── require() error handling ──────────────────────────────────
 
     #[test]

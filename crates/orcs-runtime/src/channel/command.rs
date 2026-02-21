@@ -62,7 +62,7 @@ pub enum WorldCommand {
 
     /// Spawn a new child channel with a pre-determined [`ChannelId`].
     ///
-    /// Same as [`Spawn`] but the caller supplies the ID.
+    /// Same as `Spawn` but the caller supplies the ID.
     /// Used by `spawn_runner` which needs the ID before the World is updated.
     SpawnWithId {
         /// Parent channel ID.

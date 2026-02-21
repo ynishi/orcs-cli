@@ -2,7 +2,9 @@
 name = "orcs-hook"
 version.workspace = true
 edition.workspace = true
+description = "Lifecycle hook definitions and configuration for ORCS"
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 orcs-types = { workspace = true }

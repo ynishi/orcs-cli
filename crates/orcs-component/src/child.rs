@@ -184,7 +184,7 @@ impl ChildError {
 /// }
 /// ```
 pub trait Child: Identifiable + SignalReceiver + Statusable + Send + Sync {
-    /// Inject a [`ChildContext`] so the child can use `orcs.*` functions at
+    /// Inject a [`ChildContext`](crate::ChildContext) so the child can use `orcs.*` functions at
     /// runtime (RPC, exec, spawn, file tools, etc.).
     ///
     /// The default implementation is a no-op — override when the child

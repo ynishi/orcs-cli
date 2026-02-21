@@ -269,7 +269,7 @@ impl ChildSpawner {
 
     /// Spawns a child and returns an async handle.
     ///
-    /// Unlike [`spawn()`], this returns a handle that properly uses
+    /// Unlike [`Self::spawn()`], this returns a handle that properly uses
     /// `spawn_blocking` for async execution.
     ///
     /// # Arguments
