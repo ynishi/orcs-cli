@@ -722,7 +722,7 @@ mod tests {
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
-            .load(&format!(
+            .load(format!(
                 r#"return orcs.dispatch("read", {{path="{}"}})"#,
                 root.join("test.txt").display()
             ))
@@ -773,7 +773,7 @@ mod tests {
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
-            .load(&format!(
+            .load(format!(
                 r#"return orcs.dispatch("grep", {{pattern="line", path="{}"}})"#,
                 root.join("search.txt").display()
             ))
@@ -793,7 +793,7 @@ mod tests {
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
-            .load(&format!(
+            .load(format!(
                 r#"return orcs.dispatch("glob", {{pattern="*.rs", dir="{}"}})"#,
                 root.display()
             ))
@@ -837,7 +837,7 @@ mod tests {
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
-            .load(&format!(
+            .load(format!(
                 r#"return orcs.dispatch("mv", {{src="{}", dst="{}"}})"#,
                 src.display(),
                 dst.display()

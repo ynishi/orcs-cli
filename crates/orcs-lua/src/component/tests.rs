@@ -681,9 +681,9 @@ mod json_lua_conversion_tests {
 
     #[test]
     fn float_roundtrip() {
-        let val = serde_json::json!(3.14);
+        let val = serde_json::json!(1.23);
         let result = roundtrip(&val);
-        let diff = (result.as_f64().expect("should be f64") - 3.14).abs();
+        let diff = (result.as_f64().expect("should be f64") - 1.23).abs();
         assert!(diff < 1e-10, "float roundtrip drift: {diff}");
     }
 

@@ -2964,8 +2964,8 @@ mod tests {
             serde_json::json!(42)
         );
         assert_eq!(
-            lua_value_to_json(mlua::Value::Number(3.14)),
-            serde_json::json!(3.14)
+            lua_value_to_json(mlua::Value::Number(1.23)),
+            serde_json::json!(1.23)
         );
     }
 

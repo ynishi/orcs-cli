@@ -760,7 +760,7 @@ mod file_io {
     use std::fs;
 
     /// Create an Agent Skills Standard skill (SKILL.md + YAML frontmatter)
-    fn create_agent_skill(root: &PathBuf, name: &str, description: &str) {
+    fn create_agent_skill(root: &std::path::Path, name: &str, description: &str) {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir).unwrap();
         let content = format!(
@@ -770,7 +770,7 @@ mod file_io {
     }
 
     /// Create a Lua DSL skill (skill.lua returning a table)
-    fn create_lua_skill(root: &PathBuf, name: &str, description: &str) {
+    fn create_lua_skill(root: &std::path::Path, name: &str, description: &str) {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir).unwrap();
         let content = format!(
@@ -1164,7 +1164,7 @@ mod snapshot_restore {
         for name in ["alpha", "beta", "gamma"] {
             let result = harness2
                 .request(ext_cat(), "get", json!({ "name": name }))
-                .expect(&format!("get '{name}' should succeed"));
+                .unwrap_or_else(|_| panic!("get '{name}' should succeed"));
             assert_eq!(result["name"], name);
         }
 
