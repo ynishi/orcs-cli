@@ -20,6 +20,7 @@
 //! ```
 
 use crate::error::LuaError;
+use crate::types::serde_json_to_lua;
 use mlua::{Lua, Table};
 use orcs_types::intent::{IntentDef, IntentMeta, IntentResolver};
 
@@ -490,17 +491,8 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
             entry.set("name", def.name.as_str())?;
             entry.set("description", def.description.as_str())?;
 
-            // parameters as JSON string (LLM APIs expect this as JSON Schema)
-            let params_str = serde_json::to_string(&def.parameters)
-                .map_err(|e| mlua::Error::RuntimeError(format!("JSON serialize error: {e}")))?;
-            let params_value: mlua::Value = lua
-                .load(format!(
-                    "return require('cjson').decode('{}')",
-                    params_str.replace('\'', "\\'")
-                ))
-                .eval()
-                // Fallback: if cjson not available, return as string
-                .unwrap_or(mlua::Value::String(lua.create_string(&params_str)?));
+            // parameters as native Lua table (JSON Schema → Lua via serde_json_to_lua)
+            let params_value = serde_json_to_lua(&def.parameters, lua)?;
             entry.set("parameters", params_value)?;
 
             result.set(i + 1, entry)?;

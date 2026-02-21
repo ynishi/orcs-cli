@@ -61,14 +61,24 @@ function orcs.exec_argv(program, args, opts) end
 ---@field max_tokens? integer Max completion tokens
 ---@field timeout? integer Request timeout in seconds (default: 120)
 ---@field max_retries? integer Max retry attempts
+---@field tools? boolean Send IntentRegistry defs as LLM tools (default: true)
+---@field resolve? boolean Auto-dispatch tool_call intents in Rust (default: false)
+---@field max_tool_turns? integer Max tool-loop iterations (default: 10, requires resolve=true)
+
+---@class ActionIntent
+---@field id string Unique tool call ID from the LLM
+---@field name string Intent/tool name
+---@field params table Parameters as key-value table
 
 ---@class LlmResult
 ---@field ok boolean
 ---@field content? string Response text (when ok=true)
 ---@field model? string Model name from response
 ---@field session_id? string Session ID (new or existing)
+---@field stop_reason? "end_turn"|"tool_use"|"max_tokens" Why the LLM stopped generating
+---@field intents? ActionIntent[] Tool-use intents (present when stop_reason="tool_use")
 ---@field error? string Error message (when ok=false)
----@field error_kind? "permission_denied"|"missing_api_key"|"invalid_options"|"timeout"|"dns"|"connection_refused"|"connection_reset"|"tls"|"too_large"|"network"|"parse_error"|"auth_error"|"not_found"|"rate_limit"|"server_error"|"http_error"|"request_build_error"|"internal"
+---@field error_kind? "permission_denied"|"missing_api_key"|"invalid_options"|"timeout"|"dns"|"connection_refused"|"connection_reset"|"tls"|"too_large"|"network"|"parse_error"|"auth_error"|"not_found"|"rate_limit"|"server_error"|"http_error"|"request_build_error"|"tool_loop_limit"|"internal"
 
 --- Send a chat prompt to an LLM provider.
 --- Requires `Capability::LLM`.
@@ -551,13 +561,35 @@ function orcs.unhook(id) end
 ---@return table Result from the dispatched tool
 function orcs.dispatch(name, args) end
 
---- Get structured schemas for all registered tools.
+--- Get structured schemas for all registered tools (legacy format).
 ---@return ToolSchema[]
 function orcs.tool_schemas() end
 
 --- Get formatted tool reference text for prompt embedding.
 ---@return string
 function orcs.tool_descriptions() end
+
+---@class IntentDef
+---@field name string Intent name
+---@field description string Human-readable description
+---@field parameters table JSON Schema for parameters (native Lua table)
+
+--- Get all registered intent definitions in JSON Schema format.
+--- Returns native Lua tables (no cjson dependency).
+---@return IntentDef[]
+function orcs.intent_defs() end
+
+---@class RegisterIntentOpts
+---@field name string Intent name (must be unique)
+---@field description string Human-readable description
+---@field component string Component FQN that handles this intent
+---@field operation? string Operation name (default: "execute")
+---@field params? table<string, {type: string, description: string, required: boolean}> Parameter definitions
+
+--- Register a new intent definition (Component resolver).
+---@param def RegisterIntentOpts
+---@return OkErrorResult
+function orcs.register_intent(def) end
 
 -- ═══════════════════════════════════════════════════════════════════
 -- Properties
