@@ -36,13 +36,17 @@
 //! # Technical Debt
 //!
 //! - Streaming not supported (`stream: false` fixed)
-//! - Tool use / function calling not supported
+//! - Multi-turn tool loops not supported (Phase 6: resolve flow)
 
 use mlua::{Lua, Table};
-use orcs_types::intent::MessageContent;
+use orcs_types::intent::{ActionIntent, IntentDef, MessageContent, StopReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
+
+use crate::llm_adapter;
+use crate::tool_registry::IntentRegistry;
+use crate::types::serde_json_to_lua;
 
 /// Default timeout in seconds for LLM requests.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -174,6 +178,8 @@ struct LlmOpts {
     max_tokens: Option<u64>,
     timeout: u64,
     max_retries: u32,
+    /// Whether to send IntentDefs as tools to the LLM (default: true).
+    tools: bool,
 }
 
 impl LlmOpts {
@@ -216,6 +222,10 @@ impl LlmOpts {
             .and_then(|o| o.get::<u32>("max_retries").ok())
             .unwrap_or(DEFAULT_MAX_RETRIES);
 
+        let tools = opts
+            .and_then(|o| o.get::<bool>("tools").ok())
+            .unwrap_or(true);
+
         Ok(Self {
             provider,
             base_url,
@@ -227,6 +237,7 @@ impl LlmOpts {
             max_tokens,
             timeout,
             max_retries,
+            tools,
         })
     }
 }
@@ -491,8 +502,15 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     // Build messages from session history + current prompt
     let messages = build_messages(lua, &session_id, &prompt, &llm_opts);
 
+    // Build tools JSON from IntentRegistry (when opts.tools is true)
+    let tools_json = if llm_opts.tools {
+        build_tools_for_provider(lua, llm_opts.provider)
+    } else {
+        None
+    };
+
     // Build request body
-    let request_body = match build_request_body(&llm_opts, &messages) {
+    let request_body = match build_request_body(&llm_opts, &messages, tools_json.as_ref()) {
         Ok(body) => body,
         Err(e) => {
             let result = lua.create_table()?;
@@ -671,15 +689,23 @@ fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &s
 // ── Request Body Builders ──────────────────────────────────────────────
 
 /// Build the JSON request body for the given provider.
-fn build_request_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json::Value, String> {
+fn build_request_body(
+    opts: &LlmOpts,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     match opts.provider {
-        Provider::Ollama => build_ollama_body(opts, messages),
-        Provider::OpenAI => build_openai_body(opts, messages),
-        Provider::Anthropic => build_anthropic_body(opts, messages),
+        Provider::Ollama => build_ollama_body(opts, messages, tools),
+        Provider::OpenAI => build_openai_body(opts, messages, tools),
+        Provider::Anthropic => build_anthropic_body(opts, messages, tools),
     }
 }
 
-fn build_ollama_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json::Value, String> {
+fn build_ollama_body(
+    opts: &LlmOpts,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -709,10 +735,18 @@ fn build_ollama_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json:
         body["options"] = serde_json::Value::Object(options);
     }
 
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+
     Ok(body)
 }
 
-fn build_openai_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json::Value, String> {
+fn build_openai_body(
+    opts: &LlmOpts,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -737,10 +771,18 @@ fn build_openai_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json:
         body["max_tokens"] = serde_json::json!(max);
     }
 
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+
     Ok(body)
 }
 
-fn build_anthropic_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json::Value, String> {
+fn build_anthropic_body(
+    opts: &LlmOpts,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     // Anthropic: system prompt is top-level, NOT in messages.
     // Filter out any system messages from the messages array.
     let msgs: Vec<serde_json::Value> = messages
@@ -774,7 +816,129 @@ fn build_anthropic_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_js
         body["temperature"] = serde_json::json!(temp);
     }
 
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+
     Ok(body)
+}
+
+// ── Tools JSON Builders ──────────────────────────────────────────────
+
+/// Build tools JSON from IntentRegistry for the given provider.
+///
+/// Returns `None` if the registry is empty or not initialized.
+fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<serde_json::Value> {
+    let registry = lua.app_data_ref::<IntentRegistry>()?;
+    if registry.is_empty() {
+        return None;
+    }
+    let defs = registry.all();
+    let tools = match provider {
+        Provider::Anthropic => build_tools_anthropic_format(defs),
+        Provider::Ollama | Provider::OpenAI => build_tools_openai_format(defs),
+    };
+    Some(tools)
+}
+
+/// Build tools array in OpenAI/Ollama format.
+///
+/// ```json
+/// [{ "type": "function", "function": { "name": "...", "description": "...", "parameters": {...} } }]
+/// ```
+fn build_tools_openai_format(defs: &[IntentDef]) -> serde_json::Value {
+    let tools: Vec<serde_json::Value> = defs
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.parameters,
+                }
+            })
+        })
+        .collect();
+    serde_json::Value::Array(tools)
+}
+
+/// Build tools array in Anthropic format.
+///
+/// ```json
+/// [{ "name": "...", "description": "...", "input_schema": {...} }]
+/// ```
+fn build_tools_anthropic_format(defs: &[IntentDef]) -> serde_json::Value {
+    let tools: Vec<serde_json::Value> = defs
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.name,
+                "description": d.description,
+                "input_schema": d.parameters,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(tools)
+}
+
+// ── Parsed LLM Response ─────────────────────────────────────────────
+
+/// Provider-agnostic parsed LLM response.
+struct ParsedLlmResponse {
+    /// Text content extracted from the response.
+    content: String,
+    /// Model name from the response (may differ from requested model).
+    model: Option<String>,
+    /// Normalized stop reason.
+    stop_reason: StopReason,
+    /// Tool-use intents extracted from the response (empty if text-only).
+    intents: Vec<ActionIntent>,
+}
+
+/// Parse a provider response JSON into a unified `ParsedLlmResponse`.
+fn parse_provider_response(
+    provider: Provider,
+    json: &serde_json::Value,
+) -> Result<ParsedLlmResponse, String> {
+    let blocks = match provider {
+        Provider::Ollama => llm_adapter::extract_content_ollama(json),
+        Provider::OpenAI => llm_adapter::extract_content_openai(json),
+        Provider::Anthropic => llm_adapter::extract_content_anthropic(json),
+    };
+
+    let stop_reason = match provider {
+        Provider::Ollama => llm_adapter::extract_stop_reason_ollama(json),
+        Provider::OpenAI => llm_adapter::extract_stop_reason_openai(json),
+        Provider::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
+    };
+
+    let intents = llm_adapter::content_blocks_to_intents(&blocks);
+    let message_content = llm_adapter::blocks_to_message_content(blocks);
+
+    // Extract text for session history and backward-compatible `content` field
+    let content = message_content.text().unwrap_or("").to_string();
+
+    let model = json
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    Ok(ParsedLlmResponse {
+        content,
+        model,
+        stop_reason,
+        intents,
+    })
+}
+
+/// Convert StopReason to a Lua-friendly string.
+fn stop_reason_to_str(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::ToolUse => "tool_use",
+        StopReason::MaxTokens => "max_tokens",
+    }
 }
 
 // ── Response Parsers ───────────────────────────────────────────────────
@@ -839,15 +1003,9 @@ fn parse_response(
         ))
     })?;
 
-    // Extract content based on provider
-    let (content, model) = match opts.provider {
-        Provider::Ollama => parse_ollama_response(&json),
-        Provider::OpenAI => parse_openai_response(&json),
-        Provider::Anthropic => parse_anthropic_response(&json),
-    };
-
-    let content = match content {
-        Ok(c) => c,
+    // Extract content via adapter-based parsing
+    let parsed = match parse_provider_response(opts.provider, &json) {
+        Ok(p) => p,
         Err(e) => {
             let result = lua.create_table()?;
             result.set("ok", false)?;
@@ -858,83 +1016,31 @@ fn parse_response(
         }
     };
 
-    // Update session history
-    update_session(lua, session_id, user_prompt, &content);
+    // Update session history (text portion only)
+    update_session(lua, session_id, user_prompt, &parsed.content);
 
     // Build success response
     let result = lua.create_table()?;
     result.set("ok", true)?;
-    result.set("content", content)?;
-    result.set("model", model.unwrap_or_else(|| opts.model.clone()))?;
+    result.set("content", parsed.content)?;
+    result.set("model", parsed.model.unwrap_or_else(|| opts.model.clone()))?;
     result.set("session_id", session_id)?;
+    result.set("stop_reason", stop_reason_to_str(&parsed.stop_reason))?;
+
+    // Intents array (empty when text-only response)
+    if !parsed.intents.is_empty() {
+        let intents_table = lua.create_table()?;
+        for (i, intent) in parsed.intents.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("id", intent.id.as_str())?;
+            entry.set("name", intent.name.as_str())?;
+            entry.set("params", serde_json_to_lua(&intent.params, lua)?)?;
+            intents_table.set(i + 1, entry)?;
+        }
+        result.set("intents", intents_table)?;
+    }
 
     Ok(result)
-}
-
-fn parse_ollama_response(json: &serde_json::Value) -> (Result<String, String>, Option<String>) {
-    let content = json
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            format!(
-                "Ollama: missing message.content in response: {}",
-                truncate_for_error(&json.to_string(), 200)
-            )
-        });
-
-    let model = json
-        .get("model")
-        .and_then(|m| m.as_str())
-        .map(|s| s.to_string());
-
-    (content, model)
-}
-
-fn parse_openai_response(json: &serde_json::Value) -> (Result<String, String>, Option<String>) {
-    let content = json
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            format!(
-                "OpenAI: missing choices[0].message.content in response: {}",
-                truncate_for_error(&json.to_string(), 200)
-            )
-        });
-
-    let model = json
-        .get("model")
-        .and_then(|m| m.as_str())
-        .map(|s| s.to_string());
-
-    (content, model)
-}
-
-fn parse_anthropic_response(json: &serde_json::Value) -> (Result<String, String>, Option<String>) {
-    let content = json
-        .get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("text"))
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            format!(
-                "Anthropic: missing content[0].text in response: {}",
-                truncate_for_error(&json.to_string(), 200)
-            )
-        });
-
-    let model = json
-        .get("model")
-        .and_then(|m| m.as_str())
-        .map(|s| s.to_string());
-
-    (content, model)
 }
 
 // ── Error Helpers ──────────────────────────────────────────────────────
@@ -1206,13 +1312,14 @@ mod tests {
             max_tokens: None,
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
         let messages = vec![Message {
             role: "user".into(),
             content: "hello".into(),
         }];
 
-        let body = build_ollama_body(&opts, &messages).expect("should build body");
+        let body = build_ollama_body(&opts, &messages, None).expect("should build body");
         assert_eq!(body["model"], "llama3.2");
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][0]["role"], "user");
@@ -1233,13 +1340,14 @@ mod tests {
             max_tokens: Some(4096),
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
         let messages = vec![Message {
             role: "user".into(),
             content: "hi".into(),
         }];
 
-        let body = build_ollama_body(&opts, &messages).expect("should build body");
+        let body = build_ollama_body(&opts, &messages, None).expect("should build body");
         assert_eq!(body["options"]["temperature"], 0.7);
         assert_eq!(body["options"]["num_predict"], 4096);
     }
@@ -1257,6 +1365,7 @@ mod tests {
             max_tokens: Some(1024),
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
         let messages = vec![
             Message {
@@ -1269,7 +1378,7 @@ mod tests {
             },
         ];
 
-        let body = build_openai_body(&opts, &messages).expect("should build body");
+        let body = build_openai_body(&opts, &messages, None).expect("should build body");
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0.5);
@@ -1293,6 +1402,7 @@ mod tests {
             max_tokens: None,
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
         // messages might include a system message from non-Anthropic path,
         // but Anthropic builder should filter it out.
@@ -1307,7 +1417,7 @@ mod tests {
             },
         ];
 
-        let body = build_anthropic_body(&opts, &messages).expect("should build body");
+        let body = build_anthropic_body(&opts, &messages, None).expect("should build body");
 
         // System at top level
         assert_eq!(body["system"], "You are a coding assistant.");
@@ -1335,19 +1445,20 @@ mod tests {
             max_tokens: Some(8192),
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
         let messages = vec![Message {
             role: "user".into(),
             content: "hello".into(),
         }];
 
-        let body = build_anthropic_body(&opts, &messages).expect("should build body");
+        let body = build_anthropic_body(&opts, &messages, None).expect("should build body");
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["temperature"], 0.3);
         assert!(body.get("system").is_none(), "no system when not provided");
     }
 
-    // ── Response parser tests ──────────────────────────────────────────
+    // ── Response parser tests (via parse_provider_response) ────────────
 
     #[test]
     fn parse_ollama_response_success() {
@@ -1360,25 +1471,23 @@ mod tests {
             "done": true,
             "done_reason": "stop"
         });
-        let (content, model) = parse_ollama_response(&json);
-        assert_eq!(
-            content.expect("should parse content"),
-            "Hello! How can I help?"
+        let parsed =
+            parse_provider_response(Provider::Ollama, &json).expect("should parse ollama response");
+        assert_eq!(parsed.content, "Hello! How can I help?");
+        assert_eq!(parsed.model, Some("llama3.2".to_string()));
+        assert_eq!(parsed.stop_reason, StopReason::EndTurn);
+        assert!(
+            parsed.intents.is_empty(),
+            "text-only response has no intents"
         );
-        assert_eq!(model, Some("llama3.2".to_string()));
     }
 
     #[test]
-    fn parse_ollama_response_missing_content() {
+    fn parse_ollama_response_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "llama3.2"});
-        let (content, _) = parse_ollama_response(&json);
-        assert!(content.is_err(), "should error on missing content");
-        let err = content.expect_err("expected error");
-        assert!(
-            err.contains("missing message.content"),
-            "error should mention path, got: {}",
-            err
-        );
+        let parsed = parse_provider_response(Provider::Ollama, &json)
+            .expect("should parse even with missing message");
+        assert_eq!(parsed.content, "", "empty response → empty content");
     }
 
     #[test]
@@ -1400,16 +1509,20 @@ mod tests {
                 "total_tokens": 15
             }
         });
-        let (content, model) = parse_openai_response(&json);
-        assert_eq!(content.expect("should parse content"), "Hello from OpenAI!");
-        assert_eq!(model, Some("gpt-4o-2024-05-13".to_string()));
+        let parsed =
+            parse_provider_response(Provider::OpenAI, &json).expect("should parse openai response");
+        assert_eq!(parsed.content, "Hello from OpenAI!");
+        assert_eq!(parsed.model, Some("gpt-4o-2024-05-13".to_string()));
+        assert_eq!(parsed.stop_reason, StopReason::EndTurn);
+        assert!(parsed.intents.is_empty());
     }
 
     #[test]
-    fn parse_openai_response_missing_choices() {
+    fn parse_openai_response_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "gpt-4o"});
-        let (content, _) = parse_openai_response(&json);
-        assert!(content.is_err(), "should error on missing choices");
+        let parsed = parse_provider_response(Provider::OpenAI, &json)
+            .expect("should parse even with missing choices");
+        assert_eq!(parsed.content, "");
     }
 
     #[test]
@@ -1428,25 +1541,130 @@ mod tests {
                 "output_tokens": 8
             }
         });
-        let (content, model) = parse_anthropic_response(&json);
-        assert_eq!(
-            content.expect("should parse content"),
-            "Hello from Anthropic!"
-        );
-        assert_eq!(model, Some("claude-sonnet-4-20250514".to_string()));
+        let parsed = parse_provider_response(Provider::Anthropic, &json)
+            .expect("should parse anthropic response");
+        assert_eq!(parsed.content, "Hello from Anthropic!");
+        assert_eq!(parsed.model, Some("claude-sonnet-4-20250514".to_string()));
+        assert_eq!(parsed.stop_reason, StopReason::EndTurn);
+        assert!(parsed.intents.is_empty());
     }
 
     #[test]
-    fn parse_anthropic_response_missing_content() {
+    fn parse_anthropic_response_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "claude-sonnet-4-20250514"});
-        let (content, _) = parse_anthropic_response(&json);
-        assert!(content.is_err(), "should error on missing content");
-        let err = content.expect_err("expected error");
-        assert!(
-            err.contains("missing content[0].text"),
-            "error should mention path, got: {}",
-            err
-        );
+        let parsed = parse_provider_response(Provider::Anthropic, &json)
+            .expect("should parse even with missing content");
+        assert_eq!(parsed.content, "");
+    }
+
+    #[test]
+    fn parse_openai_tool_calls_response() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {
+                    "content": "Let me read that.",
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": "{\"path\":\"main.rs\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let parsed = parse_provider_response(Provider::OpenAI, &json)
+            .expect("should parse tool_calls response");
+        assert_eq!(parsed.content, "Let me read that.");
+        assert_eq!(parsed.stop_reason, StopReason::ToolUse);
+        assert_eq!(parsed.intents.len(), 1);
+        assert_eq!(parsed.intents[0].name, "read");
+        assert_eq!(parsed.intents[0].id, "call_abc");
+        assert_eq!(parsed.intents[0].params["path"], "main.rs");
+    }
+
+    #[test]
+    fn parse_anthropic_tool_use_response() {
+        let json = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                { "type": "text", "text": "I'll check." },
+                { "type": "tool_use", "id": "toolu_1", "name": "grep",
+                  "input": { "pattern": "fn main", "path": "." } }
+            ],
+            "stop_reason": "tool_use"
+        });
+        let parsed = parse_provider_response(Provider::Anthropic, &json)
+            .expect("should parse tool_use response");
+        assert_eq!(parsed.content, "I'll check.");
+        assert_eq!(parsed.stop_reason, StopReason::ToolUse);
+        assert_eq!(parsed.intents.len(), 1);
+        assert_eq!(parsed.intents[0].name, "grep");
+    }
+
+    #[test]
+    fn parse_ollama_tool_calls_response() {
+        let json = serde_json::json!({
+            "model": "llama3.2",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "exec",
+                        "arguments": { "cmd": "cargo test" }
+                    }
+                }]
+            },
+            "done": true
+        });
+        let parsed = parse_provider_response(Provider::Ollama, &json)
+            .expect("should parse ollama tool_calls");
+        assert_eq!(parsed.stop_reason, StopReason::ToolUse);
+        assert_eq!(parsed.intents.len(), 1);
+        assert_eq!(parsed.intents[0].name, "exec");
+        assert_eq!(parsed.intents[0].params["cmd"], "cargo test");
+    }
+
+    // ── Tools JSON builder tests ────────────────────────────────────────
+
+    #[test]
+    fn build_tools_openai_format_structure() {
+        let registry = IntentRegistry::new();
+        let tools = build_tools_openai_format(registry.all());
+        let arr = tools.as_array().expect("should be array");
+        assert_eq!(arr.len(), 8, "8 builtin tools");
+
+        let first = &arr[0];
+        assert_eq!(first["type"], "function");
+        assert_eq!(first["function"]["name"], "read");
+        assert!(first["function"]["description"].is_string());
+        assert!(first["function"]["parameters"].is_object());
+    }
+
+    #[test]
+    fn build_tools_anthropic_format_structure() {
+        let registry = IntentRegistry::new();
+        let tools = build_tools_anthropic_format(registry.all());
+        let arr = tools.as_array().expect("should be array");
+        assert_eq!(arr.len(), 8);
+
+        let first = &arr[0];
+        assert_eq!(first["name"], "read");
+        assert!(first["description"].is_string());
+        assert!(first["input_schema"].is_object());
+        // Should NOT have "type": "function" wrapper
+        assert!(first.get("type").is_none());
+    }
+
+    #[test]
+    fn stop_reason_to_str_values() {
+        assert_eq!(stop_reason_to_str(&StopReason::EndTurn), "end_turn");
+        assert_eq!(stop_reason_to_str(&StopReason::ToolUse), "tool_use");
+        assert_eq!(stop_reason_to_str(&StopReason::MaxTokens), "max_tokens");
     }
 
     // ── Session management tests ───────────────────────────────────────
@@ -1514,6 +1732,7 @@ mod tests {
             max_tokens: None,
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -1540,6 +1759,7 @@ mod tests {
             max_tokens: None,
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -1567,6 +1787,7 @@ mod tests {
             max_tokens: None,
             timeout: 120,
             max_retries: DEFAULT_MAX_RETRIES,
+            tools: true,
         };
 
         let msgs = build_messages(&lua, &sid, "second question", &opts);
