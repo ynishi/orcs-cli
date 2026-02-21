@@ -272,6 +272,18 @@ impl MessageContent {
     }
 }
 
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
 // ── ContentBlock ─────────────────────────────────────────────────────
 
 /// A single block within a structured message.

@@ -39,6 +39,7 @@
 //! - Tool use / function calling not supported
 
 use mlua::{Lua, Table};
+use orcs_types::intent::MessageContent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -139,10 +140,13 @@ impl Provider {
 // ── Session Store ──────────────────────────────────────────────────────
 
 /// A single message in the conversation history.
+///
+/// Supports both plain text and structured content blocks (tool_use, tool_result).
+/// Backward-compatible: `MessageContent::Text(s)` serializes as a plain string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
     role: String,
-    content: String,
+    content: MessageContent,
 }
 
 /// In-memory conversation store, keyed by session_id.
@@ -633,7 +637,7 @@ fn build_messages(lua: &Lua, session_id: &str, prompt: &str, opts: &LlmOpts) -> 
             if opts.provider != Provider::Anthropic {
                 messages.push(Message {
                     role: "system".to_string(),
-                    content: sys.clone(),
+                    content: MessageContent::Text(sys.clone()),
                 });
             }
         }
@@ -642,7 +646,7 @@ fn build_messages(lua: &Lua, session_id: &str, prompt: &str, opts: &LlmOpts) -> 
     // Add current user message
     messages.push(Message {
         role: "user".to_string(),
-        content: prompt.to_string(),
+        content: MessageContent::Text(prompt.to_string()),
     });
 
     messages
@@ -654,11 +658,11 @@ fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &s
         let history = store.0.entry(session_id.to_string()).or_default();
         history.push(Message {
             role: "user".to_string(),
-            content: user_msg.to_string(),
+            content: MessageContent::Text(user_msg.to_string()),
         });
         history.push(Message {
             role: "assistant".to_string(),
-            content: assistant_msg.to_string(),
+            content: MessageContent::Text(assistant_msg.to_string()),
         });
         lua.set_app_data(store);
     }
@@ -679,9 +683,10 @@ fn build_ollama_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json:
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
+            let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
             serde_json::json!({
                 "role": m.role,
-                "content": m.content,
+                "content": content_val,
             })
         })
         .collect();
@@ -711,9 +716,10 @@ fn build_openai_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_json:
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
+            let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
             serde_json::json!({
                 "role": m.role,
-                "content": m.content,
+                "content": content_val,
             })
         })
         .collect();
@@ -741,9 +747,10 @@ fn build_anthropic_body(opts: &LlmOpts, messages: &[Message]) -> Result<serde_js
         .iter()
         .filter(|m| m.role != "system")
         .map(|m| {
+            let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
             serde_json::json!({
                 "role": m.role,
-                "content": m.content,
+                "content": content_val,
             })
         })
         .collect();
@@ -1486,9 +1493,9 @@ mod tests {
         let history = store.0.get(&sid).expect("session should exist");
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "user");
-        assert_eq!(history[0].content, "hello");
+        assert_eq!(history[0].content.text(), Some("hello"));
         assert_eq!(history[1].role, "assistant");
-        assert_eq!(history[1].content, "world");
+        assert_eq!(history[1].content.text(), Some("world"));
     }
 
     #[test]
@@ -1512,9 +1519,9 @@ mod tests {
         let msgs = build_messages(&lua, &sid, "hi", &opts);
         assert_eq!(msgs.len(), 2, "system + user");
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, "Be helpful.");
+        assert_eq!(msgs[0].content.text(), Some("Be helpful."));
         assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[1].content, "hi");
+        assert_eq!(msgs[1].content.text(), Some("hi"));
     }
 
     #[test]
@@ -1567,11 +1574,11 @@ mod tests {
         // (system_prompt NOT added because history is non-empty)
         assert_eq!(msgs.len(), 3, "history(2) + new user(1)");
         assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[0].content, "first question");
+        assert_eq!(msgs[0].content.text(), Some("first question"));
         assert_eq!(msgs[1].role, "assistant");
-        assert_eq!(msgs[1].content, "first answer");
+        assert_eq!(msgs[1].content.text(), Some("first answer"));
         assert_eq!(msgs[2].role, "user");
-        assert_eq!(msgs[2].content, "second question");
+        assert_eq!(msgs[2].content.text(), Some("second question"));
     }
 
     // ── Error classification tests ─────────────────────────────────────
@@ -1918,8 +1925,8 @@ mod tests {
         assert_eq!(store.0.len(), 2, "should have 2 sessions");
         let h1 = store.0.get(&sid1).expect("session 1 should exist");
         assert_eq!(h1.len(), 2);
-        assert_eq!(h1[0].content, "q1");
-        assert_eq!(h1[1].content, "a1");
+        assert_eq!(h1[0].content.text(), Some("q1"));
+        assert_eq!(h1[1].content.text(), Some("a1"));
     }
 
     #[test]
