@@ -39,7 +39,7 @@
 //! - Multi-turn tool loops not supported (Phase 6: resolve flow)
 
 use mlua::{Lua, Table};
-use orcs_types::intent::{ActionIntent, IntentDef, MessageContent, StopReason};
+use orcs_types::intent::{ActionIntent, IntentDef, MessageContent, Role, StopReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -152,7 +152,7 @@ impl Provider {
 /// Backward-compatible: `MessageContent::Text(s)` serializes as a plain string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
-    role: String,
+    role: Role,
     content: MessageContent,
 }
 
@@ -586,18 +586,18 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             // Build assistant message with ContentBlocks (preserves tool_use blocks)
             let assistant_blocks = build_assistant_content_blocks(&parsed_resp);
             messages.push(Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: assistant_blocks.clone(),
             });
-            append_message(lua, &session_id, "assistant", assistant_blocks);
+            append_message(lua, &session_id, Role::Assistant, assistant_blocks);
 
             // Dispatch each intent and collect tool results
             let tool_result_content = dispatch_intents_to_results(lua, &parsed_resp.intents)?;
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: tool_result_content.clone(),
             });
-            append_message(lua, &session_id, "user", tool_result_content);
+            append_message(lua, &session_id, Role::User, tool_result_content);
 
             tracing::debug!(
                 "tool turn {}: resolved {} intents, continuing",
@@ -679,7 +679,7 @@ fn build_messages(lua: &Lua, session_id: &str, prompt: &str, opts: &LlmOpts) -> 
             // For Ollama/OpenAI, system goes in messages.
             if opts.provider != Provider::Anthropic {
                 messages.push(Message {
-                    role: "system".to_string(),
+                    role: Role::System,
                     content: MessageContent::Text(sys.clone()),
                 });
             }
@@ -688,7 +688,7 @@ fn build_messages(lua: &Lua, session_id: &str, prompt: &str, opts: &LlmOpts) -> 
 
     // Add current user message
     messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: MessageContent::Text(prompt.to_string()),
     });
 
@@ -700,11 +700,11 @@ fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &s
     if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
         let history = store.0.entry(session_id.to_string()).or_default();
         history.push(Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: MessageContent::Text(user_msg.to_string()),
         });
         history.push(Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Text(assistant_msg.to_string()),
         });
         lua.set_app_data(store);
@@ -712,13 +712,10 @@ fn update_session(lua: &Lua, session_id: &str, user_msg: &str, assistant_msg: &s
 }
 
 /// Append a single message to session history (supports ContentBlock::Blocks).
-fn append_message(lua: &Lua, session_id: &str, role: &str, content: MessageContent) {
+fn append_message(lua: &Lua, session_id: &str, role: Role, content: MessageContent) {
     if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
         let history = store.0.entry(session_id.to_string()).or_default();
-        history.push(Message {
-            role: role.to_string(),
-            content,
-        });
+        history.push(Message { role, content });
         lua.set_app_data(store);
     }
 }
@@ -815,7 +812,7 @@ fn message_to_openai_wire(m: &Message, stringify_args: bool) -> Vec<serde_json::
             // Tool results: one message per result with role "tool"
             for (tool_use_id, content) in &tool_results {
                 msgs.push(serde_json::json!({
-                    "role": "tool",
+                    "role": Role::Tool,
                     "tool_call_id": tool_use_id,
                     "content": content,
                 }));
@@ -914,7 +911,7 @@ fn build_anthropic_body(
     // Filter out any system messages from the messages array.
     let msgs: Vec<serde_json::Value> = messages
         .iter()
-        .filter(|m| m.role != "system")
+        .filter(|m| m.role != Role::System)
         .map(|m| {
             let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
             serde_json::json!({
@@ -1392,7 +1389,13 @@ fn lua_value_to_json(val: mlua::Value) -> serde_json::Value {
                 serde_json::Value::Object(map)
             }
         }
-        _ => serde_json::Value::Null,
+        other => {
+            tracing::debug!(
+                "lua_value_to_json: unconvertible Lua type '{}' mapped to null",
+                other.type_name()
+            );
+            serde_json::Value::Null
+        }
     }
 }
 
@@ -1670,7 +1673,7 @@ mod tests {
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
-            role: "user".into(),
+            role: Role::User,
             content: "hello".into(),
         }];
 
@@ -1700,7 +1703,7 @@ mod tests {
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
-            role: "user".into(),
+            role: Role::User,
             content: "hi".into(),
         }];
 
@@ -1728,11 +1731,11 @@ mod tests {
         };
         let messages = vec![
             Message {
-                role: "system".into(),
+                role: Role::System,
                 content: "You are helpful.".into(),
             },
             Message {
-                role: "user".into(),
+                role: Role::User,
                 content: "hi".into(),
             },
         ];
@@ -1769,11 +1772,11 @@ mod tests {
         // but Anthropic builder should filter it out.
         let messages = vec![
             Message {
-                role: "system".into(),
+                role: Role::System,
                 content: "filtered out".into(),
             },
             Message {
-                role: "user".into(),
+                role: Role::User,
                 content: "hello".into(),
             },
         ];
@@ -1811,7 +1814,7 @@ mod tests {
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
         let messages = vec![Message {
-            role: "user".into(),
+            role: Role::User,
             content: "hello".into(),
         }];
 
@@ -2073,9 +2076,9 @@ mod tests {
             .expect("store should exist");
         let history = store.0.get(&sid).expect("session should exist");
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].role, Role::User);
         assert_eq!(history[0].content.text(), Some("hello"));
-        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].role, Role::Assistant);
         assert_eq!(history[1].content.text(), Some("world"));
     }
 
@@ -2102,9 +2105,9 @@ mod tests {
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
         assert_eq!(msgs.len(), 2, "system + user");
-        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[0].content.text(), Some("Be helpful."));
-        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].role, Role::User);
         assert_eq!(msgs[1].content.text(), Some("hi"));
     }
 
@@ -2132,7 +2135,7 @@ mod tests {
         let msgs = build_messages(&lua, &sid, "hi", &opts);
         // Anthropic: system prompt NOT added to messages (handled at request body level)
         assert_eq!(msgs.len(), 1, "only user message for Anthropic");
-        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].role, Role::User);
     }
 
     #[test]
@@ -2163,11 +2166,11 @@ mod tests {
         // History has 2 messages + 1 new user message = 3
         // (system_prompt NOT added because history is non-empty)
         assert_eq!(msgs.len(), 3, "history(2) + new user(1)");
-        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[0].content.text(), Some("first question"));
-        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].content.text(), Some("first answer"));
-        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].role, Role::User);
         assert_eq!(msgs[2].content.text(), Some("second question"));
     }
 
@@ -3026,7 +3029,7 @@ mod tests {
         append_message(
             &lua,
             session_id,
-            "user",
+            Role::User,
             MessageContent::Text("hello".to_string()),
         );
 
@@ -3036,7 +3039,7 @@ mod tests {
             .expect("store should exist");
         let history = store.0.get(session_id).expect("session should exist");
         assert_eq!(history.len(), 1, "should have 1 message");
-        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].role, Role::User);
         assert_eq!(
             history[0].content.text().expect("should have text"),
             "hello"
@@ -3066,7 +3069,7 @@ mod tests {
                 input: serde_json::json!({"path": "/tmp/f"}),
             },
         ]);
-        append_message(&lua, session_id, "assistant", blocks);
+        append_message(&lua, session_id, Role::Assistant, blocks);
 
         let store = lua
             .app_data_ref::<SessionStore>()
@@ -3084,7 +3087,7 @@ mod tests {
     #[test]
     fn openai_wire_text_message() {
         let msg = Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: MessageContent::Text("hello".to_string()),
         };
         let wire = message_to_openai_wire(&msg, true);
@@ -3098,7 +3101,7 @@ mod tests {
         use orcs_types::intent::ContentBlock;
 
         let msg = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Blocks(vec![
                 ContentBlock::Text {
                     text: "Let me read that.".to_string(),
@@ -3138,7 +3141,7 @@ mod tests {
         use orcs_types::intent::ContentBlock;
 
         let msg = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
                 id: "call_1".to_string(),
                 name: "exec".to_string(),
@@ -3170,7 +3173,7 @@ mod tests {
         use orcs_types::intent::ContentBlock;
 
         let msg = Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: MessageContent::Blocks(vec![
                 ContentBlock::ToolResult {
                     tool_use_id: "call_1".to_string(),
@@ -3206,7 +3209,7 @@ mod tests {
         use orcs_types::intent::ContentBlock;
 
         let msg = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Blocks(vec![
                 ContentBlock::ToolUse {
                     id: "c1".to_string(),
@@ -3232,7 +3235,7 @@ mod tests {
     #[test]
     fn openai_wire_empty_blocks_fallback() {
         let msg = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Blocks(vec![]),
         };
         let wire = message_to_openai_wire(&msg, true);

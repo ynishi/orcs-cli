@@ -109,10 +109,10 @@ pub struct IntentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_latency_ms: Option<u64>,
 
-    /// Issuer's confidence that this intent is correct (0.0–1.0).
+    /// Issuer's confidence that this intent is correct.
     /// Below a threshold → Human-in-the-Loop confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<f64>,
+    pub confidence: Option<Confidence>,
 }
 
 // ── IntentSource ─────────────────────────────────────────────────────
@@ -140,6 +140,64 @@ pub enum Priority {
     Normal,
     High,
     Critical,
+}
+
+// ── Confidence ──────────────────────────────────────────────────────
+
+/// Confidence score in the range `[0.0, 1.0]`.
+///
+/// Values outside the range (including `NaN` and infinities) are rejected
+/// at construction time.  Below a configurable threshold this triggers
+/// Human-in-the-Loop confirmation.
+///
+/// ```
+/// use orcs_types::intent::Confidence;
+///
+/// assert!(Confidence::new(0.95).is_some());
+/// assert!(Confidence::new(-0.1).is_none());
+/// assert!(Confidence::new(1.1).is_none());
+/// assert!(Confidence::new(f64::NAN).is_none());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Confidence(f64);
+
+impl Confidence {
+    /// Creates a `Confidence` from a raw `f64`.
+    ///
+    /// Returns `None` if the value is outside `[0.0, 1.0]` or is not finite.
+    pub fn new(value: f64) -> Option<Self> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the inner `f64` value.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Serialize for Confidence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Confidence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = f64::deserialize(deserializer)?;
+        Self::new(v).ok_or_else(|| {
+            serde::de::Error::custom(format!("confidence must be in [0.0, 1.0], got {v}"))
+        })
+    }
+}
+
+impl std::fmt::Display for Confidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.2}", self.0)
+    }
 }
 
 // ── IntentResolver ───────────────────────────────────────────────────
@@ -182,10 +240,6 @@ pub struct IntentDef {
 
     /// Where this intent gets resolved.
     pub resolver: IntentResolver,
-
-    /// Default metadata applied when the intent is created from this def.
-    #[allow(dead_code)]
-    pub default_meta: IntentMeta,
 }
 
 // ── IntentResult ─────────────────────────────────────────────────────
@@ -235,12 +289,17 @@ pub enum StopReason {
 // ── Role ─────────────────────────────────────────────────────────────
 
 /// Conversation message role.
+///
+/// Domain roles (System, User, Assistant) plus wire-format roles (Tool)
+/// needed for OpenAI/Ollama tool result messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
+    /// Tool result feedback (OpenAI/Ollama wire format: `role: "tool"`).
+    Tool,
 }
 
 // ── MessageContent ───────────────────────────────────────────────────
@@ -346,15 +405,14 @@ mod tests {
             source: IntentSource::System,
             priority: Some(Priority::High),
             expected_latency_ms: Some(500),
-            confidence: Some(0.95),
+            confidence: Confidence::new(0.95),
         };
         let intent = ActionIntent::new("read", serde_json::json!({})).with_meta(meta);
         assert_eq!(intent.meta.source, IntentSource::System);
         assert_eq!(intent.meta.priority, Some(Priority::High));
         assert_eq!(intent.meta.expected_latency_ms, Some(500));
-        assert!(
-            (intent.meta.confidence.expect("should have confidence") - 0.95).abs() < f64::EPSILON
-        );
+        let c = intent.meta.confidence.expect("should have confidence");
+        assert!((c.get() - 0.95).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -487,7 +545,6 @@ mod tests {
                 "required": ["path"]
             }),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         };
         assert_eq!(def.name, "read");
         assert_eq!(def.resolver, IntentResolver::Internal);
@@ -568,12 +625,57 @@ mod tests {
             (Role::System, r#""system""#),
             (Role::User, r#""user""#),
             (Role::Assistant, r#""assistant""#),
+            (Role::Tool, r#""tool""#),
         ];
         for (variant, expected) in cases {
             let json = serde_json::to_string(&variant).expect("serialize Role");
             assert_eq!(json, expected, "Role::{variant:?}");
             let back: Role = serde_json::from_str(&json).expect("deserialize Role");
             assert_eq!(back, variant);
+        }
+    }
+
+    // ── Confidence ────────────────────────────────────────────────
+
+    #[test]
+    fn confidence_valid_range() {
+        assert!(Confidence::new(0.0).is_some());
+        assert!(Confidence::new(0.5).is_some());
+        assert!(Confidence::new(1.0).is_some());
+    }
+
+    #[test]
+    fn confidence_rejects_out_of_range() {
+        assert!(Confidence::new(-0.01).is_none());
+        assert!(Confidence::new(1.01).is_none());
+        assert!(Confidence::new(f64::NAN).is_none());
+        assert!(Confidence::new(f64::INFINITY).is_none());
+        assert!(Confidence::new(f64::NEG_INFINITY).is_none());
+    }
+
+    #[test]
+    fn confidence_get_returns_inner() {
+        let c = Confidence::new(0.75).expect("valid");
+        assert!((c.get() - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn confidence_serde_roundtrip() {
+        let c = Confidence::new(0.42).expect("valid");
+        let json = serde_json::to_string(&c).expect("serialize");
+        assert_eq!(json, "0.42");
+        let back: Confidence = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn confidence_deserialize_rejects_invalid() {
+        let bad_cases = ["1.5", "-0.1", "\"NaN\""];
+        for case in bad_cases {
+            assert!(
+                serde_json::from_str::<Confidence>(case).is_err(),
+                "should reject: {case}"
+            );
         }
     }
 

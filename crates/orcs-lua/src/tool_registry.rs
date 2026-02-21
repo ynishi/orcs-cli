@@ -22,7 +22,7 @@
 use crate::error::LuaError;
 use crate::types::serde_json_to_lua;
 use mlua::{Lua, Table};
-use orcs_types::intent::{IntentDef, IntentMeta, IntentResolver};
+use orcs_types::intent::{IntentDef, IntentResolver};
 
 // ── IntentRegistry ───────────────────────────────────────────────────
 
@@ -113,7 +113,6 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
             description: "Read file contents. Path relative to project root.".into(),
             parameters: json_schema(&[("path", "File path to read", true)]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "write".into(),
@@ -123,7 +122,6 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
                 ("content", "Content to write", true),
             ]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "grep".into(),
@@ -133,7 +131,6 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
                 ("path", "File or directory to search in", true),
             ]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "glob".into(),
@@ -143,21 +140,18 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
                 ("dir", "Base directory (defaults to project root)", false),
             ]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "mkdir".into(),
             description: "Create directory (with parents).".into(),
             parameters: json_schema(&[("path", "Directory path to create", true)]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "remove".into(),
             description: "Remove file or directory.".into(),
             parameters: json_schema(&[("path", "Path to remove", true)]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "mv".into(),
@@ -167,14 +161,12 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
                 ("dst", "Destination path", true),
             ]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
         IntentDef {
             name: "exec".into(),
             description: "Execute shell command. cwd = project root.".into(),
             parameters: json_schema(&[("cmd", "Shell command to execute", true)]),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         },
     ]
 }
@@ -188,7 +180,7 @@ fn builtin_intent_defs() -> Vec<IntentDef> {
 /// 3. Unknown name → error
 fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
     let resolver = {
-        let registry = ensure_registry(lua);
+        let registry = ensure_registry(lua)?;
         match registry.get(name) {
             Some(def) => def.resolver.clone(),
             None => {
@@ -344,18 +336,21 @@ fn dispatch_component(
 // ── Registry Helpers ─────────────────────────────────────────────────
 
 /// Ensure IntentRegistry exists in app_data. Returns a reference.
-fn ensure_registry(lua: &Lua) -> mlua::AppDataRef<'_, IntentRegistry> {
+fn ensure_registry(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, IntentRegistry>> {
     if lua.app_data_ref::<IntentRegistry>().is_none() {
         lua.set_app_data(IntentRegistry::new());
     }
-    // This is safe because we just ensured it exists above.
-    lua.app_data_ref::<IntentRegistry>()
-        .expect("IntentRegistry should exist after ensure")
+    lua.app_data_ref::<IntentRegistry>().ok_or_else(|| {
+        mlua::Error::RuntimeError("IntentRegistry not available after initialization".into())
+    })
 }
 
 /// Generates formatted tool descriptions from the registry.
 pub fn generate_descriptions(lua: &Lua) -> String {
-    let registry = ensure_registry(lua);
+    let registry = match ensure_registry(lua) {
+        Ok(r) => r,
+        Err(_) => return "IntentRegistry not available.\n".to_string(),
+    };
 
     let mut out = String::from("Available tools (use via orcs.dispatch):\n\n");
 
@@ -437,7 +432,7 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
 
     // orcs.tool_schemas() -> legacy Lua table format (backward compat)
     let schemas_fn = lua.create_function(|lua, ()| {
-        let registry = ensure_registry(lua);
+        let registry = ensure_registry(lua)?;
         let result = lua.create_table()?;
 
         for (i, def) in registry.all().iter().enumerate() {
@@ -483,7 +478,7 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
 
     // orcs.intent_defs() -> JSON Schema format for LLM tools parameter
     let intent_defs_fn = lua.create_function(|lua, ()| {
-        let registry = ensure_registry(lua);
+        let registry = ensure_registry(lua)?;
         let result = lua.create_table()?;
 
         for (i, def) in registry.all().iter().enumerate() {
@@ -565,7 +560,6 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
                 component_fqn,
                 operation,
             },
-            default_meta: IntentMeta::default(),
         };
 
         // Mutate registry
@@ -667,7 +661,6 @@ mod tests {
                 component_fqn: "lua::my_comp".into(),
                 operation: "execute".into(),
             },
-            default_meta: IntentMeta::default(),
         };
         registry
             .register(def)
@@ -684,7 +677,6 @@ mod tests {
             description: "duplicate".into(),
             parameters: serde_json::json!({}),
             resolver: IntentResolver::Internal,
-            default_meta: IntentMeta::default(),
         };
         let err = registry.register(def).expect_err("should reject duplicate");
         assert!(

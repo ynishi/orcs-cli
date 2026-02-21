@@ -90,8 +90,8 @@ pub use construct::TryNew;
 pub use error::{assert_error_code, assert_error_codes, ErrorCode};
 pub use id::{ChannelId, ComponentId, EventId, PrincipalId, RequestId};
 pub use intent::{
-    ActionIntent, ContentBlock, IntentDef, IntentMeta, IntentResolver, IntentResult, IntentSource,
-    MessageContent, Priority, Role, StopReason,
+    ActionIntent, Confidence, ContentBlock, IntentDef, IntentMeta, IntentResolver, IntentResult,
+    IntentSource, MessageContent, Priority, Role, StopReason,
 };
 pub use principal::Principal;
 pub use scope::SignalScope;

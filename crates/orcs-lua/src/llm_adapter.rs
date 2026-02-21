@@ -18,6 +18,7 @@
 //! Later phases wire this into `llm_command.rs`'s response flow.
 
 use orcs_types::intent::{ActionIntent, ContentBlock, MessageContent, StopReason};
+use tracing::warn;
 
 // ── ContentBlock Extraction ─────────────────────────────────────────
 
@@ -78,6 +79,13 @@ pub fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
                 .unwrap_or("")
                 .to_string();
 
+            if id.is_empty() {
+                warn!("OpenAI tool_call has empty id");
+            }
+            if name.is_empty() {
+                warn!("OpenAI tool_call has empty function name");
+            }
+
             // OpenAI sends arguments as a JSON string, not an object
             let input = func
                 .get("arguments")
@@ -136,6 +144,14 @@ pub fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> 
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+
+                if id.is_empty() {
+                    warn!("Anthropic tool_use block has empty id");
+                }
+                if name.is_empty() {
+                    warn!("Anthropic tool_use block has empty name");
+                }
+
                 // Anthropic sends input as an object directly (not a string)
                 let input = item
                     .get("input")
@@ -200,6 +216,10 @@ pub fn extract_content_ollama(json: &serde_json::Value) -> Vec<ContentBlock> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+
+            if name.is_empty() {
+                warn!("Ollama tool_call has empty function name");
+            }
 
             // Ollama sends arguments as an object (not a string)
             // but also supports the OpenAI string format
