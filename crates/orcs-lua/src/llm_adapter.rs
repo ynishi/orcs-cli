@@ -12,10 +12,10 @@
 //! This module normalizes all three into `Vec<ContentBlock>` and
 //! `Vec<ActionIntent>`, plus a unified `StopReason`.
 //!
-//! # Phase 2 Scope
+//! # Design
 //!
 //! Pure data transformation — no Lua interaction, no side effects.
-//! Later phases wire this into `llm_command.rs`'s response flow.
+//! Used by `llm_command.rs` to normalize provider responses.
 
 use orcs_types::intent::{ActionIntent, ContentBlock, MessageContent, StopReason};
 use tracing::warn;
