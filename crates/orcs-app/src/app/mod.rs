@@ -276,12 +276,9 @@ impl OrcsApp {
         Ok(())
     }
 
-    /// Returns the default history file path (`~/.orcs/history`).
-    fn history_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".orcs")
-            .join("history")
+    /// Returns the history file path from config, or `~/.orcs/history` as default.
+    fn history_path(&self) -> PathBuf {
+        self.config.paths.history_file_or_default()
     }
 
     /// Spawns a dedicated OS thread running rustyline for line editing.
@@ -579,7 +576,7 @@ impl OrcsApp {
 
         // Spawn readline thread and install ExternalPrinter into shared slot
         // (tracing MakeWriter also reads this slot)
-        let (mut readline_rx, printer) = Self::spawn_readline_thread(Self::history_path());
+        let (mut readline_rx, printer) = Self::spawn_readline_thread(self.history_path());
         if let Some(p) = printer {
             self.printer_slot.set(p);
         }

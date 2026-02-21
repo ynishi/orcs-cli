@@ -78,6 +78,13 @@ struct Args {
     #[arg(long)]
     experimental: bool,
 
+    /// Run in sandbox mode with isolated state (sessions, builtins, history, logs).
+    ///
+    /// Uses a temporary directory if DIR is omitted. Global config is skipped.
+    /// Useful for clean-install testing and demos.
+    #[arg(long, value_name = "DIR")]
+    sandbox: Option<Option<PathBuf>>,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -95,6 +102,9 @@ struct CliConfigResolver {
     session_path: Option<PathBuf>,
     builtins_dir: Option<PathBuf>,
     profile: Option<String>,
+    /// Sandbox root directory. When set, all `~/.orcs/` paths are redirected
+    /// here and global config is skipped (clean-install simulation).
+    sandbox_dir: Option<PathBuf>,
 }
 
 impl CliConfigResolver {
@@ -106,6 +116,13 @@ impl CliConfigResolver {
             })
         });
 
+        // --sandbox: resolve to explicit dir or auto-generated temp dir
+        let sandbox_dir = args.sandbox.as_ref().map(|opt_path| {
+            opt_path.clone().unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("orcs-sandbox-{}", std::process::id()))
+            })
+        });
+
         Self {
             project_root,
             debug: args.debug,
@@ -114,6 +131,7 @@ impl CliConfigResolver {
             session_path: args.session_path.clone(),
             builtins_dir: args.builtins_dir.clone(),
             profile: args.profile.clone(),
+            sandbox_dir,
         }
     }
 }
@@ -122,11 +140,25 @@ impl ConfigResolver for CliConfigResolver {
     fn resolve(&self) -> Result<OrcsConfig, ConfigError> {
         let mut loader = ConfigLoader::new().with_project_root(&self.project_root);
 
+        // Sandbox: skip global config (clean-install simulation)
+        if self.sandbox_dir.is_some() {
+            loader = loader.skip_global_config();
+        }
+
         if let Some(ref profile) = self.profile {
             loader = loader.with_profile(profile);
         }
 
         let mut config = loader.load()?;
+
+        // Sandbox: redirect all ~/.orcs/ paths to sandbox dir
+        if let Some(ref sandbox) = self.sandbox_dir {
+            config.paths.session_dir = Some(sandbox.join("sessions"));
+            config.paths.history_file = Some(sandbox.join("history"));
+            config.components.builtins_dir = sandbox.join("builtins");
+            config.components.paths = vec![sandbox.join("components")];
+            config.scripts.dirs = vec![sandbox.join("scripts")];
+        }
 
         // CLI args override (highest priority)
         if self.debug {
@@ -165,8 +197,26 @@ async fn main() -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
-    // Open persistent log file (~/.orcs/logs/orcs.log)
-    let log_file = open_log_file();
+    // Resolve sandbox directory (before config load — needed for log path)
+    let sandbox_dir: Option<PathBuf> = args.sandbox.as_ref().map(|opt_path| {
+        opt_path.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("orcs-sandbox-{}", std::process::id()))
+        })
+    });
+
+    if let Some(ref dir) = sandbox_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!(
+                "Error: cannot create sandbox directory {}: {e}",
+                dir.display()
+            );
+            std::process::exit(1);
+        }
+        println!("Sandbox: {}", dir.display());
+    }
+
+    // Open persistent log file (sandbox overrides to <sandbox>/logs/)
+    let log_file = open_log_file(sandbox_dir.as_deref());
 
     // Single writer that tees to both:
     //   1. ExternalPrinter (interactive) or stderr (fallback) — terminal display
@@ -256,14 +306,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Opens the persistent log file at `~/.orcs/logs/orcs.log`.
+/// Opens the persistent log file.
+///
+/// When `override_dir` is `Some`, logs are written to `<dir>/logs/orcs.log`.
+/// Otherwise defaults to `~/.orcs/logs/orcs.log`.
 ///
 /// Returns `None` if the directory/file cannot be created (non-fatal).
-fn open_log_file() -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".orcs")
-        .join("logs");
+fn open_log_file(
+    override_dir: Option<&std::path::Path>,
+) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
+    let log_dir = override_dir.map(|d| d.join("logs")).unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".orcs")
+            .join("logs")
+    });
 
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!(
@@ -315,6 +372,7 @@ mod tests {
             session_path,
             builtins_dir: None,
             profile: None,
+            sandbox_dir: None,
         }
     }
 
@@ -395,6 +453,7 @@ mod tests {
             force: false,
             profile: None,
             experimental: false,
+            sandbox: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -404,6 +463,7 @@ mod tests {
         assert!(!resolver.experimental);
         assert!(resolver.session_path.is_none());
         assert!(resolver.builtins_dir.is_none());
+        assert!(resolver.sandbox_dir.is_none());
         // project defaults to cwd
         assert!(resolver.project_root.exists());
     }
@@ -421,6 +481,7 @@ mod tests {
             force: false,
             profile: Some("rust-dev".into()),
             experimental: true,
+            sandbox: None,
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -473,5 +534,160 @@ mod tests {
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.components.load.contains(&"life_game".to_string()));
+    }
+
+    // --- Sandbox tests ---
+
+    /// Helper: creates a CliConfigResolver with sandbox enabled.
+    fn resolver_with_sandbox(sandbox_dir: PathBuf) -> CliConfigResolver {
+        let temp = std::env::temp_dir().join(format!(
+            "orcs-cli-sandbox-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("should create temp dir");
+        CliConfigResolver {
+            project_root: temp,
+            debug: false,
+            verbose: false,
+            experimental: false,
+            session_path: None,
+            builtins_dir: None,
+            profile: None,
+            sandbox_dir: Some(sandbox_dir),
+        }
+    }
+
+    #[test]
+    fn sandbox_redirects_session_dir() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let resolver = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.paths.session_dir, Some(sandbox.join("sessions")));
+    }
+
+    #[test]
+    fn sandbox_redirects_history_file() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let resolver = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.paths.history_file, Some(sandbox.join("history")));
+    }
+
+    #[test]
+    fn sandbox_redirects_builtins_dir() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let resolver = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.components.builtins_dir, sandbox.join("builtins"));
+    }
+
+    #[test]
+    fn sandbox_redirects_component_paths() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let resolver = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.components.paths, vec![sandbox.join("components")]);
+    }
+
+    #[test]
+    fn sandbox_redirects_script_dirs() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let resolver = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.scripts.dirs, vec![sandbox.join("scripts")]);
+    }
+
+    #[test]
+    fn sandbox_cli_overrides_take_precedence() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let mut resolver = resolver_with_sandbox(sandbox);
+        // Explicit CLI overrides should win over sandbox defaults
+        let custom_session = PathBuf::from("/custom/session-override");
+        let custom_builtins = PathBuf::from("/custom/builtins-override");
+        resolver.session_path = Some(custom_session.clone());
+        resolver.builtins_dir = Some(custom_builtins.clone());
+
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.paths.session_dir, Some(custom_session));
+        assert_eq!(config.components.builtins_dir, custom_builtins);
+    }
+
+    #[test]
+    fn from_args_sandbox_none_when_absent() {
+        let args = Args {
+            debug: false,
+            verbose: false,
+            project: None,
+            resume: None,
+            session_path: None,
+            builtins_dir: None,
+            install_builtins: false,
+            force: false,
+            profile: None,
+            experimental: false,
+            sandbox: None,
+            command: vec![],
+        };
+        let resolver = CliConfigResolver::from_args(&args);
+        assert!(resolver.sandbox_dir.is_none());
+    }
+
+    #[test]
+    fn from_args_sandbox_auto_generates_temp_dir() {
+        let args = Args {
+            debug: false,
+            verbose: false,
+            project: None,
+            resume: None,
+            session_path: None,
+            builtins_dir: None,
+            install_builtins: false,
+            force: false,
+            profile: None,
+            experimental: false,
+            sandbox: Some(None), // --sandbox without DIR
+            command: vec![],
+        };
+        let resolver = CliConfigResolver::from_args(&args);
+        let sandbox = resolver.sandbox_dir.expect("should have sandbox dir");
+        assert!(
+            sandbox
+                .to_str()
+                .expect("should be valid UTF-8")
+                .contains("orcs-sandbox-"),
+            "auto-generated dir should contain 'orcs-sandbox-': {:?}",
+            sandbox
+        );
+    }
+
+    #[test]
+    fn from_args_sandbox_uses_explicit_dir() {
+        let explicit = PathBuf::from("/my/sandbox");
+        let args = Args {
+            debug: false,
+            verbose: false,
+            project: None,
+            resume: None,
+            session_path: None,
+            builtins_dir: None,
+            install_builtins: false,
+            force: false,
+            profile: None,
+            experimental: false,
+            sandbox: Some(Some(explicit.clone())),
+            command: vec![],
+        };
+        let resolver = CliConfigResolver::from_args(&args);
+        assert_eq!(resolver.sandbox_dir, Some(explicit));
     }
 }

@@ -231,6 +231,12 @@ pub struct PathsConfig {
 
     /// Cache directory.
     pub cache_dir: Option<PathBuf>,
+
+    /// Shell history file path.
+    ///
+    /// Set by `--sandbox` to redirect history to sandbox dir.
+    /// When `None`, defaults to `~/.orcs/history`.
+    pub history_file: Option<PathBuf>,
 }
 
 impl PathsConfig {
@@ -241,6 +247,9 @@ impl PathsConfig {
         if other.cache_dir.is_some() {
             self.cache_dir = other.cache_dir.clone();
         }
+        if other.history_file.is_some() {
+            self.history_file = other.history_file.clone();
+        }
     }
 
     /// Returns the session directory, falling back to default.
@@ -249,6 +258,17 @@ impl PathsConfig {
         self.session_dir
             .clone()
             .unwrap_or_else(crate::session::default_session_path)
+    }
+
+    /// Returns the history file path, falling back to `~/.orcs/history`.
+    #[must_use]
+    pub fn history_file_or_default(&self) -> PathBuf {
+        self.history_file.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".orcs")
+                .join("history")
+        })
     }
 }
 
@@ -1059,5 +1079,70 @@ max_history = 20
         assert!(global.get("scripts").is_none());
         assert!(global.get("components").is_none());
         assert!(global.get("hooks").is_none());
+    }
+
+    // === PathsConfig history_file tests ===
+
+    #[test]
+    fn history_file_default_is_none() {
+        let config = PathsConfig::default();
+        assert!(config.history_file.is_none());
+    }
+
+    #[test]
+    fn history_file_or_default_returns_home_orcs_history() {
+        let config = PathsConfig::default();
+        let path = config.history_file_or_default();
+        assert!(
+            path.ends_with(".orcs/history"),
+            "default should end with .orcs/history, got: {:?}",
+            path
+        );
+    }
+
+    #[test]
+    fn history_file_or_default_uses_override() {
+        let config = PathsConfig {
+            history_file: Some(PathBuf::from("/sandbox/history")),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.history_file_or_default(),
+            PathBuf::from("/sandbox/history")
+        );
+    }
+
+    #[test]
+    fn paths_merge_history_file() {
+        let mut base = PathsConfig::default();
+        let overlay = PathsConfig {
+            history_file: Some(PathBuf::from("/overlay/history")),
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert_eq!(base.history_file, Some(PathBuf::from("/overlay/history")));
+    }
+
+    #[test]
+    fn paths_merge_history_file_preserves_base_when_overlay_none() {
+        let mut base = PathsConfig {
+            history_file: Some(PathBuf::from("/base/history")),
+            ..Default::default()
+        };
+        let overlay = PathsConfig::default();
+        base.merge(&overlay);
+        assert_eq!(base.history_file, Some(PathBuf::from("/base/history")));
+    }
+
+    #[test]
+    fn history_file_toml_roundtrip() {
+        let mut config = OrcsConfig::default();
+        config.paths.history_file = Some(PathBuf::from("/custom/history"));
+        let toml = config.to_toml().expect("should serialize");
+        let restored = OrcsConfig::from_toml(&toml).expect("should deserialize");
+        assert_eq!(
+            restored.paths.history_file,
+            Some(PathBuf::from("/custom/history"))
+        );
     }
 }
