@@ -276,36 +276,68 @@ fn dispatch_internal(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table>
 /// Dispatches a Component intent via RPC.
 ///
 /// Calls `orcs.request(component_fqn, operation, args)` which is
-/// registered by emitter_fns.rs when a Component context is available.
+/// registered by emitter_fns.rs (Component) or child.rs (ChildContext).
+///
+/// The RPC returns `{ success: bool, data?, error? }`. This function
+/// normalizes the response to `{ ok: bool, data?, error?, duration_ms }`,
+/// matching the Internal dispatch contract.
 fn dispatch_component(
     lua: &Lua,
-    _intent_name: &str,
+    intent_name: &str,
     component_fqn: &str,
     operation: &str,
     args: &Table,
 ) -> mlua::Result<Table> {
     let orcs: Table = lua.globals().get("orcs")?;
 
-    // Check if orcs.request is available (requires emitter context)
-    match orcs.get::<mlua::Function>("request") {
-        Ok(request_fn) => {
-            // Convert args table to JSON value for RPC payload
-            let payload = lua.create_table()?;
-            for pair in args.pairs::<mlua::Value, mlua::Value>() {
-                let (k, v) = pair?;
-                payload.set(k, v)?;
-            }
-            request_fn.call((component_fqn, operation, payload))
-        }
+    let request_fn = match orcs.get::<mlua::Function>("request") {
+        Ok(f) => f,
         Err(_) => {
             let result = lua.create_table()?;
             set_error(
                 &result,
                 "component dispatch unavailable: no execution context (orcs.request not registered)",
             )?;
-            Ok(result)
+            return Ok(result);
         }
+    };
+
+    // Build RPC payload (shallow copy of args table)
+    let payload = lua.create_table()?;
+    for pair in args.pairs::<mlua::Value, mlua::Value>() {
+        let (k, v) = pair?;
+        payload.set(k, v)?;
     }
+
+    // Execute with timing
+    let start = std::time::Instant::now();
+    let rpc_result: Table = request_fn.call((component_fqn, operation, payload))?;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    tracing::debug!(
+        "component dispatch: {intent_name} → {component_fqn}::{operation} ({duration_ms}ms)"
+    );
+
+    // Normalize { success, data, error } → { ok, data, error, duration_ms }
+    let result = lua.create_table()?;
+    let success: bool = rpc_result.get("success").unwrap_or(false);
+    result.set("ok", success)?;
+    result.set("duration_ms", duration_ms)?;
+
+    if success {
+        // Forward data if present
+        if let Ok(data) = rpc_result.get::<mlua::Value>("data") {
+            result.set("data", data)?;
+        }
+    } else {
+        // Forward error message
+        let error_msg: String = rpc_result
+            .get("error")
+            .unwrap_or_else(|_| format!("component RPC failed: {component_fqn}::{operation}"));
+        result.set("error", error_msg)?;
+    }
+
+    Ok(result)
 }
 
 // ── Registry Helpers ─────────────────────────────────────────────────
@@ -1026,5 +1058,175 @@ mod tests {
             .get::<String>("error")
             .expect("should have error")
             .contains("already registered"));
+    }
+
+    // --- Component dispatch tests ---
+
+    #[test]
+    fn dispatch_component_no_request_fn_returns_error() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Register a Component intent without providing orcs.request
+        lua.load(
+            r#"
+            orcs.register_intent({
+                name = "comp_action",
+                description = "component action",
+                component = "lua::test_comp",
+                operation = "do_stuff",
+            })
+            "#,
+        )
+        .exec()
+        .expect("register should succeed");
+
+        let result: Table = lua
+            .load(r#"return orcs.dispatch("comp_action", {input="hello"})"#)
+            .eval()
+            .expect("should return error table");
+
+        assert!(
+            !result.get::<bool>("ok").expect("should have ok"),
+            "should fail without orcs.request"
+        );
+        let error: String = result.get("error").expect("should have error");
+        assert!(
+            error.contains("no execution context"),
+            "error should mention missing context, got: {error}"
+        );
+    }
+
+    #[test]
+    fn dispatch_component_success_normalized() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Register a Component intent
+        lua.load(
+            r#"
+            orcs.register_intent({
+                name = "mock_comp",
+                description = "mock component",
+                component = "lua::mock",
+                operation = "echo",
+            })
+            "#,
+        )
+        .exec()
+        .expect("register should succeed");
+
+        // Mock orcs.request to return { success=true, data={echo="hi"} }
+        lua.load(
+            r#"
+            orcs.request = function(target, operation, payload)
+                return { success = true, data = { echo = payload.input, target = target, op = operation } }
+            end
+            "#,
+        )
+        .exec()
+        .expect("mock should succeed");
+
+        let result: Table = lua
+            .load(r#"return orcs.dispatch("mock_comp", {input="hello"})"#)
+            .eval()
+            .expect("dispatch should return table");
+
+        // Normalized response: ok (not success)
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "should succeed"
+        );
+
+        // duration_ms should be present
+        let duration: u64 = result.get("duration_ms").expect("should have duration_ms");
+        assert!(
+            duration < 1000,
+            "local mock should be fast, got: {duration}ms"
+        );
+
+        // data should be forwarded
+        let data: Table = result.get("data").expect("should have data");
+        assert_eq!(
+            data.get::<String>("echo").expect("should have echo"),
+            "hello"
+        );
+        assert_eq!(
+            data.get::<String>("target").expect("should have target"),
+            "lua::mock"
+        );
+        assert_eq!(data.get::<String>("op").expect("should have op"), "echo");
+    }
+
+    #[test]
+    fn dispatch_component_failure_normalized() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Register + mock failing request
+        lua.load(
+            r#"
+            orcs.register_intent({
+                name = "fail_comp",
+                description = "failing component",
+                component = "lua::fail",
+                operation = "explode",
+            })
+            orcs.request = function(target, operation, payload)
+                return { success = false, error = "component exploded" }
+            end
+            "#,
+        )
+        .exec()
+        .expect("setup should succeed");
+
+        let result: Table = lua
+            .load(r#"return orcs.dispatch("fail_comp", {})"#)
+            .eval()
+            .expect("dispatch should return table");
+
+        assert!(
+            !result.get::<bool>("ok").expect("should have ok"),
+            "should report failure"
+        );
+        let error: String = result.get("error").expect("should have error");
+        assert_eq!(error, "component exploded");
+
+        // duration_ms still present
+        assert!(result.get::<u64>("duration_ms").is_ok());
+    }
+
+    #[test]
+    fn dispatch_component_forwards_all_args() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        lua.load(
+            r#"
+            orcs.register_intent({
+                name = "args_comp",
+                description = "args test",
+                component = "lua::args_test",
+                operation = "check_args",
+            })
+            -- Mock that captures and returns the payload
+            orcs.request = function(target, operation, payload)
+                return { success = true, data = payload }
+            end
+            "#,
+        )
+        .exec()
+        .expect("setup should succeed");
+
+        let result: Table = lua
+            .load(r#"return orcs.dispatch("args_comp", {a="1", b="2", c="3"})"#)
+            .eval()
+            .expect("dispatch should return table");
+
+        assert!(result.get::<bool>("ok").expect("should have ok"));
+        let data: Table = result.get("data").expect("should have data");
+        assert_eq!(data.get::<String>("a").expect("arg a"), "1");
+        assert_eq!(data.get::<String>("b").expect("arg b"), "2");
+        assert_eq!(data.get::<String>("c").expect("arg c"), "3");
     }
 }
