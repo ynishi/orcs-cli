@@ -19,6 +19,8 @@
 //!         orcs.register_intent(def)   → dynamic addition (Component tools)
 //! ```
 
+use std::collections::HashMap;
+
 use crate::error::LuaError;
 use crate::types::serde_json_to_lua;
 use mlua::{Lua, Table};
@@ -30,8 +32,13 @@ use orcs_types::intent::{IntentDef, IntentResolver};
 ///
 /// Initialized with 8 builtin Internal tools. Components can register
 /// additional intents at runtime via `orcs.register_intent()`.
+///
+/// Uses `Vec` for ordered iteration and `HashMap<String, usize>` index
+/// for O(1) name lookup.
 pub struct IntentRegistry {
     defs: Vec<IntentDef>,
+    /// Maps intent name → index in `defs` for O(1) lookup.
+    index: HashMap<String, usize>,
 }
 
 impl Default for IntentRegistry {
@@ -43,26 +50,32 @@ impl Default for IntentRegistry {
 impl IntentRegistry {
     /// Create a new registry pre-populated with the 8 builtin tools.
     pub fn new() -> Self {
-        Self {
-            defs: builtin_intent_defs(),
-        }
+        let defs = builtin_intent_defs();
+        let index = defs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.name.clone(), i))
+            .collect();
+        Self { defs, index }
     }
 
-    /// Look up an intent definition by name.
+    /// Look up an intent definition by name. O(1).
     pub fn get(&self, name: &str) -> Option<&IntentDef> {
-        self.defs.iter().find(|d| d.name == name)
+        self.index.get(name).map(|&i| &self.defs[i])
     }
 
     /// Register a new intent definition. Returns error if name is already taken.
     pub fn register(&mut self, def: IntentDef) -> Result<(), String> {
-        if self.defs.iter().any(|d| d.name == def.name) {
+        if self.index.contains_key(&def.name) {
             return Err(format!("intent already registered: {}", def.name));
         }
+        let idx = self.defs.len();
+        self.index.insert(def.name.clone(), idx);
         self.defs.push(def);
         Ok(())
     }
 
-    /// All registered intent definitions.
+    /// All registered intent definitions (insertion order).
     pub fn all(&self) -> &[IntentDef] {
         &self.defs
     }

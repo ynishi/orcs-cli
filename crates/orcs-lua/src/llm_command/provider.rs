@@ -111,90 +111,119 @@ fn message_to_openai_wire(m: &Message, stringify_args: bool) -> Vec<serde_json::
             vec![serde_json::json!({"role": m.role, "content": s})]
         }
         MessageContent::Blocks(blocks) => {
-            let mut text_parts: Vec<&str> = Vec::new();
-            let mut tool_uses: Vec<(&str, &str, &serde_json::Value)> = Vec::new();
-            let mut tool_results: Vec<(&str, &str)> = Vec::new();
-
-            for block in blocks {
-                match block {
-                    ContentBlock::Text { text } => text_parts.push(text.as_str()),
-                    ContentBlock::ToolUse { id, name, input } => {
-                        tool_uses.push((id.as_str(), name.as_str(), input));
-                    }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } => {
-                        tool_results.push((tool_use_id.as_str(), content.as_str()));
-                    }
-                }
-            }
-
-            let mut msgs = Vec::new();
-
-            // Assistant message with tool_calls
-            if !tool_uses.is_empty() {
-                let content_val = if text_parts.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(text_parts.join(""))
-                };
-
-                let calls: Vec<serde_json::Value> = tool_uses
-                    .iter()
-                    .map(|(id, name, input)| {
-                        let args_val = if stringify_args {
-                            serde_json::Value::String(
-                                serde_json::to_string(input).unwrap_or_default(),
-                            )
-                        } else {
-                            (*input).clone()
-                        };
-                        serde_json::json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": args_val,
-                            }
-                        })
-                    })
-                    .collect();
-
-                msgs.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": content_val,
-                    "tool_calls": calls,
-                }));
-            }
-
-            // Tool results: one message per result with role "tool"
-            for (tool_use_id, content) in &tool_results {
-                msgs.push(serde_json::json!({
-                    "role": Role::Tool,
-                    "tool_call_id": tool_use_id,
-                    "content": content,
-                }));
-            }
-
-            // Text-only blocks (no tool_use or tool_result)
-            if tool_uses.is_empty() && tool_results.is_empty() {
-                let text = if text_parts.is_empty() {
-                    String::new()
-                } else {
-                    text_parts.join("")
-                };
-                msgs.push(serde_json::json!({"role": m.role, "content": text}));
-            }
-
-            if msgs.is_empty() {
-                msgs.push(serde_json::json!({"role": m.role, "content": ""}));
-            }
-
-            msgs
+            let classified = classify_content_blocks(blocks);
+            blocks_to_wire_messages(&classified, &m.role, stringify_args)
         }
     }
+}
+
+/// Classified content blocks for wire format conversion.
+struct ClassifiedBlocks<'a> {
+    text_parts: Vec<&'a str>,
+    tool_uses: Vec<(&'a str, &'a str, &'a serde_json::Value)>,
+    tool_results: Vec<(&'a str, &'a str)>,
+}
+
+/// Partition content blocks into text, tool_use, and tool_result groups.
+fn classify_content_blocks(blocks: &[ContentBlock]) -> ClassifiedBlocks<'_> {
+    let mut text_parts = Vec::new();
+    let mut tool_uses = Vec::new();
+    let mut tool_results = Vec::new();
+
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => text_parts.push(text.as_str()),
+            ContentBlock::ToolUse { id, name, input } => {
+                tool_uses.push((id.as_str(), name.as_str(), input));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                tool_results.push((tool_use_id.as_str(), content.as_str()));
+            }
+        }
+    }
+
+    ClassifiedBlocks {
+        text_parts,
+        tool_uses,
+        tool_results,
+    }
+}
+
+/// Convert classified blocks into OpenAI/Ollama wire-format JSON messages.
+fn blocks_to_wire_messages(
+    cb: &ClassifiedBlocks<'_>,
+    role: &Role,
+    stringify_args: bool,
+) -> Vec<serde_json::Value> {
+    let mut msgs = Vec::new();
+
+    // Assistant message with tool_calls
+    if !cb.tool_uses.is_empty() {
+        let content_val = if cb.text_parts.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(cb.text_parts.join(""))
+        };
+
+        let calls: Vec<serde_json::Value> = cb
+            .tool_uses
+            .iter()
+            .map(|(id, name, input)| build_openai_tool_call(id, name, input, stringify_args))
+            .collect();
+
+        msgs.push(serde_json::json!({
+            "role": "assistant",
+            "content": content_val,
+            "tool_calls": calls,
+        }));
+    }
+
+    // Tool results: one message per result with role "tool"
+    for (tool_use_id, content) in &cb.tool_results {
+        msgs.push(serde_json::json!({
+            "role": Role::Tool,
+            "tool_call_id": tool_use_id,
+            "content": content,
+        }));
+    }
+
+    // Text-only blocks (no tool_use or tool_result)
+    if cb.tool_uses.is_empty() && cb.tool_results.is_empty() {
+        let text = cb.text_parts.join("");
+        msgs.push(serde_json::json!({"role": role, "content": text}));
+    }
+
+    if msgs.is_empty() {
+        msgs.push(serde_json::json!({"role": role, "content": ""}));
+    }
+
+    msgs
+}
+
+/// Build a single OpenAI-format tool_call entry.
+fn build_openai_tool_call(
+    id: &str,
+    name: &str,
+    input: &serde_json::Value,
+    stringify_args: bool,
+) -> serde_json::Value {
+    let args_val = if stringify_args {
+        serde_json::Value::String(serde_json::to_string(input).unwrap_or_default())
+    } else {
+        input.clone()
+    };
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": args_val,
+        }
+    })
 }
 
 fn build_ollama_body(
