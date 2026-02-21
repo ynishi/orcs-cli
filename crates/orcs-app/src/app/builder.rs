@@ -326,7 +326,11 @@ impl OrcsAppBuilder {
             }
 
             // Per-component settings from [components.settings.<name>]
-            let component_config = config.components.component_settings(name);
+            // with global config injected as cfg._global for Lua access.
+            let mut component_config = config.components.component_settings(name);
+            if let serde_json::Value::Object(ref mut map) = component_config {
+                map.insert("_global".into(), config.global_config_for_lua());
+            }
 
             engine.spawn_runner_full_auth_with_snapshot(
                 channel_id,

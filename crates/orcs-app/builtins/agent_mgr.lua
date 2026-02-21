@@ -27,6 +27,35 @@
 --   top    — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
 --   both   — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]  (default)
 --   bottom — [f:system] [Metrics] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+--
+-- ## Config: [components.settings.agent_mgr]
+--
+-- Settings are received via init(cfg) from config.toml.
+-- The llm_* keys are mapped to orcs.llm() opts via llm_key_map (llm_provider → provider, etc.).
+--
+-- | Key               | Type                              | Default          | Description                        |
+-- |-------------------|-----------------------------------|------------------|------------------------------------|
+-- | prompt_placement  | "top" | "both" | "bottom"         | "both"           | Where skills/tools appear in prompt|
+-- | llm_provider      | "ollama" | "openai" | "anthropic" | "ollama"         | LLM provider for agent conversation|
+-- | llm_model         | string                            | provider default | Model name                         |
+-- | llm_base_url      | string                            | provider default | Provider base URL                  |
+-- | llm_api_key       | string                            | env var fallback | API key                            |
+-- | llm_temperature   | number                            | (none)           | Sampling temperature               |
+-- | llm_max_tokens    | number                            | (none)           | Max completion tokens              |
+-- | llm_timeout       | number                            | 120              | Request timeout (seconds)          |
+--
+-- ## Global Config: cfg._global (injected by builder)
+--
+-- All components receive global config under cfg._global:
+--   cfg._global.debug            (bool)    — debug mode
+--   cfg._global.model.default    (string)  — default model name
+--   cfg._global.model.temperature(number)  — default temperature
+--   cfg._global.model.max_tokens (number?) — default max tokens
+--   cfg._global.hil.auto_approve (bool)    — auto-approve requests
+--   cfg._global.hil.timeout_ms   (number)  — approval timeout (ms)
+--   cfg._global.ui.verbose       (bool)    — verbose output
+--   cfg._global.ui.color         (bool)    — color output
+--   cfg._global.ui.emoji         (bool)    — emoji output
 
 -- === Worker Scripts ===
 

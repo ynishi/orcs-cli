@@ -1,6 +1,36 @@
 -- skill_manager.lua
 -- SkillManagementComponent: Discovery / Registration / Activation / Execution
 -- of Agent Skills (Composable Prompt-Level Plugins).
+--
+-- ## Config: [components.settings.skill_manager]
+--
+-- Settings are received via init(cfg) from config.toml.
+-- The recommend_llm_* keys are mapped to orcs.llm() opts via llm_key_map
+-- (recommend_llm_provider → provider, etc.) in handle_recommend().
+--
+-- | Key                        | Type                              | Default          | Description                         |
+-- |----------------------------|-----------------------------------|------------------|-------------------------------------|
+-- | recommend_skill            | bool                              | true             | Enable LLM-based skill recommend    |
+-- | recommend_llm_provider     | "ollama" | "openai" | "anthropic" | "ollama"         | LLM provider for recommend          |
+-- | recommend_llm_model        | string                            | provider default | Model name for recommend             |
+-- | recommend_llm_base_url     | string                            | provider default | Provider base URL for recommend      |
+-- | recommend_llm_api_key      | string                            | env var fallback | API key for recommend                |
+-- | recommend_llm_temperature  | number                            | (none)           | Sampling temperature for recommend   |
+-- | recommend_llm_max_tokens   | number                            | (none)           | Max tokens for recommend             |
+-- | recommend_llm_timeout      | number                            | 120              | Timeout for recommend (seconds)      |
+--
+-- ## Global Config: cfg._global (injected by builder)
+--
+-- All components receive global config under cfg._global:
+--   cfg._global.debug            (bool)    — debug mode
+--   cfg._global.model.default    (string)  — default model name
+--   cfg._global.model.temperature(number)  — default temperature
+--   cfg._global.model.max_tokens (number?) — default max tokens
+--   cfg._global.hil.auto_approve (bool)    — auto-approve requests
+--   cfg._global.hil.timeout_ms   (number)  — approval timeout (ms)
+--   cfg._global.ui.verbose       (bool)    — verbose output
+--   cfg._global.ui.color         (bool)    — color output
+--   cfg._global.ui.emoji         (bool)    — emoji output
 
 -- Load library modules
 local FormatAdapter = require("format_adapter")
@@ -215,9 +245,27 @@ local function handle_recommend(payload)
     prompt_parts[#prompt_parts + 1] = "- No explanation needed, just the JSON array."
     local prompt = table.concat(prompt_parts, "\n")
 
-    -- Call lightweight LLM (haiku by default)
-    local model = payload.model or "claude-haiku-4-5-20251001"
-    local llm_resp = orcs.llm(prompt, { model = model })
+    -- Build LLM opts from component config (recommend_llm_* prefix)
+    local llm_opts = {}
+    local llm_key_map = {
+        recommend_llm_provider    = "provider",
+        recommend_llm_model       = "model",
+        recommend_llm_base_url    = "base_url",
+        recommend_llm_api_key     = "api_key",
+        recommend_llm_temperature = "temperature",
+        recommend_llm_max_tokens  = "max_tokens",
+        recommend_llm_timeout     = "timeout",
+    }
+    for src_key, dst_key in pairs(llm_key_map) do
+        if component_settings[src_key] ~= nil then
+            llm_opts[dst_key] = component_settings[src_key]
+        end
+    end
+    -- payload.model overrides config (backward compat)
+    if payload.model then
+        llm_opts.model = payload.model
+    end
+    local llm_resp = orcs.llm(prompt, llm_opts)
 
     if not llm_resp or not llm_resp.ok then
         -- Fallback to keyword-based select if LLM fails

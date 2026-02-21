@@ -624,6 +624,11 @@ impl Component for LuaComponent {
         self.status = Status::Aborted;
     }
 
+    /// Calls the Lua `init(cfg)` callback with per-component settings.
+    ///
+    /// `config` contains `[components.settings.<name>]` from config.toml,
+    /// plus `_global` (injected by builder) with global config fields.
+    /// Null or empty objects are passed as `nil` to Lua.
     #[tracing::instrument(skip(self, config), fields(component = %self.id.fqn()))]
     fn init(&mut self, config: &serde_json::Value) -> Result<(), ComponentError> {
         let Some(init_key) = &self.init_key else {

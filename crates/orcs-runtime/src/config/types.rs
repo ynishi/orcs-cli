@@ -77,6 +77,49 @@ impl OrcsConfig {
         toml::from_str(toml_str)
     }
 
+    /// Returns global config fields as a JSON value for Lua component injection.
+    ///
+    /// This is injected into each component's `init(cfg)` table under the `_global` key
+    /// by [`OrcsAppBuilder::build()`], so Lua components can access it as `cfg._global`.
+    ///
+    /// # Included fields
+    ///
+    /// | Key | Type | Description |
+    /// |-----|------|-------------|
+    /// | `debug` | bool | Debug mode flag |
+    /// | `model.default` | string | Default model name |
+    /// | `model.temperature` | number | Default sampling temperature |
+    /// | `model.max_tokens` | number\|null | Default max completion tokens |
+    /// | `hil.auto_approve` | bool | Auto-approve requests |
+    /// | `hil.timeout_ms` | number | Approval timeout (ms) |
+    /// | `ui.verbose` | bool | Verbose output |
+    /// | `ui.color` | bool | Color output |
+    /// | `ui.emoji` | bool | Emoji output |
+    ///
+    /// # Excluded fields
+    ///
+    /// `paths`, `scripts`, `components`, `hooks` are excluded (internal/sensitive).
+    #[must_use]
+    pub fn global_config_for_lua(&self) -> serde_json::Value {
+        serde_json::json!({
+            "debug": self.debug,
+            "model": {
+                "default": self.model.default,
+                "temperature": self.model.temperature,
+                "max_tokens": self.model.max_tokens,
+            },
+            "hil": {
+                "auto_approve": self.hil.auto_approve,
+                "timeout_ms": self.hil.timeout_ms,
+            },
+            "ui": {
+                "verbose": self.ui.verbose,
+                "color": self.ui.color,
+                "emoji": self.ui.emoji,
+            },
+        })
+    }
+
     /// Merges another config into this one.
     ///
     /// Values from `other` override values in `self` only if they
@@ -344,17 +387,75 @@ pub struct ComponentsConfig {
 
     /// Per-component settings, keyed by component name.
     ///
-    /// Values are passed to `Component::init(config)` at startup.
-    /// Each key maps to an arbitrary JSON object.
+    /// Values are passed to `Component::init(config)` at startup as a Lua table.
+    /// Each key maps to an arbitrary JSON object (no schema enforcement on the
+    /// Rust side — each Lua component validates its own keys).
+    ///
+    /// # Data Flow
+    ///
+    /// ```text
+    /// config.toml [components.settings.<name>]
+    ///   → serde → HashMap<String, serde_json::Value>
+    ///   → component_settings(name) → serde_json::Value
+    ///   → builder.rs injects cfg._global (OrcsConfig::global_config_for_lua())
+    ///   → ChannelRunner.with_component_config()
+    ///   → LuaComponent::init(json) → lua.to_value(json)
+    ///   → Lua: init(cfg)
+    /// ```
+    ///
+    /// # Global Config (`cfg._global`)
+    ///
+    /// Every component receives global config under `cfg._global`, injected
+    /// by [`OrcsAppBuilder::build()`]. See [`OrcsConfig::global_config_for_lua()`]
+    /// for the full field list. Components access it as:
+    ///
+    /// ```lua
+    /// init = function(cfg)
+    ///     local debug = cfg._global.debug
+    ///     local model = cfg._global.model.default
+    /// end
+    /// ```
+    ///
+    /// # Known Component Settings
+    ///
+    /// ## `agent_mgr`
+    ///
+    /// | Key | Type | Default | Description |
+    /// |-----|------|---------|-------------|
+    /// | `prompt_placement` | `"top"\|"both"\|"bottom"` | `"both"` | Where skills/tools appear in the prompt |
+    /// | `llm_provider` | `"ollama"\|"openai"\|"anthropic"` | `"ollama"` | LLM provider for agent conversation |
+    /// | `llm_model` | string | provider default | Model name |
+    /// | `llm_base_url` | string | provider default | Provider base URL |
+    /// | `llm_api_key` | string | env var fallback | API key |
+    /// | `llm_temperature` | number | none | Sampling temperature |
+    /// | `llm_max_tokens` | number | none | Max completion tokens |
+    /// | `llm_timeout` | number | `120` | Request timeout (seconds) |
+    ///
+    /// ## `skill_manager`
+    ///
+    /// | Key | Type | Default | Description |
+    /// |-----|------|---------|-------------|
+    /// | `recommend_skill` | bool | `true` | Enable LLM-based skill recommendation (false = keyword fallback) |
+    /// | `recommend_llm_provider` | `"ollama"\|"openai"\|"anthropic"` | `"ollama"` | LLM provider for recommend |
+    /// | `recommend_llm_model` | string | provider default | Model name for recommend |
+    /// | `recommend_llm_base_url` | string | provider default | Provider base URL for recommend |
+    /// | `recommend_llm_api_key` | string | env var fallback | API key for recommend |
+    /// | `recommend_llm_temperature` | number | none | Sampling temperature for recommend |
+    /// | `recommend_llm_max_tokens` | number | none | Max tokens for recommend |
+    /// | `recommend_llm_timeout` | number | `120` | Timeout for recommend (seconds) |
     ///
     /// # Example (TOML)
     ///
     /// ```toml
-    /// [components.settings.skill_manager]
-    /// recommend_skill = true
-    ///
     /// [components.settings.agent_mgr]
-    /// max_history = 20
+    /// prompt_placement = "both"
+    /// llm_provider = "ollama"
+    /// llm_model    = "qwen2.5-coder:1.5b"
+    ///
+    /// [components.settings.skill_manager]
+    /// recommend_skill      = true
+    /// recommend_llm_provider = "ollama"
+    /// recommend_llm_model    = "qwen2.5-coder:1.5b"
     /// ```
     #[serde(default)]
     pub settings: HashMap<String, serde_json::Value>,
@@ -406,7 +507,11 @@ impl ComponentsConfig {
         }
     }
 
-    /// Returns the settings for a specific component, or an empty JSON object.
+    /// Returns the per-component settings for `name`, or an empty JSON object.
+    ///
+    /// This returns only `[components.settings.<name>]` from config.toml.
+    /// Global config (`_global`) is injected separately by the builder
+    /// (see [`OrcsConfig::global_config_for_lua()`]).
     #[must_use]
     pub fn component_settings(&self, name: &str) -> serde_json::Value {
         self.settings
@@ -898,5 +1003,61 @@ max_history = 20
             restored.components.component_settings("skill_manager"),
             serde_json::json!({ "recommend_skill": true })
         );
+    }
+
+    // === global_config_for_lua tests ===
+
+    #[test]
+    fn global_config_for_lua_default() {
+        let config = OrcsConfig::default();
+        let global = config.global_config_for_lua();
+
+        assert_eq!(global["debug"], false);
+        assert_eq!(global["model"]["default"], "claude-3-opus");
+        assert_eq!(global["model"]["temperature"], 0.7_f32 as f64);
+        assert!(global["model"]["max_tokens"].is_null());
+        assert_eq!(global["hil"]["auto_approve"], false);
+        assert_eq!(global["hil"]["timeout_ms"], 30_000);
+        assert_eq!(global["ui"]["verbose"], false);
+        assert_eq!(global["ui"]["color"], true);
+        assert_eq!(global["ui"]["emoji"], false);
+    }
+
+    #[test]
+    fn global_config_for_lua_custom_values() {
+        let config = OrcsConfig {
+            debug: true,
+            model: ModelConfig {
+                default: "gpt-4o".into(),
+                temperature: 0.3,
+                max_tokens: Some(8192),
+            },
+            ui: UiConfig {
+                verbose: true,
+                color: false,
+                emoji: true,
+            },
+            ..Default::default()
+        };
+        let global = config.global_config_for_lua();
+
+        assert_eq!(global["debug"], true);
+        assert_eq!(global["model"]["default"], "gpt-4o");
+        assert_eq!(global["model"]["max_tokens"], 8192);
+        assert_eq!(global["ui"]["verbose"], true);
+        assert_eq!(global["ui"]["color"], false);
+        assert_eq!(global["ui"]["emoji"], true);
+    }
+
+    #[test]
+    fn global_config_for_lua_excludes_sensitive_fields() {
+        let config = OrcsConfig::default();
+        let global = config.global_config_for_lua();
+
+        // These should NOT be present
+        assert!(global.get("paths").is_none());
+        assert!(global.get("scripts").is_none());
+        assert!(global.get("components").is_none());
+        assert!(global.get("hooks").is_none());
     }
 }
