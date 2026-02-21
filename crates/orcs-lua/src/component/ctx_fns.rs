@@ -3,6 +3,7 @@
 //! Registers the following functions into the `orcs` Lua table:
 //! - `orcs.exec(cmd)` — permission-checked shell execution
 //! - `orcs.llm(prompt)` — capability-gated LLM call
+//! - `orcs.llm_ping([opts])` — capability-gated LLM connectivity check
 //! - `orcs.spawn_child(config)` — spawn a child process
 //! - `orcs.check_command(cmd)` — check command permission
 //! - `orcs.grant_command(pattern)` — grant a command pattern
@@ -226,6 +227,30 @@ pub(super) fn register(
             crate::llm_command::llm_request_impl(lua, args)
         })?;
         orcs_table.set("llm", llm_fn)?;
+    }
+
+    // Override orcs.llm_ping with capability-checked version.
+    // Requires Capability::LLM. Lightweight connectivity check (no tokens consumed).
+    //
+    // orcs.llm_ping([opts]) -> { ok, provider, base_url, latency_ms, status?, error?, error_kind? }
+    {
+        let ctx_clone = Arc::clone(&ctx);
+
+        let ping_fn = lua.create_function(move |lua, opts: Option<Table>| {
+            let ctx_guard = ctx_clone.lock();
+
+            if !ctx_guard.has_capability(orcs_component::Capability::LLM) {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", "permission denied: Capability::LLM not granted")?;
+                result.set("error_kind", "permission_denied")?;
+                return Ok(result);
+            }
+            drop(ctx_guard);
+
+            crate::llm_command::llm_ping_impl(lua, opts)
+        })?;
+        orcs_table.set("llm_ping", ping_fn)?;
     }
 
     // Override orcs.http with capability-checked version.

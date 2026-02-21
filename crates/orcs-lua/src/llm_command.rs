@@ -120,6 +120,20 @@ impl Provider {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
         }
     }
+
+    /// Health-check path for this provider.
+    ///
+    /// - Ollama: `GET /` returns `"Ollama is running"` (no auth)
+    /// - OpenAI: `GET /v1/models` (requires auth, but proves connectivity)
+    /// - Anthropic: no dedicated health endpoint; we probe the chat path
+    ///   expecting a non-timeout response (e.g. 401/405) to prove connectivity
+    fn health_path(self) -> &'static str {
+        match self {
+            Self::Ollama => "/",
+            Self::OpenAI => "/v1/models",
+            Self::Anthropic => "/v1/messages",
+        }
+    }
 }
 
 // ── Session Store ──────────────────────────────────────────────────────
@@ -213,6 +227,135 @@ impl LlmOpts {
     }
 }
 
+// ── Ping Implementation ───────────────────────────────────────────────
+
+/// Default timeout in seconds for health-check pings.
+const PING_TIMEOUT_SECS: u64 = 5;
+
+/// Executes a lightweight connectivity check against the LLM provider.
+///
+/// Sends a single HTTP GET to the provider's health endpoint and measures
+/// round-trip latency. Does **not** consume tokens or create sessions.
+///
+/// # Arguments (from Lua)
+///
+/// * `opts` - Optional table:
+///   - `provider`  - "ollama" (default), "openai", "anthropic"
+///   - `base_url`  - Provider base URL (default per provider)
+///   - `api_key`   - API key (falls back to env var)
+///   - `timeout`   - Timeout in seconds (default: 5)
+///
+/// # Returns (Lua table)
+///
+/// * `ok`         - boolean (true if HTTP response received, even non-2xx)
+/// * `provider`   - Provider name string
+/// * `base_url`   - Resolved base URL
+/// * `latency_ms` - Round-trip time in milliseconds
+/// * `status`     - HTTP status code (when response received)
+/// * `error`      - Error message (when ok=false)
+/// * `error_kind` - Error classification (when ok=false)
+pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
+    // Parse provider/base_url/api_key from opts (reuse LlmOpts parsing logic)
+    let provider_str = opts
+        .as_ref()
+        .and_then(|o| o.get::<String>("provider").ok())
+        .unwrap_or_else(|| "ollama".to_string());
+    let provider = match Provider::from_str(&provider_str) {
+        Ok(p) => p,
+        Err(e) => {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", e)?;
+            result.set("error_kind", "invalid_options")?;
+            return Ok(result);
+        }
+    };
+
+    let base_url = opts
+        .as_ref()
+        .and_then(|o| o.get::<String>("base_url").ok())
+        .or_else(|| std::env::var("ORCS_LLM_BASE_URL").ok())
+        .unwrap_or_else(|| provider.default_base_url().to_string());
+
+    let api_key = opts
+        .as_ref()
+        .and_then(|o| o.get::<String>("api_key").ok())
+        .or_else(|| {
+            provider
+                .api_key_env()
+                .and_then(|env_name| std::env::var(env_name).ok())
+        });
+
+    let timeout = opts
+        .as_ref()
+        .and_then(|o| o.get::<u64>("timeout").ok())
+        .unwrap_or(PING_TIMEOUT_SECS);
+
+    // Build URL
+    let url = format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        provider.health_path()
+    );
+
+    // Configure agent with short timeout
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(timeout)))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+
+    // Send GET and measure latency
+    let start = std::time::Instant::now();
+
+    let mut req = agent.get(&url);
+    // Attach auth headers for providers that need them
+    match provider {
+        Provider::Ollama => {}
+        Provider::OpenAI => {
+            if let Some(ref key) = api_key {
+                req = req.header("Authorization", &format!("Bearer {}", key));
+            }
+        }
+        Provider::Anthropic => {
+            if let Some(ref key) = api_key {
+                req = req.header("x-api-key", key);
+            }
+            req = req.header("anthropic-version", "2023-06-01");
+        }
+    }
+
+    let result = lua.create_table()?;
+    result.set("provider", format!("{:?}", provider).to_lowercase())?;
+    result.set("base_url", base_url.as_str())?;
+
+    match req.call() {
+        Ok(resp) => {
+            let latency = start.elapsed();
+            let status = resp.status().as_u16();
+            result.set("ok", true)?;
+            result.set("status", status)?;
+            result.set("latency_ms", latency.as_millis() as u64)?;
+        }
+        Err(e) => {
+            let latency = start.elapsed();
+            result.set("latency_ms", latency.as_millis() as u64)?;
+
+            // If we got an HTTP response (non-2xx), connectivity is confirmed
+            if let ureq::Error::StatusCode(status) = &e {
+                result.set("ok", true)?;
+                result.set("status", *status)?;
+            } else {
+                let (error_kind, error_msg) = classify_ureq_error(&e);
+                result.set("ok", false)?;
+                result.set("error", error_msg)?;
+                result.set("error_kind", error_kind)?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 // ── Deny Stub ──────────────────────────────────────────────────────────
 
 /// Registers `orcs.llm` as a deny-by-default stub.
@@ -232,6 +375,21 @@ pub fn register_llm_deny_stub(lua: &Lua, orcs_table: &Table) -> Result<(), mlua:
             Ok(result)
         })?;
         orcs_table.set("llm", llm_fn)?;
+    }
+
+    // llm_ping deny stub
+    if orcs_table.get::<mlua::Function>("llm_ping").is_err() {
+        let ping_fn = lua.create_function(|lua, _args: mlua::MultiValue| {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set(
+                "error",
+                "llm_ping denied: no execution context (ChildContext with Capability::LLM required)",
+            )?;
+            result.set("error_kind", "permission_denied")?;
+            Ok(result)
+        })?;
+        orcs_table.set("llm_ping", ping_fn)?;
     }
 
     // Session persistence: dump all sessions to JSON string
@@ -1779,6 +1937,116 @@ mod tests {
             "should error on invalid JSON, got: {:?}",
             result
         );
+    }
+
+    // ── llm_ping tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn ping_defaults_to_ollama() {
+        let lua = Lua::new();
+        let result = llm_ping_impl(&lua, None).expect("should not panic");
+
+        let provider: String = result.get("provider").expect("get provider");
+        assert_eq!(provider, "ollama");
+
+        let base_url: String = result.get("base_url").expect("get base_url");
+        assert_eq!(base_url, "http://localhost:11434");
+
+        // latency_ms is always present
+        let _: u64 = result.get("latency_ms").expect("get latency_ms");
+    }
+
+    #[test]
+    fn ping_invalid_provider() {
+        let lua = Lua::new();
+        let opts = lua.create_table().expect("create opts");
+        opts.set("provider", "gemini").expect("set provider");
+
+        let result = llm_ping_impl(&lua, Some(opts)).expect("should not panic");
+        assert!(!result.get::<bool>("ok").expect("get ok"));
+        assert_eq!(
+            result.get::<String>("error_kind").expect("get error_kind"),
+            "invalid_options"
+        );
+    }
+
+    #[test]
+    fn ping_connection_refused() {
+        let lua = Lua::new();
+        let opts = lua.create_table().expect("create opts");
+        opts.set("provider", "ollama").expect("set provider");
+        opts.set("base_url", "http://127.0.0.1:1")
+            .expect("set base_url");
+        opts.set("timeout", 2u64).expect("set timeout");
+
+        let result = llm_ping_impl(&lua, Some(opts)).expect("should not panic");
+        assert!(
+            !result.get::<bool>("ok").expect("get ok"),
+            "should fail when nothing is listening"
+        );
+
+        let error_kind: String = result.get("error_kind").expect("get error_kind");
+        assert!(
+            error_kind == "connection_refused"
+                || error_kind == "network"
+                || error_kind == "timeout",
+            "expected connection error, got: {}",
+            error_kind
+        );
+    }
+
+    #[test]
+    fn ping_deny_stub_returns_permission_denied() {
+        let lua = Lua::new();
+        let orcs = crate::orcs_helpers::ensure_orcs_table(&lua).expect("create orcs table");
+        register_llm_deny_stub(&lua, &orcs).expect("register stub");
+
+        let result: Table = lua
+            .load(r#"return orcs.llm_ping()"#)
+            .eval()
+            .expect("should return deny table");
+
+        assert!(!result.get::<bool>("ok").expect("get ok"));
+        let error: String = result.get("error").expect("get error");
+        assert!(
+            error.contains("llm_ping denied"),
+            "expected permission denied, got: {error}"
+        );
+        assert_eq!(
+            result.get::<String>("error_kind").expect("get error_kind"),
+            "permission_denied"
+        );
+    }
+
+    /// E2E: ping a real Ollama server.
+    /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_ping -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires running Ollama server"]
+    fn e2e_ollama_ping() {
+        let lua = Lua::new();
+        let opts = lua.create_table().expect("create opts");
+        opts.set("provider", "ollama").expect("set provider");
+        opts.set("timeout", 5u64).expect("set timeout");
+
+        let result = llm_ping_impl(&lua, Some(opts)).expect("should not panic");
+
+        let ok = result.get::<bool>("ok").expect("get ok");
+        assert!(ok, "should succeed with running Ollama");
+
+        let status: u16 = result.get("status").expect("get status");
+        assert_eq!(status, 200, "Ollama root should return 200");
+
+        let latency: u64 = result.get("latency_ms").expect("get latency_ms");
+        assert!(
+            latency < 5000,
+            "latency should be under 5s, got: {}ms",
+            latency
+        );
+
+        let provider: String = result.get("provider").expect("get provider");
+        assert_eq!(provider, "ollama");
+
+        eprintln!("[E2E] ping ok={ok} status={status} latency={latency}ms");
     }
 
     // ── E2E tests (require running Ollama) ──────────────────────────────

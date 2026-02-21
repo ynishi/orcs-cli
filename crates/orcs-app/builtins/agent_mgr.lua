@@ -42,9 +42,10 @@ return {
 
     -- Independent Component: receives work via on_request (RPC).
     -- operation="process" is the primary entrypoint from agent_mgr.
+    -- operation="ping"    is a lightweight connectivity check.
     on_request = function(request)
         local input = request.payload or {}
-        local message = input.message or ""
+        local operation = request.operation or "process"
 
         -- Build LLM opts from config passed via RPC payload
         local function build_llm_opts(input)
@@ -59,6 +60,18 @@ return {
             if llm_cfg.timeout    then opts.timeout     = llm_cfg.timeout end
             return opts
         end
+
+        -- Ping: lightweight connectivity check (no tokens consumed)
+        if operation == "ping" then
+            local ping_opts = build_llm_opts(input)
+            local ping_resp = orcs.llm_ping(ping_opts)
+            return {
+                success = ping_resp.ok,
+                data = ping_resp,
+            }
+        end
+
+        local message = input.message or ""
 
         -- Session resumption: skip full prompt assembly, send message directly
         if input.session_id and input.session_id ~= "" then
@@ -697,6 +710,49 @@ return {
         if llm.ok then
             llm_worker_fqn = llm.fqn
             orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
+
+            -- Startup health check: verify LLM provider connectivity
+            local ping_ok, ping_err = pcall(function()
+                local ping_config = {}
+                local ping_key_map = {
+                    llm_provider = "provider",
+                    llm_model    = "model",
+                    llm_base_url = "base_url",
+                    llm_api_key  = "api_key",
+                }
+                for src_key, dst_key in pairs(ping_key_map) do
+                    if component_settings[src_key] ~= nil then
+                        ping_config[dst_key] = component_settings[src_key]
+                    end
+                end
+
+                local ping_result = orcs.request(llm_worker_fqn, "ping", {
+                    llm_config = ping_config,
+                })
+                if ping_result and ping_result.success and ping_result.data then
+                    local d = ping_result.data
+                    orcs.log("info", string.format(
+                        "LLM provider ready: %s @ %s (status=%s, latency=%dms)",
+                        d.provider or "?", d.base_url or "?",
+                        tostring(d.status or "?"), d.latency_ms or 0
+                    ))
+                else
+                    local err = (ping_result and ping_result.data and ping_result.data.error)
+                        or (ping_result and ping_result.error)
+                        or "unknown"
+                    local kind = (ping_result and ping_result.data and ping_result.data.error_kind)
+                        or "unknown"
+                    orcs.log("warn", string.format(
+                        "LLM provider unreachable: %s/%s (%s: %s)",
+                        component_settings.llm_provider or "ollama",
+                        component_settings.llm_model or "(default)",
+                        kind, err
+                    ))
+                end
+            end)
+            if not ping_ok then
+                orcs.log("warn", "LLM health check failed: " .. tostring(ping_err))
+            end
         else
             orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
         end
