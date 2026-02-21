@@ -738,6 +738,108 @@ fn build_request_body(
     }
 }
 
+/// Convert a single internal Message to OpenAI/Ollama wire format.
+///
+/// A single Message may expand to multiple wire messages:
+/// - `MessageContent::Blocks` with `ToolUse` → assistant message with `tool_calls` array
+/// - `MessageContent::Blocks` with `ToolResult` → one `role: "tool"` message per result
+///
+/// `stringify_args`: when true, tool_call arguments are serialized as a JSON
+/// string (OpenAI format); when false, kept as a JSON object (Ollama format).
+fn message_to_openai_wire(m: &Message, stringify_args: bool) -> Vec<serde_json::Value> {
+    use orcs_types::intent::ContentBlock;
+
+    match &m.content {
+        MessageContent::Text(s) => {
+            vec![serde_json::json!({"role": m.role, "content": s})]
+        }
+        MessageContent::Blocks(blocks) => {
+            let mut text_parts: Vec<&str> = Vec::new();
+            let mut tool_uses: Vec<(&str, &str, &serde_json::Value)> = Vec::new();
+            let mut tool_results: Vec<(&str, &str)> = Vec::new();
+
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text } => text_parts.push(text.as_str()),
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tool_uses.push((id.as_str(), name.as_str(), input));
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => {
+                        tool_results.push((tool_use_id.as_str(), content.as_str()));
+                    }
+                }
+            }
+
+            let mut msgs = Vec::new();
+
+            // Assistant message with tool_calls
+            if !tool_uses.is_empty() {
+                let content_val = if text_parts.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(text_parts.join(""))
+                };
+
+                let calls: Vec<serde_json::Value> = tool_uses
+                    .iter()
+                    .map(|(id, name, input)| {
+                        let args_val = if stringify_args {
+                            serde_json::Value::String(
+                                serde_json::to_string(input).unwrap_or_default(),
+                            )
+                        } else {
+                            (*input).clone()
+                        };
+                        serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args_val,
+                            }
+                        })
+                    })
+                    .collect();
+
+                msgs.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": content_val,
+                    "tool_calls": calls,
+                }));
+            }
+
+            // Tool results: one message per result with role "tool"
+            for (tool_use_id, content) in &tool_results {
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                }));
+            }
+
+            // Text-only blocks (no tool_use or tool_result)
+            if tool_uses.is_empty() && tool_results.is_empty() {
+                let text = if text_parts.is_empty() {
+                    String::new()
+                } else {
+                    text_parts.join("")
+                };
+                msgs.push(serde_json::json!({"role": m.role, "content": text}));
+            }
+
+            if msgs.is_empty() {
+                msgs.push(serde_json::json!({"role": m.role, "content": ""}));
+            }
+
+            msgs
+        }
+    }
+}
+
 fn build_ollama_body(
     opts: &LlmOpts,
     messages: &[Message],
@@ -745,13 +847,7 @@ fn build_ollama_body(
 ) -> Result<serde_json::Value, String> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
-            let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
-            serde_json::json!({
-                "role": m.role,
-                "content": content_val,
-            })
-        })
+        .flat_map(|m| message_to_openai_wire(m, false))
         .collect();
 
     let mut body = serde_json::json!({
@@ -786,13 +882,7 @@ fn build_openai_body(
 ) -> Result<serde_json::Value, String> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
-            let content_val = serde_json::to_value(&m.content).unwrap_or(serde_json::Value::Null);
-            serde_json::json!({
-                "role": m.role,
-                "content": content_val,
-            })
-        })
+        .flat_map(|m| message_to_openai_wire(m, true))
         .collect();
 
     let mut body = serde_json::json!({
@@ -1188,8 +1278,13 @@ fn dispatch_intents_to_results(
             Ok(tbl) => {
                 let ok: bool = tbl.get("ok").unwrap_or(false);
                 if ok {
-                    // Serialize the result table data
-                    let data: Option<mlua::Value> = tbl.get("data").ok();
+                    // Try "data" field first (Component dispatch normalizes to {ok, data}).
+                    // If absent or nil, serialize the entire result table — Internal tools
+                    // return fields directly (e.g. {ok, content, size} for read).
+                    let data = match tbl.get::<mlua::Value>("data") {
+                        Ok(v) if !matches!(v, mlua::Value::Nil) => Some(v),
+                        _ => None,
+                    };
                     let text = match data {
                         Some(mlua::Value::String(s)) => {
                             s.to_str().map_or_else(|_| String::new(), |b| b.to_string())
@@ -1199,7 +1294,12 @@ fn dispatch_intents_to_results(
                             serde_json::to_string(&lua_value_to_json(v))
                                 .unwrap_or_else(|_| "{}".to_string())
                         }
-                        None => "ok".to_string(),
+                        None => {
+                            // No "data" field: serialize the whole result table so
+                            // the LLM receives actual tool output (file content, etc.)
+                            serde_json::to_string(&lua_value_to_json(mlua::Value::Table(tbl)))
+                                .unwrap_or_else(|_| "{}".to_string())
+                        }
                     };
                     (text, false)
                 } else {
@@ -2976,6 +3076,229 @@ mod tests {
         match &history[0].content {
             MessageContent::Blocks(b) => assert_eq!(b.len(), 2, "should have 2 content blocks"),
             _ => panic!("expected Blocks variant"),
+        }
+    }
+
+    // ── message_to_openai_wire tests ──────────────────────────────────
+
+    #[test]
+    fn openai_wire_text_message() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("hello".to_string()),
+        };
+        let wire = message_to_openai_wire(&msg, true);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[0]["content"], "hello");
+    }
+
+    #[test]
+    fn openai_wire_assistant_tool_calls() {
+        use orcs_types::intent::ContentBlock;
+
+        let msg = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Let me read that.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "src/main.rs"}),
+                },
+            ]),
+        };
+
+        // OpenAI format: stringify_args = true
+        let wire = message_to_openai_wire(&msg, true);
+        assert_eq!(wire.len(), 1, "should produce 1 assistant message");
+        assert_eq!(wire[0]["role"], "assistant");
+        assert_eq!(wire[0]["content"], "Let me read that.");
+
+        let tool_calls = wire[0]["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_1");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "read");
+        // OpenAI: arguments is a JSON string
+        let args_str = tool_calls[0]["function"]["arguments"]
+            .as_str()
+            .expect("args should be string");
+        let args_parsed: serde_json::Value =
+            serde_json::from_str(args_str).expect("should parse args");
+        assert_eq!(args_parsed["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn ollama_wire_assistant_tool_calls_object_args() {
+        use orcs_types::intent::ContentBlock;
+
+        let msg = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "exec".to_string(),
+                input: serde_json::json!({"cmd": "ls"}),
+            }]),
+        };
+
+        // Ollama format: stringify_args = false
+        let wire = message_to_openai_wire(&msg, false);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "assistant");
+        // content should be null when no text
+        assert!(wire[0]["content"].is_null());
+
+        let tool_calls = wire[0]["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
+        // Ollama: arguments is a JSON object (not a string)
+        assert!(
+            tool_calls[0]["function"]["arguments"].is_object(),
+            "Ollama args should be an object, got: {}",
+            tool_calls[0]["function"]["arguments"]
+        );
+        assert_eq!(tool_calls[0]["function"]["arguments"]["cmd"], "ls");
+    }
+
+    #[test]
+    fn openai_wire_tool_results_expand_to_separate_messages() {
+        use orcs_types::intent::ContentBlock;
+
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "fn main() {}".to_string(),
+                    is_error: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_2".to_string(),
+                    content: "line 1\nline 2".to_string(),
+                    is_error: Some(false),
+                },
+            ]),
+        };
+
+        let wire = message_to_openai_wire(&msg, true);
+        assert_eq!(
+            wire.len(),
+            2,
+            "each ToolResult should become a separate message"
+        );
+
+        assert_eq!(wire[0]["role"], "tool");
+        assert_eq!(wire[0]["tool_call_id"], "call_1");
+        assert_eq!(wire[0]["content"], "fn main() {}");
+
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[1]["tool_call_id"], "call_2");
+        assert_eq!(wire[1]["content"], "line 1\nline 2");
+    }
+
+    #[test]
+    fn openai_wire_multiple_tool_calls() {
+        use orcs_types::intent::ContentBlock;
+
+        let msg = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::ToolUse {
+                    id: "c1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "c2".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "b.rs"}),
+                },
+            ]),
+        };
+
+        let wire = message_to_openai_wire(&msg, true);
+        assert_eq!(wire.len(), 1, "all tool_calls in one message");
+        let calls = wire[0]["tool_calls"].as_array().expect("tool_calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "read");
+        assert_eq!(calls[1]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn openai_wire_empty_blocks_fallback() {
+        let msg = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![]),
+        };
+        let wire = message_to_openai_wire(&msg, true);
+        assert_eq!(wire.len(), 1, "empty blocks should produce fallback");
+        assert_eq!(wire[0]["role"], "assistant");
+    }
+
+    // ── dispatch_intents_to_results Internal tool test ─────────────────
+
+    #[test]
+    fn dispatch_intents_serializes_internal_tool_result() {
+        use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use std::sync::Arc;
+
+        // Create sandbox
+        let dir = std::env::temp_dir().join(format!(
+            "orcs-dispatch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = dir.canonicalize().expect("canonicalize");
+        let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
+
+        // Set up Lua with orcs base functions + dispatch
+        let lua = Lua::new();
+        crate::orcs_helpers::register_base_orcs_functions(&lua, sandbox)
+            .expect("register base functions");
+
+        // Write a test file so orcs.read returns real data
+        std::fs::write(dir.join("test.txt"), "hello from dispatch test").expect("write test file");
+
+        let intents = vec![ActionIntent {
+            id: "call_test".to_string(),
+            name: "read".to_string(),
+            params: serde_json::json!({"path": dir.join("test.txt").to_string_lossy().to_string()}),
+            meta: Default::default(),
+        }];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        match result {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    orcs_types::intent::ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        assert_eq!(tool_use_id, "call_test");
+                        assert_eq!(*is_error, Some(false), "should succeed");
+                        // Should contain actual file content, not just "ok"
+                        assert!(
+                            content.contains("hello from dispatch test"),
+                            "result should contain file content, got: {content}"
+                        );
+                    }
+                    other => panic!("expected ToolResult, got: {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks, got: {other:?}"),
         }
     }
 }
