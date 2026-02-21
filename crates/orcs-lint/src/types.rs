@@ -148,6 +148,7 @@ impl std::fmt::Display for Violation {
 
 #[derive(Debug, thiserror::Error, Diagnostic)]
 #[error("{message}")]
+#[allow(unused_assignments)]
 pub struct ViolationDiagnostic {
     message: String,
     #[help]
