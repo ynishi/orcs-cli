@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![MSRV: 1.80.0](https://img.shields.io/badge/MSRV-1.80.0-brightgreen.svg)](https://releases.rs/docs/1.80.0/)
+[![Rust](https://img.shields.io/badge/rust-%23000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Lua-extensible Agentic Shell for building AI-powered development tools.
 
