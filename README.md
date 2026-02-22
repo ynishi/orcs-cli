@@ -299,21 +299,6 @@ API documentation is generated from source via rustdoc. Each crate has module-le
 cargo doc --workspace --no-deps --open
 ```
 
-## Dev Tools
-
-### orcs-lint
-
-Architecture linter enforcing code quality rules:
-
-```bash
-cargo run -p orcs-lint -- check .
-```
-
-Rules:
-- **OL002**: `.unwrap()` forbidden in all code (use `.expect("reason")` in tests, `?` in production)
-- **layer_dep**: Layer dependency violations
-- **no_panic**: Panic-inducing patterns
-
 ## License
 
 Licensed under either of
