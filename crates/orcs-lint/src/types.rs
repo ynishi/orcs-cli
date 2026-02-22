@@ -1,4 +1,3 @@
-use miette::{Diagnostic, SourceSpan};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -143,29 +142,6 @@ impl std::fmt::Display for Violation {
             self.rule,
             self.message
         )
-    }
-}
-
-#[derive(Debug, thiserror::Error, Diagnostic)]
-#[error("{message}")]
-#[allow(unused_assignments)]
-pub struct ViolationDiagnostic {
-    message: String,
-    #[help]
-    help: Option<String>,
-    #[label("{label_message}")]
-    span: SourceSpan,
-    label_message: String,
-}
-
-impl From<&Violation> for ViolationDiagnostic {
-    fn from(v: &Violation) -> Self {
-        Self {
-            message: format!("[{}] {}", v.rule, v.message),
-            help: v.suggestion.as_ref().map(|s| s.message.clone()),
-            span: SourceSpan::from((v.location.offset, v.location.length)),
-            label_message: v.rule.clone(),
-        }
     }
 }
 
