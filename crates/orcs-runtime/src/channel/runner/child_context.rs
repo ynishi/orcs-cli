@@ -401,6 +401,15 @@ impl ChildContextImpl {
     /// - Can spawn its own children/Components (Nested spawn)
     /// - Inherits auth context and capabilities from the parent
     ///
+    /// # IO Output Routing
+    ///
+    /// The spawned runner inherits the parent's IO output channel (`io_output_tx`)
+    /// when available. `orcs.output()` is semantically "display to the user", so
+    /// any Component calling it expects the message to reach IO (stdout). If the
+    /// parent is connected to an IO bridge, spawned children are connected to the
+    /// same bridge. When `io_output_tx` is `None`, the runner falls back to the
+    /// parent's own channel (`output_tx`).
+    ///
     /// # Arguments
     ///
     /// * `component` - The Component to run (arbitrary — not a copy of the parent)
@@ -456,7 +465,15 @@ impl ChildContextImpl {
         let world_clone = Arc::clone(world);
         let signal_rx = signal_tx.subscribe();
         let signal_tx_clone = signal_tx.clone();
-        let output_tx = self.output_tx.clone();
+        // For spawned runners, route Output events to IO bridge (stdout)
+        // if available, rather than to the parent component's channel.
+        // Without this, orcs.output() in the child would send to the parent
+        // (e.g. agent_mgr), which processes it as a new request — causing
+        // an infinite dispatch loop.
+        let output_tx = self
+            .io_output_tx
+            .clone()
+            .unwrap_or_else(|| self.output_tx.clone());
 
         // Clone auth context to propagate to child runner
         let session_clone = self.session.clone();

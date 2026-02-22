@@ -109,7 +109,7 @@ fn command_mode_llm_pipeline() {
 
     let child = Command::new(&bin)
         .arg("-d")
-        .arg("--builtins-dir")
+        .arg("--sandbox")
         .arg(tmp.path())
         // The trailing args form the command
         .arg("test_cmd_mode_msg")

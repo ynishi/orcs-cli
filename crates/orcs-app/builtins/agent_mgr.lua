@@ -1,12 +1,24 @@
 -- agent_mgr.lua
 -- Agent Manager component: routes UserInput to specialized workers.
 --
--- Architecture:
---   agent_mgr (Router Component)
---     └── llm-worker (Independent Component, spawned via orcs.spawn_runner())
---         — communicates via orcs.request() RPC
---         — has own Lua VM, event loop, and ChannelRunner
+-- Architecture (Event-driven):
+--   agent_mgr (Router Component, subscriptions=UserInput)
+--     │
+--     ├─ @prefix commands → targeted RPC to specific components
+--     │
+--     └─ LLM tasks → emit "AgentTask" event (fire-and-forget, non-blocking)
+--           │
+--           ▼ (broadcast via EventBus)
+--       llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
+--         — receives AgentTask events via subscription
 --         — calls orcs.llm(resolve=true) for tool-use auto-dispatch
+--         — calls orcs.output() directly to display response (output_to_io inherited)
+--         — agent_mgr is NOT blocked during LLM processing
+--
+-- Concierge mode:
+--   When concierge is set (e.g. concierge="claude"), agent_mgr does NOT spawn
+--   llm-worker. Instead, the external component (loaded via config.toml) subscribes
+--   to "AgentTask" events and handles LLM processing independently.
 --
 -- Tool execution:
 --   LLM uses tool_use (function calling) to invoke:
@@ -41,6 +53,7 @@
 --
 -- | Key               | Type                              | Default          | Description                        |
 -- |-------------------|-----------------------------------|------------------|------------------------------------|
+-- | concierge         | string                            | nil              | External backend component name (e.g. "claude"). Omit for built-in llm-worker. |
 -- | prompt_placement  | "top" | "both" | "bottom"         | "both"           | Where skills/tools appear in prompt|
 -- | llm_provider      | "ollama" | "openai" | "anthropic" | "ollama"         | LLM provider for agent conversation|
 -- | llm_model         | string                            | provider default | Model name                         |
@@ -66,23 +79,26 @@
 -- === Worker Scripts ===
 
 -- LLM Worker: spawned as an independent Component via orcs.spawn_runner().
--- Has its own Lua VM, event loop, and ChannelRunner. Communicates via RPC.
--- Fetches skill catalog for context, then calls Claude Code CLI.
--- Prompt assembly respects `prompt_placement` strategy passed from parent.
+-- Has its own Lua VM, event loop, and ChannelRunner.
+--
+-- Communication: subscribes to "AgentTask" Extension events (broadcast).
+-- agent_mgr emits AgentTask events; this worker receives them asynchronously.
+-- Output: calls orcs.output() directly (IO output channel inherited from parent).
+-- RPC: "ping" operation is still handled via targeted orcs.request() from init().
 local llm_worker_script = [[
 return {
     id = "llm-worker",
     namespace = "builtin",
-    subscriptions = {},  -- RPC-only: no event subscriptions needed
+    subscriptions = {"AgentTask"},
 
-    -- Independent Component: receives work via on_request (RPC).
-    -- operation="process" is the primary entrypoint from agent_mgr.
-    -- operation="ping"    is a lightweight connectivity check.
+    -- Receives AgentTask events via subscription and targeted RPCs (ping).
+    -- operation="process" — main LLM processing (from AgentTask event)
+    -- operation="ping"    — lightweight connectivity check (from init RPC)
     on_request = function(request)
         local input = request.payload or {}
         local operation = request.operation or "process"
 
-        -- Build LLM opts from config passed via RPC payload
+        -- Build LLM opts from config passed via event payload or RPC payload
         local function build_llm_opts(input)
             local opts = {}
             local llm_cfg = input.llm_config or {}
@@ -94,6 +110,22 @@ return {
             if llm_cfg.max_tokens then opts.max_tokens  = llm_cfg.max_tokens end
             if llm_cfg.timeout    then opts.timeout     = llm_cfg.timeout end
             return opts
+        end
+
+        -- Output LLM response to IO and emit observability event
+        local function emit_success(message, llm_resp)
+            orcs.output(llm_resp.content or "")
+            orcs.emit_event("Extension", "llm_response", {
+                message = message,
+                response = llm_resp.content,
+                session_id = llm_resp.session_id,
+                cost = llm_resp.cost,
+                source = "llm-worker",
+            })
+            orcs.log("debug", string.format(
+                "llm-worker: completed (cost=%.4f, session=%s)",
+                llm_resp.cost or 0, llm_resp.session_id or "none"
+            ))
         end
 
         -- Ping: lightweight connectivity check (no tokens consumed)
@@ -116,6 +148,7 @@ return {
             opts.resolve = true
             local llm_resp = orcs.llm(message, opts)
             if llm_resp and llm_resp.ok then
+                emit_success(message, llm_resp)
                 return {
                     success = true,
                     data = {
@@ -128,6 +161,7 @@ return {
                 }
             else
                 local err = (llm_resp and llm_resp.error) or "llm resume failed"
+                orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
                 return { success = false, error = err }
             end
         end
@@ -310,6 +344,7 @@ return {
         llm_opts.resolve = true
         local llm_resp = orcs.llm(prompt, llm_opts)
         if llm_resp and llm_resp.ok then
+            emit_success(message, llm_resp)
             return {
                 success = true,
                 data = {
@@ -322,6 +357,7 @@ return {
             }
         else
             local err = (llm_resp and llm_resp.error) or "llm call failed"
+            orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
             return {
                 success = false,
                 error = err,
@@ -346,7 +382,7 @@ local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as conte
 local component_settings = {}
 
 -- FQN of the spawned LLM worker Component (set in init()).
--- Used by dispatch_llm() to send RPC requests.
+-- Used by init() for health check RPC. Not used for dispatch (event-driven).
 local llm_worker_fqn = nil
 
 -- Valid prompt placement strategies
@@ -488,18 +524,18 @@ local function fetch_history_context()
     return ""
 end
 
---- Default route: send to llm-worker via single RPC.
---- Tool execution (builtins, skills) is handled inside the llm-worker
---- via orcs.llm(resolve=true), which auto-dispatches tool_use calls
---- through IntentRegistry and feeds results back to the LLM.
+--- Default route: emit AgentTask event for LLM processing.
+--- The event is broadcast to all subscribed components (llm-worker or concierge).
+--- agent_mgr returns immediately — the worker handles LLM processing and output
+--- asynchronously via its own event loop.
 local function dispatch_llm(message)
-    -- Guard: llm-worker must be initialized
-    if not llm_worker_fqn then
-        orcs.output_with_level("[AgentMgr] Error: LLM worker not initialized", "error")
-        return { success = false, error = "llm worker not initialized" }
+    -- Guard: at least one subscriber (llm-worker or concierge) must be available
+    if not component_settings.concierge and not llm_worker_fqn then
+        orcs.output_with_level("[AgentMgr] Error: no LLM backend available (worker not spawned, concierge not set)", "error")
+        return { success = false, error = "no LLM backend available" }
     end
 
-    -- Gather history in parent context (emitter function, unavailable to children)
+    -- Gather history in parent context (board_recent unavailable to child workers)
     local history_context = fetch_history_context()
 
     -- Resolve prompt placement strategy from config
@@ -526,44 +562,27 @@ local function dispatch_llm(message)
         end
     end
 
-    -- Single RPC to llm-worker (resolve=true handles tool loops internally)
+    -- Emit AgentTask event (fire-and-forget, non-blocking).
+    -- Subscribers (llm-worker or concierge) receive this and process asynchronously.
     local payload = {
         message = message,
         prompt_placement = placement,
         llm_config = llm_config,
         history_context = history_context,
     }
+    orcs.emit_event("AgentTask", "process", payload)
 
-    local result = orcs.request(llm_worker_fqn, "process", payload)
-    if not result or not result.success then
-        local err = (result and result.error) or "unknown"
-        orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
-        return { success = false, error = err }
-    end
-
-    local data = result.data or {}
-    local response = data.response or "no response"
-
-    orcs.output(response)
-    orcs.emit_event("Extension", "llm_response", {
-        message = message,
-        response = response,
-        source = "llm-worker",
-        cost = data.cost,
-        session_id = data.session_id,
-    })
     orcs.log("debug", string.format(
-        "dispatch_llm: completed (cost=%.4f, session=%s)",
-        data.cost or 0, data.session_id or "none"
+        "dispatch_llm: emitted AgentTask event (message=%d chars)",
+        #message
     ))
+
+    -- Return immediately — worker handles output via orcs.output()
     return {
         success = true,
         data = {
+            dispatched = true,
             message = message,
-            response = response,
-            source = "llm-worker",
-            cost = data.cost or 0,
-            session_id = data.session_id,
         },
     }
 end
@@ -624,69 +643,76 @@ return {
             orcs.log("debug", "agent_mgr: config received: " .. orcs.json_encode(cfg))
         end
 
+        local concierge = component_settings.concierge
         local placement = component_settings.prompt_placement or "both"
         local llm_provider = component_settings.llm_provider or "(default)"
         local llm_model = component_settings.llm_model or "(default)"
         orcs.log("info", string.format(
-            "agent_mgr initializing (prompt_placement=%s, llm=%s/%s)...",
-            placement, llm_provider, llm_model
+            "agent_mgr initializing (concierge=%s, prompt_placement=%s, llm=%s/%s)...",
+            concierge or "off", placement, llm_provider, llm_model
         ))
 
-        -- Spawn LLM worker as an independent Component via spawn_runner().
-        -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
-        -- wait for World registration (ready notification via oneshot channel).
-        -- When this call returns, the Component is fully registered and RPC-reachable.
-        local llm = orcs.spawn_runner({
-            script = llm_worker_script,
-        })
-        if llm.ok then
-            llm_worker_fqn = llm.fqn
-            orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
+        -- Spawn LLM worker only when using built-in backend.
+        -- When concierge is set, the external component (loaded via config.toml)
+        -- subscribes to AgentTask events and handles LLM processing independently.
+        if not concierge then
+            -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
+            -- wait for World registration (ready notification via oneshot channel).
+            -- When this call returns, the Component is fully registered and event-reachable.
+            local llm = orcs.spawn_runner({
+                script = llm_worker_script,
+            })
+            if llm.ok then
+                llm_worker_fqn = llm.fqn
+                orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
 
-            -- Startup health check: verify LLM provider connectivity
-            local ping_ok, ping_err = pcall(function()
-                local ping_config = {}
-                local ping_key_map = {
-                    llm_provider = "provider",
-                    llm_model    = "model",
-                    llm_base_url = "base_url",
-                    llm_api_key  = "api_key",
-                }
-                for src_key, dst_key in pairs(ping_key_map) do
-                    if component_settings[src_key] ~= nil then
-                        ping_config[dst_key] = component_settings[src_key]
+                -- Startup health check: verify LLM provider connectivity (targeted RPC)
+                local ping_ok, ping_err = pcall(function()
+                    local ping_config = {}
+                    local ping_key_map = {
+                        llm_provider = "provider",
+                        llm_model    = "model",
+                        llm_base_url = "base_url",
+                        llm_api_key  = "api_key",
+                    }
+                    for src_key, dst_key in pairs(ping_key_map) do
+                        if component_settings[src_key] ~= nil then
+                            ping_config[dst_key] = component_settings[src_key]
+                        end
                     end
-                end
 
-                local ping_result = orcs.request(llm_worker_fqn, "ping", {
-                    llm_config = ping_config,
-                })
-                if ping_result and ping_result.success and ping_result.data then
-                    local d = ping_result.data
-                    orcs.log("info", string.format(
-                        "LLM provider ready: %s @ %s (status=%s, latency=%dms)",
-                        d.provider or "?", d.base_url or "?",
-                        tostring(d.status or "?"), d.latency_ms or 0
-                    ))
-                else
-                    local err = (ping_result and ping_result.data and ping_result.data.error)
-                        or (ping_result and ping_result.error)
-                        or "unknown"
-                    local kind = (ping_result and ping_result.data and ping_result.data.error_kind)
-                        or "unknown"
-                    orcs.log("warn", string.format(
-                        "LLM provider unreachable: %s/%s (%s: %s)",
-                        component_settings.llm_provider or "ollama",
-                        component_settings.llm_model or "(default)",
-                        kind, err
-                    ))
+                    local ping_result = orcs.request(llm_worker_fqn, "ping", {
+                        llm_config = ping_config,
+                    })
+                    if ping_result and ping_result.success and ping_result.data then
+                        local d = ping_result.data
+                        orcs.log("info", string.format(
+                            "LLM provider ready: %s @ %s (status=%s, latency=%dms)",
+                            d.provider or "?", d.base_url or "?",
+                            tostring(d.status or "?"), d.latency_ms or 0
+                        ))
+                    else
+                        local err = (ping_result and ping_result.data and ping_result.data.error)
+                            or (ping_result and ping_result.error)
+                            or "unknown"
+                        local kind = (ping_result and ping_result.data and ping_result.data.error_kind)
+                            or "unknown"
+                        orcs.log("warn", string.format(
+                            "LLM provider unreachable: %s/%s (%s: %s)",
+                            component_settings.llm_provider or "ollama",
+                            component_settings.llm_model or "(default)",
+                            kind, err
+                        ))
+                    end
+                end)
+                if not ping_ok then
+                    orcs.log("warn", "LLM health check failed: " .. tostring(ping_err))
                 end
-            end)
-            if not ping_ok then
-                orcs.log("warn", "LLM health check failed: " .. tostring(ping_err))
+            else
+                orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
             end
         else
-            orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
+            orcs.log("info", "concierge='" .. concierge .. "': skipping llm-worker spawn (external backend)")
         end
 
         -- Register observability hook: log routing outcomes
@@ -711,7 +737,8 @@ return {
             end
         end
 
-        orcs.output("[AgentMgr] Ready (worker: " .. (llm_worker_fqn or "failed") .. ")")
+        local backend = concierge or llm_worker_fqn or "failed"
+        orcs.output("[AgentMgr] Ready (backend: " .. backend .. ")")
         orcs.log("info", "agent_mgr initialized")
     end,
 
