@@ -1213,13 +1213,19 @@ mod tests {
     fn from_table_runnable_requires_run() {
         let lua = Arc::new(Mutex::new(Lua::new()));
         let lua_guard = lua.lock();
-        let table = lua_guard.create_table().unwrap();
-        table.set("id", "test").unwrap();
+        let table = lua_guard
+            .create_table()
+            .expect("should create lua table for from_table_runnable test");
+        table
+            .set("id", "test")
+            .expect("should set id on test table");
         // Create a simple on_signal function
         let on_signal_fn = lua_guard
             .create_function(|_, _: mlua::Value| Ok("Ignored"))
-            .unwrap();
-        table.set("on_signal", on_signal_fn).unwrap();
+            .expect("should create on_signal function");
+        table
+            .set("on_signal", on_signal_fn)
+            .expect("should set on_signal on test table");
         // Note: no run function
 
         drop(lua_guard);

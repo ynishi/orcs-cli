@@ -537,8 +537,10 @@ mod tests {
         assert!(result.is_ok(), "Lua code should parse safely");
 
         // Verify the data is intact (escaped)
-        let table = result.unwrap();
-        let data: String = table.get("data").unwrap();
+        let table = result.expect("should parse safely without executing injected code");
+        let data: String = table
+            .get("data")
+            .expect("should have data field in safe table");
         assert!(data.contains("os.execute"));
     }
 
@@ -547,18 +549,24 @@ mod tests {
     #[test]
     fn lua_to_json_empty_table() {
         let lua = Lua::new();
-        let table = lua.create_table().unwrap();
-        let result = lua_to_json(Value::Table(table), &lua).unwrap();
+        let table = lua.create_table().expect("should create empty lua table");
+        let result =
+            lua_to_json(Value::Table(table), &lua).expect("should convert empty table to json");
         assert_eq!(result, serde_json::json!({}));
     }
 
     #[test]
     fn lua_to_json_array_table() {
         let lua = Lua::new();
-        let table = lua.create_table().unwrap();
-        table.raw_set(1, "a").unwrap();
-        table.raw_set(2, "b").unwrap();
-        let result = lua_to_json(Value::Table(table), &lua).unwrap();
+        let table = lua.create_table().expect("should create array lua table");
+        table
+            .raw_set(1, "a")
+            .expect("should set index 1 in array table");
+        table
+            .raw_set(2, "b")
+            .expect("should set index 2 in array table");
+        let result =
+            lua_to_json(Value::Table(table), &lua).expect("should convert array table to json");
         assert_eq!(result, serde_json::json!(["a", "b"]));
     }
 

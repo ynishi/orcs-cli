@@ -67,7 +67,7 @@ fn register_sample(harness: &mut LuaTestHarness) -> serde_json::Value {
                 }
             }),
         )
-        .unwrap()
+        .expect("register sample skill should succeed")
 }
 
 // =============================================================================
@@ -115,7 +115,9 @@ mod status {
 
         // on_request returns { success = true, data = { total, frozen, active, formats } }
         // The harness extracts `data` on success.
-        let result = harness.request(ext_cat(), "status", json!({})).unwrap();
+        let result = harness
+            .request(ext_cat(), "status", json!({}))
+            .expect("status request should succeed");
 
         assert_eq!(result["total"], 0);
         assert_eq!(result["frozen"], false);
@@ -140,10 +142,18 @@ mod registry {
         assert_eq!(result["count"], 1);
 
         // List returns { success = true, data = entries, count = #entries }
-        let result = harness.request(ext_cat(), "list", json!({})).unwrap();
+        let result = harness
+            .request(ext_cat(), "list", json!({}))
+            .expect("list request should succeed");
         // data is the entries array
         assert!(result.is_array());
-        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(
+            result
+                .as_array()
+                .expect("list result should be an array")
+                .len(),
+            1
+        );
         assert_eq!(result[0]["name"], "test-skill");
     }
 
@@ -170,7 +180,7 @@ mod registry {
                     }
                 }),
             )
-            .unwrap_err();
+            .expect_err("duplicate register should return error");
         assert!(err.to_string().contains("already registered"));
     }
 
@@ -182,7 +192,7 @@ mod registry {
 
         let result = harness
             .request(ext_cat(), "get", json!({ "name": "test-skill" }))
-            .unwrap();
+            .expect("get request for existing skill should succeed");
         assert_eq!(result["name"], "test-skill");
         assert_eq!(result["description"], "A test skill");
     }
@@ -194,7 +204,7 @@ mod registry {
 
         let err = harness
             .request(ext_cat(), "get", json!({ "name": "nonexistent" }))
-            .unwrap_err();
+            .expect_err("get nonexistent skill should return error");
         assert!(err.to_string().contains("not found"));
     }
 
@@ -207,10 +217,12 @@ mod registry {
         // Unregister
         let _ = harness
             .request(ext_cat(), "unregister", json!({ "name": "test-skill" }))
-            .unwrap();
+            .expect("unregister request should succeed");
 
         // Verify it's gone via status
-        let status = harness.request(ext_cat(), "status", json!({})).unwrap();
+        let status = harness
+            .request(ext_cat(), "status", json!({}))
+            .expect("status request should succeed after unregister");
         assert_eq!(status["total"], 0);
     }
 
@@ -234,7 +246,7 @@ mod registry {
                     }
                 }),
             )
-            .unwrap();
+            .expect("register deploy-prod should succeed");
 
         harness
             .request(
@@ -251,14 +263,20 @@ mod registry {
                     }
                 }),
             )
-            .unwrap();
+            .expect("register code-review should succeed");
 
         // Search by name
         let result = harness
             .request(ext_cat(), "search", json!({ "query": "deploy" }))
-            .unwrap();
+            .expect("search request should succeed");
         assert!(result.is_array());
-        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(
+            result
+                .as_array()
+                .expect("search result should be an array")
+                .len(),
+            1
+        );
         assert_eq!(result[0]["name"], "deploy-prod");
     }
 
@@ -296,7 +314,7 @@ mod registry {
                         }
                     }),
                 )
-                .unwrap();
+                .expect("register topic skill should succeed");
         }
 
         // Select with "deploy" query should return deploy skills, not code-review
@@ -306,12 +324,15 @@ mod registry {
                 "select",
                 json!({ "query": "deploy", "limit": 5 }),
             )
-            .unwrap();
+            .expect("select request for 'deploy' should succeed");
         assert!(result.is_array());
-        let arr = result.as_array().unwrap();
+        let arr = result.as_array().expect("select result should be an array");
         assert_eq!(arr.len(), 2);
         // Both should be deploy-related
-        let names: Vec<&str> = arr.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = arr
+            .iter()
+            .map(|s| s["name"].as_str().expect("skill name should be a string"))
+            .collect();
         assert!(names.contains(&"deploy-prod"));
         assert!(names.contains(&"deploy-staging"));
     }
@@ -338,15 +359,21 @@ mod registry {
                         }
                     }),
                 )
-                .unwrap();
+                .expect("register tool skill should succeed");
         }
 
         // Select with limit=2
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "tool", "limit": 2 }))
-            .unwrap();
+            .expect("select request with limit should succeed");
         assert!(result.is_array());
-        assert_eq!(result.as_array().unwrap().len(), 2);
+        assert_eq!(
+            result
+                .as_array()
+                .expect("select result should be an array")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -370,15 +397,21 @@ mod registry {
                         }
                     }),
                 )
-                .unwrap();
+                .expect("register skill for empty query test should succeed");
         }
 
         // Empty query returns first N
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "", "limit": 2 }))
-            .unwrap();
+            .expect("select with empty query should succeed");
         assert!(result.is_array());
-        assert_eq!(result.as_array().unwrap().len(), 2);
+        assert_eq!(
+            result
+                .as_array()
+                .expect("select result should be an array")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -389,7 +422,7 @@ mod registry {
 
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "zzz_nomatch_zzz" }))
-            .unwrap();
+            .expect("select with no-match query should succeed with empty result");
         // Empty Lua table {} → JSON object {} (not array [])
         let is_empty = match &result {
             serde_json::Value::Array(a) => a.is_empty(),
@@ -424,7 +457,7 @@ mod catalog {
                         }
                     }),
                 )
-                .unwrap();
+                .expect("register skill for catalog test should succeed");
         }
     }
 
@@ -433,7 +466,9 @@ mod catalog {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
-        let result = harness.request(ext_cat(), "catalog", json!({})).unwrap();
+        let result = harness
+            .request(ext_cat(), "catalog", json!({}))
+            .expect("catalog request on empty registry should succeed");
         // catalog returns { success = true, data = { catalog = text, stats = {...} } }
         assert!(result["catalog"].is_string());
         assert!(result["stats"].is_object());
@@ -445,9 +480,13 @@ mod catalog {
         let _ = harness.init();
         register_n_skills(&mut harness, 3);
 
-        let result = harness.request(ext_cat(), "catalog", json!({})).unwrap();
+        let result = harness
+            .request(ext_cat(), "catalog", json!({}))
+            .expect("catalog request with skills should succeed");
         assert!(result["catalog"].is_string());
-        let catalog_text = result["catalog"].as_str().unwrap();
+        let catalog_text = result["catalog"]
+            .as_str()
+            .expect("catalog text should be a string");
         // Should contain at least one skill name
         assert!(catalog_text.contains("skill-0") || catalog_text.contains("skill-1"));
     }
@@ -467,7 +506,7 @@ mod errors {
 
         let err = harness
             .request(ext_cat(), "nonexistent_op", json!({}))
-            .unwrap_err();
+            .expect_err("unknown operation should return error");
         assert!(err.to_string().contains("unknown operation"));
     }
 
@@ -476,7 +515,9 @@ mod errors {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
-        let err = harness.request(ext_cat(), "get", json!({})).unwrap_err();
+        let err = harness
+            .request(ext_cat(), "get", json!({}))
+            .expect_err("get without required name should return error");
         assert!(err.to_string().contains("required"));
     }
 }
@@ -550,7 +591,7 @@ mod recommend {
 
         let err = harness
             .request(ext_cat(), "recommend", json!({}))
-            .unwrap_err();
+            .expect_err("recommend without intent should return error");
         assert!(
             err.to_string().contains("intent"),
             "error should mention 'intent', got: {err}"
@@ -762,21 +803,21 @@ mod file_io {
     /// Create an Agent Skills Standard skill (SKILL.md + YAML frontmatter)
     fn create_agent_skill(root: &std::path::Path, name: &str, description: &str) {
         let skill_dir = root.join(name);
-        fs::create_dir_all(&skill_dir).unwrap();
+        fs::create_dir_all(&skill_dir).expect("should create skill directory");
         let content = format!(
             "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n{description}\n"
         );
-        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), content).expect("should write SKILL.md");
     }
 
     /// Create a Lua DSL skill (skill.lua returning a table)
     fn create_lua_skill(root: &std::path::Path, name: &str, description: &str) {
         let skill_dir = root.join(name);
-        fs::create_dir_all(&skill_dir).unwrap();
+        fs::create_dir_all(&skill_dir).expect("should create lua skill directory");
         let content = format!(
             "return {{\n  name = \"{name}\",\n  description = \"{description}\",\n  body = \"# {name}\\n\\n{description}\",\n  tags = {{\"test\"}},\n  categories = {{\"execute\"}},\n}}\n"
         );
-        fs::write(skill_dir.join("skill.lua"), content).unwrap();
+        fs::write(skill_dir.join("skill.lua"), content).expect("should write skill.lua");
     }
 
     #[test]
@@ -794,17 +835,24 @@ mod file_io {
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": skills_dir.to_str().unwrap() }),
+                json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover agent skills should succeed");
 
         assert_eq!(result["discovered"], 2);
         assert_eq!(result["registered"], 2);
 
         // Verify via list
-        let list = harness.request(ext_cat(), "list", json!({})).unwrap();
+        let list = harness
+            .request(ext_cat(), "list", json!({}))
+            .expect("list request should succeed after discover");
         assert!(list.is_array());
-        assert_eq!(list.as_array().unwrap().len(), 2);
+        assert_eq!(
+            list.as_array()
+                .expect("list result should be an array")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -819,9 +867,9 @@ mod file_io {
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": skills_dir.to_str().unwrap() }),
+                json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover lua dsl skill should succeed");
 
         assert_eq!(result["discovered"], 1);
         assert_eq!(result["registered"], 1);
@@ -829,7 +877,7 @@ mod file_io {
         // Verify via get
         let skill = harness
             .request(ext_cat(), "get", json!({ "name": "my-tool" }))
-            .unwrap();
+            .expect("get my-tool should succeed after discover");
         assert_eq!(skill["name"], "my-tool");
         assert_eq!(skill["description"], "A custom Lua tool");
         assert_eq!(skill["source"]["format"], "lua-dsl");
@@ -848,15 +896,17 @@ mod file_io {
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": skills_dir.to_str().unwrap() }),
+                json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover mixed formats should succeed");
 
         assert_eq!(result["discovered"], 2);
         assert_eq!(result["registered"], 2);
 
         // Verify both exist
-        let status = harness.request(ext_cat(), "status", json!({})).unwrap();
+        let status = harness
+            .request(ext_cat(), "status", json!({}))
+            .expect("status request should succeed after mixed discover");
         assert_eq!(status["total"], 2);
     }
 
@@ -866,15 +916,15 @@ mod file_io {
         let _ = harness.init();
 
         let empty_dir = root.join("empty-skills");
-        fs::create_dir_all(&empty_dir).unwrap();
+        fs::create_dir_all(&empty_dir).expect("should create empty skills directory");
 
         let result = harness
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": empty_dir.to_str().unwrap() }),
+                json!({ "path": empty_dir.to_str().expect("empty_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover on empty directory should succeed");
 
         assert_eq!(result["discovered"], 0);
         assert_eq!(result["registered"], 0);
@@ -895,13 +945,17 @@ mod file_io {
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": skills_dir.to_str().unwrap() }),
+                json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover for catalog test should succeed");
 
         // Catalog should include all discovered skills
-        let catalog = harness.request(ext_cat(), "catalog", json!({})).unwrap();
-        let text = catalog["catalog"].as_str().unwrap();
+        let catalog = harness
+            .request(ext_cat(), "catalog", json!({}))
+            .expect("catalog request after discover should succeed");
+        let text = catalog["catalog"]
+            .as_str()
+            .expect("catalog text should be a string");
 
         assert!(text.contains("deploy"), "catalog should contain 'deploy'");
         assert!(text.contains("review"), "catalog should contain 'review'");
@@ -924,9 +978,9 @@ mod file_io {
             .request(
                 ext_cat(),
                 "detect_format",
-                json!({ "path": skill_dir.to_str().unwrap() }),
+                json!({ "path": skill_dir.to_str().expect("skill_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("detect_format for agent-skills should succeed");
         assert_eq!(result["format"], "agent-skills");
     }
 
@@ -942,9 +996,9 @@ mod file_io {
             .request(
                 ext_cat(),
                 "detect_format",
-                json!({ "path": skill_dir.to_str().unwrap() }),
+                json!({ "path": skill_dir.to_str().expect("skill_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("detect_format for lua-dsl should succeed");
         assert_eq!(result["format"], "lua-dsl");
     }
 
@@ -981,12 +1035,13 @@ mod file_io {
             ),
         ] {
             let skill_dir = skills_dir.join(name);
-            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::create_dir_all(&skill_dir).expect("should create topic skill directory");
             let content = format!(
                 "---\nname: {name}\ndescription: {desc}\ntags:\n{tags_yaml}\ncategories:\n  - dev\n---\n\n# {name}\n\n{desc}\n",
                 tags_yaml = tags.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n"),
             );
-            std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), content)
+                .expect("should write SKILL.md for topic skill");
         }
 
         // Discover all
@@ -994,18 +1049,18 @@ mod file_io {
             .request(
                 ext_cat(),
                 "discover",
-                json!({ "path": skills_dir.to_str().unwrap() }),
+                json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
-            .unwrap();
+            .expect("discover topic skills should succeed");
         assert_eq!(disc["discovered"], 4);
         assert_eq!(disc["registered"], 4);
 
         // Select with "rust" → rust-dev should be top
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "rust", "limit": 3 }))
-            .unwrap();
+            .expect("select for 'rust' should succeed");
         assert!(result.is_array(), "expected array, got: {result}");
-        let arr = result.as_array().unwrap();
+        let arr = result.as_array().expect("select result should be an array");
         assert!(!arr.is_empty(), "select should return at least 1 skill");
         assert_eq!(arr[0]["name"], "rust-dev", "rust-dev should be top result");
 
@@ -1016,8 +1071,8 @@ mod file_io {
                 "select",
                 json!({ "query": "python", "limit": 3 }),
             )
-            .unwrap();
-        let arr = result.as_array().unwrap();
+            .expect("select for 'python' should succeed");
+        let arr = result.as_array().expect("select result should be an array");
         assert_eq!(
             arr[0]["name"], "python-dev",
             "python-dev should be top result"
@@ -1030,8 +1085,8 @@ mod file_io {
                 "select",
                 json!({ "query": "deploy docker", "limit": 3 }),
             )
-            .unwrap();
-        let arr = result.as_array().unwrap();
+            .expect("select for 'deploy docker' should succeed");
+        let arr = result.as_array().expect("select result should be an array");
         assert_eq!(
             arr[0]["name"], "deploy-ops",
             "deploy-ops should be top result"

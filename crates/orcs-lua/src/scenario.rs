@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn test_assertions_eq_pass() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         let result: LuaResult<()> = lua.load("orcs.test.eq(1, 1)").exec();
         assert!(result.is_ok());
     }
@@ -810,29 +810,33 @@ mod tests {
     #[test]
     fn test_assertions_eq_fail() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         let result: LuaResult<()> = lua.load("orcs.test.eq(1, 2)").exec();
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("should fail for unequal values")
+            .to_string();
         assert!(err.contains("ASSERT FAILED: eq"));
     }
 
     #[test]
     fn test_assertions_eq_with_message() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         let result: LuaResult<()> = lua
             .load(r#"orcs.test.eq("a", "b", "values should match")"#)
             .exec();
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("should fail with custom message for unequal values")
+            .to_string();
         assert!(err.contains("values should match"));
     }
 
     #[test]
     fn test_assertions_ok_truthy() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         assert!(lua.load("orcs.test.ok(true)").exec().is_ok());
         assert!(lua.load("orcs.test.ok(1)").exec().is_ok());
         assert!(lua.load(r#"orcs.test.ok("hello")"#).exec().is_ok());
@@ -842,7 +846,7 @@ mod tests {
     #[test]
     fn test_assertions_ok_falsy() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         assert!(lua.load("orcs.test.ok(false)").exec().is_err());
         assert!(lua.load("orcs.test.ok(nil)").exec().is_err());
     }
@@ -850,7 +854,7 @@ mod tests {
     #[test]
     fn test_assertions_contains() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         assert!(lua
             .load(r#"orcs.test.contains("hello world", "world")"#)
             .exec()
@@ -864,10 +868,13 @@ mod tests {
     #[test]
     fn test_assertions_fail() {
         let lua = Lua::new();
-        register_test_assertions(&lua).unwrap();
+        register_test_assertions(&lua).expect("should register test assertions");
         let result: LuaResult<()> = lua.load(r#"orcs.test.fail("boom")"#).exec();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("boom"));
+        assert!(result
+            .expect_err("should fail with boom message")
+            .to_string()
+            .contains("boom"));
     }
 
     #[test]
@@ -903,7 +910,7 @@ mod tests {
             }
         "#,
             )
-            .unwrap();
+            .expect("should run inline scenario pass");
 
         assert_all_pass(&result);
         assert_eq!(result.results.len(), 2);
@@ -938,7 +945,7 @@ mod tests {
             }
         "#,
             )
-            .unwrap();
+            .expect("should run inline scenario with failure");
 
         assert!(!result.all_passed());
         assert!(matches!(&result.results[0], ScenarioResult::Fail(_, _)));
@@ -973,7 +980,7 @@ mod tests {
             }
         "#,
             )
-            .unwrap();
+            .expect("should run inline veto scenario");
 
         assert_all_pass(&result);
     }
@@ -995,7 +1002,7 @@ mod tests {
             }
         "#,
             )
-            .unwrap();
+            .expect("should run inline embedded component scenario");
 
         assert_all_pass(&result);
     }
@@ -1032,7 +1039,7 @@ mod tests {
             }
         "#,
             )
-            .unwrap();
+            .expect("should run fresh harness per scenario");
 
         assert_all_pass(&result);
     }

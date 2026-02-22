@@ -44,17 +44,22 @@ mod basic {
 
     #[test]
     fn echo_request() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness");
 
         let result = harness.request(EventCategory::Echo, "echo", json!({"msg": "hello"}));
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), json!({"msg": "hello"}));
+        assert_eq!(
+            result.expect("echo request should succeed"),
+            json!({"msg": "hello"})
+        );
     }
 
     #[test]
     fn uppercase_request() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for uppercase test");
 
         let result = harness.request(
             EventCategory::Echo,
@@ -63,12 +68,16 @@ mod basic {
         );
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), json!({"text": "HELLO WORLD"}));
+        assert_eq!(
+            result.expect("uppercase request should succeed"),
+            json!({"text": "HELLO WORLD"})
+        );
     }
 
     #[test]
     fn unknown_operation_error() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for unknown op test");
 
         let result = harness.request(EventCategory::Echo, "unknown", json!({}));
 
@@ -77,7 +86,8 @@ mod basic {
 
     #[test]
     fn veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for veto test");
 
         let response = harness.veto();
 
@@ -87,7 +97,8 @@ mod basic {
 
     #[test]
     fn cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for cancel test");
 
         let response = harness.cancel();
 
@@ -97,14 +108,16 @@ mod basic {
 
     #[test]
     fn subscriptions() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for subscriptions test");
 
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]
     fn component_id() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create echo harness for component id test");
 
         assert_eq!(harness.id().name, "echo");
         assert_eq!(harness.id().namespace, "lua");
@@ -147,38 +160,40 @@ mod stateful {
 
     #[test]
     fn increment_counter() {
-        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox())
+            .expect("should create counter harness for increment test");
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
-            .unwrap();
+            .expect("first increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
-            .unwrap();
+            .expect("second increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
-            .unwrap();
+            .expect("third increment should succeed");
 
         let result = harness
             .request(EventCategory::Echo, "get", json!({}))
-            .unwrap();
+            .expect("get counter should succeed");
         assert_eq!(result["count"], 3);
     }
 
     #[test]
     fn reset_counter() {
-        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_sandbox())
+            .expect("should create counter harness for reset test");
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
-            .unwrap();
+            .expect("first increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
-            .unwrap();
+            .expect("second increment should succeed");
 
         let result = harness
             .request(EventCategory::Echo, "reset", json!({}))
-            .unwrap();
+            .expect("reset counter should succeed");
         assert_eq!(result["count"], 0);
     }
 }
@@ -236,19 +251,21 @@ mod lifecycle {
 
     #[test]
     fn init_called() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox())
+            .expect("should create lifecycle harness for init test");
 
         assert!(harness.init().is_ok());
 
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", json!({}))
-            .unwrap();
+            .expect("get_state should succeed after init");
         assert_eq!(result["initialized"], true);
     }
 
     #[test]
     fn shutdown_called() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox())
+            .expect("should create lifecycle harness for shutdown test");
 
         harness.init().ok();
         harness.shutdown();
@@ -260,7 +277,8 @@ mod lifecycle {
 
     #[test]
     fn request_count_tracked() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox())
+            .expect("should create lifecycle harness for request count test");
 
         harness
             .request(EventCategory::Lifecycle, "any", json!({}))
@@ -274,7 +292,7 @@ mod lifecycle {
 
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", json!({}))
-            .unwrap();
+            .expect("get_state should succeed for request count check");
         assert_eq!(result["request_count"], 4); // 3 + 1 for get_state
     }
 }
@@ -310,7 +328,8 @@ mod signals {
 
     #[test]
     fn veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox())
+            .expect("should create signal harness for veto test");
 
         let response = harness.veto();
 
@@ -320,7 +339,8 @@ mod signals {
 
     #[test]
     fn cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox())
+            .expect("should create signal harness for cancel test");
 
         let response = harness.cancel();
 
@@ -329,7 +349,8 @@ mod signals {
 
     #[test]
     fn approve_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox())
+            .expect("should create signal harness for approve test");
 
         let response = harness.approve("test-approval");
 
@@ -338,7 +359,8 @@ mod signals {
 
     #[test]
     fn reject_handled() {
-        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_sandbox())
+            .expect("should create signal harness for reject test");
 
         let response = harness.reject("test-approval", Some("reason".to_string()));
 
@@ -439,7 +461,8 @@ mod logging {
 
     #[test]
     fn request_log_captured() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox())
+            .expect("should create logging harness for request log test");
 
         harness.request(EventCategory::Echo, "op1", json!(1)).ok();
         harness.request(EventCategory::Echo, "op2", json!(2)).ok();
@@ -453,7 +476,8 @@ mod logging {
 
     #[test]
     fn signal_log_captured() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox())
+            .expect("should create logging harness for signal log test");
 
         harness.cancel();
         harness.approve("test");
@@ -464,7 +488,8 @@ mod logging {
 
     #[test]
     fn clear_logs() {
-        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox())
+            .expect("should create logging harness for clear logs test");
 
         harness.request(EventCategory::Echo, "op", json!({})).ok();
         harness.cancel();
@@ -480,9 +505,13 @@ mod logging {
 
     #[test]
     fn script_source_accessible() {
-        let harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox()).unwrap();
+        let harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_sandbox())
+            .expect("should create logging harness for script source test");
 
         assert!(harness.script_source().is_some());
-        assert!(harness.script_source().unwrap().contains("logging-test"));
+        assert!(harness
+            .script_source()
+            .expect("script source should be available")
+            .contains("logging-test"));
     }
 }

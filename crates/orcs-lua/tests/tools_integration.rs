@@ -29,13 +29,13 @@ fn test_sandbox() -> Arc<dyn SandboxPolicy> {
 fn tempdir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cwd = std::env::current_dir().unwrap();
+    let cwd = std::env::current_dir().expect("should get current working directory");
     let dir = cwd.join(format!(
         "target/test-tmp/orcs-tools-e2e-{}-{}",
         std::process::id(),
         seq,
     ));
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("should create test temp directory");
     dir
 }
 
@@ -63,20 +63,21 @@ mod read {
             "#,
             file_path
         );
-        LuaTestHarness::from_script(&script, test_sandbox()).unwrap()
+        LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create read test harness from script")
     }
 
     #[test]
     fn read_existing_file() {
         let dir = tempdir();
         let file = dir.join("read_test.txt");
-        fs::write(&file, "hello from read").unwrap();
+        fs::write(&file, "hello from read").expect("should write test file for read");
 
         let mut h = read_harness(&escape_path(&file));
         let result = h.request(EventCategory::Echo, "read", json!(null));
 
         assert!(result.is_ok());
-        let data = result.unwrap();
+        let data = result.expect("read request should succeed");
         assert_eq!(data["content"], "hello from read");
         assert_eq!(data["size"], 15);
     }
@@ -103,10 +104,12 @@ mod read {
     fn read_utf8_content() {
         let dir = tempdir();
         let file = dir.join("utf8.txt");
-        fs::write(&file, "日本語テスト").unwrap();
+        fs::write(&file, "日本語テスト").expect("should write UTF-8 test file");
 
         let mut h = read_harness(&escape_path(&file));
-        let result = h.request(EventCategory::Echo, "read", json!(null)).unwrap();
+        let result = h
+            .request(EventCategory::Echo, "read", json!(null))
+            .expect("read UTF-8 content should succeed");
         assert_eq!(result["content"], "日本語テスト");
     }
 }
@@ -137,13 +140,17 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
-            .unwrap();
+            .expect("write request should succeed");
 
         assert_eq!(result["bytes_written"], 15);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "written content");
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read back written file"),
+            "written content"
+        );
     }
 
     #[test]
@@ -167,13 +174,17 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create subdir write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
-            .unwrap();
+            .expect("write with subdirs should succeed");
 
         assert_eq!(result["bytes"], 6);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "nested");
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read back nested file"),
+            "nested"
+        );
     }
 }
 
@@ -186,7 +197,7 @@ mod grep {
     fn grep_finds_matches() {
         let dir = tempdir();
         let file = dir.join("grep_test.txt");
-        fs::write(&file, "line one\nline two\nthird").unwrap();
+        fs::write(&file, "line one\nline two\nthird").expect("should write grep test file");
         let path = escape_path(&file);
 
         let script = format!(
@@ -215,8 +226,11 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
-        let result = h.request(EventCategory::Echo, "grep", json!(null)).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create grep test harness");
+        let result = h
+            .request(EventCategory::Echo, "grep", json!(null))
+            .expect("grep request should succeed");
 
         assert_eq!(result["count"], 2);
         assert_eq!(result["first_line_num"], 1);
@@ -227,7 +241,7 @@ mod grep {
     fn grep_regex_works() {
         let dir = tempdir();
         let file = dir.join("regex_test.txt");
-        fs::write(&file, "foo123\nbar\nfoo456").unwrap();
+        fs::write(&file, "foo123\nbar\nfoo456").expect("should write regex test file");
         let path = escape_path(&file);
 
         let script = format!(
@@ -245,8 +259,11 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
-        let result = h.request(EventCategory::Echo, "grep", json!(null)).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create regex grep test harness");
+        let result = h
+            .request(EventCategory::Echo, "grep", json!(null))
+            .expect("regex grep request should succeed");
         assert_eq!(result["count"], 2);
     }
 }
@@ -259,9 +276,9 @@ mod glob {
     #[test]
     fn glob_finds_by_extension() {
         let dir = tempdir();
-        fs::write(dir.join("a.rs"), "").unwrap();
-        fs::write(dir.join("b.rs"), "").unwrap();
-        fs::write(dir.join("c.txt"), "").unwrap();
+        fs::write(dir.join("a.rs"), "").expect("should write a.rs");
+        fs::write(dir.join("b.rs"), "").expect("should write b.rs");
+        fs::write(dir.join("c.txt"), "").expect("should write c.txt");
         let dir_path = escape_path(&dir);
 
         let script = format!(
@@ -279,8 +296,11 @@ mod glob {
             dir_path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
-        let result = h.request(EventCategory::Echo, "glob", json!(null)).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create glob test harness");
+        let result = h
+            .request(EventCategory::Echo, "glob", json!(null))
+            .expect("glob request should succeed");
         assert_eq!(result["count"], 2);
     }
 
@@ -299,10 +319,18 @@ mod glob {
             }
         "#;
 
-        let mut h = LuaTestHarness::from_script(script, test_sandbox()).unwrap();
-        let result = h.request(EventCategory::Echo, "glob", json!(null)).unwrap();
+        let mut h = LuaTestHarness::from_script(script, test_sandbox())
+            .expect("should create glob cwd test harness");
+        let result = h
+            .request(EventCategory::Echo, "glob", json!(null))
+            .expect("glob with default dir should succeed");
         // Should find at least Cargo.toml in workspace root
-        assert!(result["count"].as_i64().unwrap() >= 1);
+        assert!(
+            result["count"]
+                .as_i64()
+                .expect("count should be an integer")
+                >= 1
+        );
     }
 }
 
@@ -330,8 +358,11 @@ fn write_read_roundtrip() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
-    let result = h.request(EventCategory::Echo, "test", json!(null)).unwrap();
+    let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        .expect("should create roundtrip test harness");
+    let result = h
+        .request(EventCategory::Echo, "test", json!(null))
+        .expect("write-read roundtrip should succeed");
     assert_eq!(result["content"], "roundtrip data 123");
 }
 
@@ -359,8 +390,11 @@ fn write_then_grep() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
-    let result = h.request(EventCategory::Echo, "test", json!(null)).unwrap();
+    let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        .expect("should create write-then-grep test harness");
+    let result = h
+        .request(EventCategory::Echo, "test", json!(null))
+        .expect("write-then-grep should succeed");
     assert_eq!(result["count"], 2);
 }
 
@@ -458,16 +492,19 @@ mod capability_gating {
     fn read_allowed_with_read_capability() {
         let dir = tempdir();
         let file = dir.join("cap_read.txt");
-        fs::write(&file, "cap-gated content").unwrap();
+        fs::write(&file, "cap-gated content").expect("should write capability test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create capability read test harness");
 
         // Set ChildContext with READ capability
         h.component_mut()
             .set_child_context(CapMockContext::with_caps(Capability::ALL));
 
-        let result = h.request(EventCategory::Echo, "read", json!(null)).unwrap();
+        let result = h
+            .request(EventCategory::Echo, "read", json!(null))
+            .expect("read with READ capability should succeed");
         assert_eq!(result["content"], "cap-gated content");
 
         fs::remove_dir_all(&dir).ok();
@@ -477,10 +514,11 @@ mod capability_gating {
     fn read_denied_without_read_capability() {
         let dir = tempdir();
         let file = dir.join("cap_read_deny.txt");
-        fs::write(&file, "should not read").unwrap();
+        fs::write(&file, "should not read").expect("should write deny-read test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create deny-read test harness");
 
         // Set ChildContext with WRITE only (no READ)
         h.component_mut()
@@ -490,7 +528,7 @@ mod capability_gating {
         // Request succeeds (Lua returns success=false), so check inner data
         assert!(
             result.is_err() || {
-                let v = result.unwrap();
+                let v = result.expect("read result should be available for inspection");
                 let err = v["error"].as_str().unwrap_or("");
                 err.contains("Capability::READ")
             }
@@ -505,7 +543,8 @@ mod capability_gating {
         let file = dir.join("cap_write_deny.txt");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create deny-write test harness");
 
         // Set ChildContext with READ only (no WRITE)
         h.component_mut()
@@ -514,7 +553,7 @@ mod capability_gating {
         let result = h.request(EventCategory::Echo, "write", json!(null));
         assert!(
             result.is_err() || {
-                let v = result.unwrap();
+                let v = result.expect("write result should be available for inspection");
                 let err = v["error"].as_str().unwrap_or("");
                 err.contains("Capability::WRITE")
             }
@@ -530,10 +569,11 @@ mod capability_gating {
     fn remove_denied_without_delete_capability() {
         let dir = tempdir();
         let file = dir.join("cap_remove_deny.txt");
-        fs::write(&file, "should survive").unwrap();
+        fs::write(&file, "should survive").expect("should write deny-delete test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create deny-delete test harness");
 
         // Set ChildContext with READ | WRITE (no DELETE)
         h.component_mut()
@@ -544,7 +584,7 @@ mod capability_gating {
         let result = h.request(EventCategory::Echo, "remove", json!(null));
         assert!(
             result.is_err() || {
-                let v = result.unwrap();
+                let v = result.expect("remove result should be available for inspection");
                 let err = v["error"].as_str().unwrap_or("");
                 err.contains("Capability::DELETE")
             }
@@ -561,13 +601,16 @@ mod capability_gating {
         // Without ChildContext, base tools (sandbox-only) are used
         let dir = tempdir();
         let file = dir.join("no_ctx_read.txt");
-        fs::write(&file, "sandbox only").unwrap();
+        fs::write(&file, "sandbox only").expect("should write sandbox-only test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox()).unwrap();
+        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+            .expect("should create sandbox-only test harness");
 
         // No set_child_context — base tools active
-        let result = h.request(EventCategory::Echo, "read", json!(null)).unwrap();
+        let result = h
+            .request(EventCategory::Echo, "read", json!(null))
+            .expect("sandbox-only read should succeed");
         assert_eq!(result["content"], "sandbox only");
 
         fs::remove_dir_all(&dir).ok();

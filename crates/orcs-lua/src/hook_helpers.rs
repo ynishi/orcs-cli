@@ -682,22 +682,24 @@ mod tests {
 
     #[test]
     fn parse_descriptor_basic() {
-        let (fql, point) = parse_hook_descriptor("builtin::llm:request.pre_dispatch").unwrap();
+        let (fql, point) = parse_hook_descriptor("builtin::llm:request.pre_dispatch")
+            .expect("should parse valid descriptor with builtin::llm");
         assert_eq!(fql.to_string(), "builtin::llm");
         assert_eq!(point, HookPoint::RequestPreDispatch);
     }
 
     #[test]
     fn parse_descriptor_wildcard_fql() {
-        let (fql, point) = parse_hook_descriptor("*::*:component.pre_init").unwrap();
+        let (fql, point) = parse_hook_descriptor("*::*:component.pre_init")
+            .expect("should parse wildcard FQL descriptor");
         assert_eq!(fql.to_string(), "*::*");
         assert_eq!(point, HookPoint::ComponentPreInit);
     }
 
     #[test]
     fn parse_descriptor_with_child_path() {
-        let (fql, point) =
-            parse_hook_descriptor("builtin::llm/agent-1:signal.pre_dispatch").unwrap();
+        let (fql, point) = parse_hook_descriptor("builtin::llm/agent-1:signal.pre_dispatch")
+            .expect("should parse descriptor with child path");
         assert_eq!(fql.to_string(), "builtin::llm/agent-1");
         assert_eq!(point, HookPoint::SignalPreDispatch);
     }
@@ -781,7 +783,8 @@ mod tests {
         let lua = test_lua();
         let ctx = test_ctx();
 
-        let action = parse_hook_return(&lua, Value::Nil, &ctx).unwrap();
+        let action =
+            parse_hook_return(&lua, Value::Nil, &ctx).expect("should parse nil return as continue");
         assert!(action.is_continue());
     }
 
@@ -791,8 +794,10 @@ mod tests {
         let ctx = test_ctx();
 
         // Create a context table in Lua (has hook_point key)
-        let ctx_value = hook_context_to_lua(&lua, &ctx).unwrap();
-        let action = parse_hook_return(&lua, ctx_value, &ctx).unwrap();
+        let ctx_value =
+            hook_context_to_lua(&lua, &ctx).expect("should convert context to lua value");
+        let action = parse_hook_return(&lua, ctx_value, &ctx)
+            .expect("should parse context table return as continue");
         assert!(action.is_continue());
     }
 
@@ -804,9 +809,9 @@ mod tests {
         let table: Value = lua
             .load(r#"return { action = "skip", result = { cached = true } }"#)
             .eval()
-            .unwrap();
+            .expect("should eval skip action table");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action = parse_hook_return(&lua, table, &ctx).expect("should parse skip action");
         assert!(action.is_skip());
         if let HookAction::Skip(val) = action {
             assert_eq!(val, json!({"cached": true}));
@@ -821,9 +826,9 @@ mod tests {
         let table: Value = lua
             .load(r#"return { action = "abort", reason = "policy violation" }"#)
             .eval()
-            .unwrap();
+            .expect("should eval abort action table");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action = parse_hook_return(&lua, table, &ctx).expect("should parse abort action");
         assert!(action.is_abort());
         if let HookAction::Abort { reason } = action {
             assert_eq!(reason, "policy violation");
@@ -838,9 +843,9 @@ mod tests {
         let table: Value = lua
             .load(r#"return { action = "replace", result = { new_data = 42 } }"#)
             .eval()
-            .unwrap();
+            .expect("should eval replace action table");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action = parse_hook_return(&lua, table, &ctx).expect("should parse replace action");
         assert!(action.is_replace());
         if let HookAction::Replace(val) = action {
             assert_eq!(val, json!({"new_data": 42}));
@@ -855,9 +860,10 @@ mod tests {
         let table: Value = lua
             .load(r#"return { action = "continue" }"#)
             .eval()
-            .unwrap();
+            .expect("should eval continue action table");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action =
+            parse_hook_return(&lua, table, &ctx).expect("should parse explicit continue action");
         assert!(action.is_continue());
     }
 
@@ -866,9 +872,13 @@ mod tests {
         let lua = test_lua();
         let ctx = test_ctx();
 
-        let table: Value = lua.load(r#"return { action = "abort" }"#).eval().unwrap();
+        let table: Value = lua
+            .load(r#"return { action = "abort" }"#)
+            .eval()
+            .expect("should eval abort without reason");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action =
+            parse_hook_return(&lua, table, &ctx).expect("should parse abort with default reason");
         if let HookAction::Abort { reason } = action {
             assert_eq!(reason, "aborted by lua hook");
         } else {
@@ -881,7 +891,10 @@ mod tests {
         let lua = test_lua();
         let ctx = test_ctx();
 
-        let table: Value = lua.load(r#"return { action = "invalid" }"#).eval().unwrap();
+        let table: Value = lua
+            .load(r#"return { action = "invalid" }"#)
+            .eval()
+            .expect("should eval invalid action table");
 
         let result = parse_hook_return(&lua, table, &ctx);
         assert!(result.is_err());
@@ -904,9 +917,10 @@ mod tests {
         let table: Value = lua
             .load(r#"return { custom_field = "hello" }"#)
             .eval()
-            .unwrap();
+            .expect("should eval custom field table");
 
-        let action = parse_hook_return(&lua, table, &ctx).unwrap();
+        let action = parse_hook_return(&lua, table, &ctx)
+            .expect("should parse unknown table as payload update");
         assert!(action.is_continue());
         if let HookAction::Continue(new_ctx) = action {
             assert_eq!(new_ctx.payload, json!({"custom_field": "hello"}));
@@ -918,17 +932,20 @@ mod tests {
     #[test]
     fn lua_hook_pass_through() {
         let lua = test_lua();
-        let func: Function = lua.load("function(ctx) return ctx end").eval().unwrap();
+        let func: Function = lua
+            .load("function(ctx) return ctx end")
+            .eval()
+            .expect("should eval pass-through function");
 
         let hook = LuaHook::new(
             "test-pass".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create pass-through hook");
 
         assert_eq!(hook.id(), "test-pass");
         assert_eq!(hook.hook_point(), HookPoint::RequestPreDispatch);
@@ -952,17 +969,17 @@ mod tests {
                 "#,
             )
             .eval()
-            .unwrap();
+            .expect("should eval payload-modifying function");
 
         let hook = LuaHook::new(
             "test-mod".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create payload-modifying hook");
 
         let ctx = test_ctx();
         let action = hook.execute(ctx);
@@ -982,17 +999,17 @@ mod tests {
         let func: Function = lua
             .load(r#"function(ctx) return { action = "skip", result = { cached = true } } end"#)
             .eval()
-            .unwrap();
+            .expect("should eval skip-returning function");
 
         let hook = LuaHook::new(
             "test-skip".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create skip hook");
 
         let action = hook.execute(test_ctx());
         assert!(action.is_skip());
@@ -1004,17 +1021,17 @@ mod tests {
         let func: Function = lua
             .load(r#"function(ctx) return { action = "abort", reason = "blocked" } end"#)
             .eval()
-            .unwrap();
+            .expect("should eval abort-returning function");
 
         let hook = LuaHook::new(
             "test-abort".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create abort hook");
 
         let action = hook.execute(test_ctx());
         assert!(action.is_abort());
@@ -1029,17 +1046,17 @@ mod tests {
         let func: Function = lua
             .load(r#"function(ctx) error("intentional error") end"#)
             .eval()
-            .unwrap();
+            .expect("should eval error-throwing function");
 
         let hook = LuaHook::new(
             "test-err".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create error-fallback hook");
 
         let ctx = test_ctx();
         let action = hook.execute(ctx.clone());
@@ -1057,17 +1074,17 @@ mod tests {
         let func: Function = lua
             .load("function(ctx) end") // returns nil
             .eval()
-            .unwrap();
+            .expect("should eval nil-returning function");
 
         let hook = LuaHook::new(
             "test-nil".to_string(),
-            FqlPattern::parse("*::*").unwrap(),
+            FqlPattern::parse("*::*").expect("should parse wildcard FQL"),
             HookPoint::RequestPreDispatch,
             100,
             &lua,
             &func,
         )
-        .unwrap();
+        .expect("should create nil-return hook");
 
         let action = hook.execute(test_ctx());
         assert!(action.is_continue());
@@ -1081,7 +1098,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function");
 
         lua.load(
             r#"
@@ -1093,7 +1111,9 @@ mod tests {
         .exec()
         .expect("orcs.hook() should succeed");
 
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock on registry");
         assert_eq!(guard.len(), 1);
     }
 
@@ -1103,7 +1123,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for table form");
 
         lua.load(
             r#"
@@ -1119,7 +1140,9 @@ mod tests {
         .exec()
         .expect("orcs.hook() table form should succeed");
 
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock on registry");
         assert_eq!(guard.len(), 1);
     }
 
@@ -1129,7 +1152,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for multiple hooks");
 
         lua.load(
             r#"
@@ -1141,7 +1165,9 @@ mod tests {
         .exec()
         .expect("multiple hooks should succeed");
 
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock on registry");
         assert_eq!(guard.len(), 3);
     }
 
@@ -1151,7 +1177,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for invalid descriptor test");
 
         let result = lua
             .load(r#"orcs.hook("invalid_no_point", function(ctx) return ctx end)"#)
@@ -1166,7 +1193,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for wrong args test");
 
         // Too many args
         let result = lua.load(r#"orcs.hook("a", "b", "c")"#).exec();
@@ -1180,16 +1208,20 @@ mod tests {
     #[test]
     fn hook_stub_returns_error() {
         let lua = test_lua();
-        let orcs_table = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs_table).unwrap();
+        let orcs_table = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs_table)
+            .expect("should set orcs global");
 
-        register_hook_stub(&lua).unwrap();
+        register_hook_stub(&lua).expect("should register hook stub");
 
         let result = lua
             .load(r#"orcs.hook("*::*:request.pre_dispatch", function(ctx) end)"#)
             .exec();
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("should fail with no hook registry")
+            .to_string();
         assert!(
             err.contains("no hook registry"),
             "expected 'no hook registry' in error, got: {err}"
@@ -1204,7 +1236,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for dispatch test");
 
         // Register a hook that adds a field to the payload
         lua.load(
@@ -1216,11 +1249,13 @@ mod tests {
             "#,
         )
         .exec()
-        .unwrap();
+        .expect("should register dispatch hook via lua");
 
         // Dispatch through the registry
         let ctx = test_ctx();
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock for dispatch");
         let action = guard.dispatch(
             HookPoint::RequestPreDispatch,
             &ComponentId::builtin("llm"),
@@ -1241,7 +1276,8 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for abort dispatch test");
 
         lua.load(
             r#"
@@ -1251,10 +1287,12 @@ mod tests {
             "#,
         )
         .exec()
-        .unwrap();
+        .expect("should register abort hook via lua");
 
         let ctx = test_ctx();
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock for abort dispatch");
         let action = guard.dispatch(
             HookPoint::RequestPreDispatch,
             &ComponentId::builtin("llm"),
@@ -1276,8 +1314,10 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
-        register_unhook_function(&lua, Arc::clone(&registry)).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for unhook test");
+        register_unhook_function(&lua, Arc::clone(&registry))
+            .expect("should register unhook function");
 
         // Register a hook
         lua.load(
@@ -1291,17 +1331,29 @@ mod tests {
             "#,
         )
         .exec()
-        .unwrap();
+        .expect("should register removable hook via lua");
 
-        assert_eq!(registry.read().unwrap().len(), 1);
+        assert_eq!(
+            registry
+                .read()
+                .expect("should acquire read lock after hook registration")
+                .len(),
+            1
+        );
 
         // Unhook it
         let removed: bool = lua
             .load(r#"return orcs.unhook("removable-hook")"#)
             .eval()
-            .unwrap();
+            .expect("should eval unhook call");
         assert!(removed);
-        assert_eq!(registry.read().unwrap().len(), 0);
+        assert_eq!(
+            registry
+                .read()
+                .expect("should acquire read lock after unhook")
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -1309,12 +1361,13 @@ mod tests {
         let lua = test_lua();
         let registry = test_registry();
 
-        register_unhook_function(&lua, Arc::clone(&registry)).unwrap();
+        register_unhook_function(&lua, Arc::clone(&registry))
+            .expect("should register unhook function");
 
         let removed: bool = lua
             .load(r#"return orcs.unhook("nonexistent")"#)
             .eval()
-            .unwrap();
+            .expect("should eval unhook for nonexistent id");
         assert!(!removed);
     }
 
@@ -1324,8 +1377,10 @@ mod tests {
         let registry = test_registry();
         let comp_id = ComponentId::builtin("test-comp");
 
-        register_hook_function(&lua, Arc::clone(&registry), comp_id).unwrap();
-        register_unhook_function(&lua, Arc::clone(&registry)).unwrap();
+        register_hook_function(&lua, Arc::clone(&registry), comp_id)
+            .expect("should register hook function for roundtrip test");
+        register_unhook_function(&lua, Arc::clone(&registry))
+            .expect("should register unhook function for roundtrip test");
 
         // Register 2 hooks, remove 1
         lua.load(
@@ -1340,17 +1395,29 @@ mod tests {
             "#,
         )
         .exec()
-        .unwrap();
+        .expect("should register two hooks via lua");
 
-        assert_eq!(registry.read().unwrap().len(), 2);
+        assert_eq!(
+            registry
+                .read()
+                .expect("should acquire read lock after registering two hooks")
+                .len(),
+            2
+        );
 
         // Remove the auto-named one (lua:builtin::test-comp:request.pre_dispatch)
         let removed: bool = lua
             .load(r#"return orcs.unhook("lua:builtin::test-comp:request.pre_dispatch")"#)
             .eval()
-            .unwrap();
+            .expect("should eval unhook for auto-named hook");
         assert!(removed);
-        assert_eq!(registry.read().unwrap().len(), 1);
+        assert_eq!(
+            registry
+                .read()
+                .expect("should acquire read lock after removing one hook")
+                .len(),
+            1
+        );
     }
 
     // ── load_hooks_from_config ──────────────────────────────────
@@ -1506,7 +1573,9 @@ mod tests {
         assert_eq!(result.skipped, 1);
         assert!(result.errors.is_empty());
 
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock after loading multiple hooks");
         assert_eq!(guard.len(), 2);
     }
 
@@ -1534,13 +1603,13 @@ mod tests {
     #[test]
     fn load_config_script_file_success() {
         // Create a temp file with a Lua function
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("should create temp directory");
         let script_path = dir.path().join("test_hook.lua");
         std::fs::write(
             &script_path,
             "return function(ctx) ctx.payload.from_file = true return ctx end",
         )
-        .unwrap();
+        .expect("should write test hook lua file");
 
         let config = orcs_hook::HooksConfig {
             hooks: vec![orcs_hook::HookDef {
@@ -1560,7 +1629,9 @@ mod tests {
         assert!(result.errors.is_empty());
 
         // Verify the hook dispatches correctly
-        let guard = registry.read().unwrap();
+        let guard = registry
+            .read()
+            .expect("should acquire read lock for file hook dispatch");
         let ctx = test_ctx();
         let action = guard.dispatch(
             HookPoint::RequestPreDispatch,

@@ -610,14 +610,16 @@ mod tests {
 
     #[test]
     fn harness_from_script() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness from echo script");
         assert_eq!(harness.id().name, "echo-test");
         assert!(harness.script_source().is_some());
     }
 
     #[test]
     fn harness_request_success() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for request success test");
 
         let result = harness.request(
             EventCategory::Echo,
@@ -626,13 +628,17 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), serde_json::json!({"msg": "hello"}));
+        assert_eq!(
+            result.expect("should return echo payload"),
+            serde_json::json!({"msg": "hello"})
+        );
         assert_eq!(harness.request_log().len(), 1);
     }
 
     #[test]
     fn harness_request_error() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for request error test");
 
         let result = harness.request(EventCategory::Echo, "unknown", Value::Null);
 
@@ -642,7 +648,8 @@ mod tests {
 
     #[test]
     fn harness_veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for veto test");
 
         let response = harness.veto();
 
@@ -653,7 +660,8 @@ mod tests {
 
     #[test]
     fn harness_cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for cancel test");
 
         let response = harness.cancel();
 
@@ -663,7 +671,8 @@ mod tests {
 
     #[test]
     fn harness_lifecycle() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox())
+            .expect("should create harness for lifecycle test");
 
         // Init
         assert!(harness.init().is_ok());
@@ -671,7 +680,7 @@ mod tests {
         // Verify init was called
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", Value::Null)
-            .unwrap();
+            .expect("should get state after init");
         assert_eq!(result["initialized"], true);
         assert_eq!(result["shutdown"], false);
 
@@ -681,13 +690,15 @@ mod tests {
 
     #[test]
     fn harness_subscriptions() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for subscriptions test");
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]
     fn harness_clear_logs() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox()).unwrap();
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+            .expect("should create harness for clear logs test");
 
         harness
             .request(EventCategory::Echo, "echo", Value::Null)

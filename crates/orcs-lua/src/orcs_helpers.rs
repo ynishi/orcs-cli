@@ -509,8 +509,10 @@ mod tests {
         let sb = test_sandbox();
 
         // Register twice
-        register_base_orcs_functions(&lua, Arc::clone(&sb)).unwrap();
-        register_base_orcs_functions(&lua, sb).unwrap();
+        register_base_orcs_functions(&lua, Arc::clone(&sb))
+            .expect("should register base functions first time");
+        register_base_orcs_functions(&lua, sb)
+            .expect("should register base functions second time (idempotent)");
 
         // Should still work
         let orcs: Table = lua.globals().get(ORCS_TABLE_NAME).expect("orcs table");
@@ -520,7 +522,8 @@ mod tests {
     #[test]
     fn log_function_works() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for log test");
 
         // Should not panic
         lua.load(r#"orcs.log("info", "test message")"#)
@@ -531,20 +534,30 @@ mod tests {
     #[test]
     fn exec_denied_without_context() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for exec denied test");
 
         let result: mlua::Table = lua
             .load(r#"return orcs.exec("echo hello")"#)
             .eval()
             .expect("exec should return deny table");
 
-        assert!(!result.get::<bool>("ok").unwrap());
-        let stderr = result.get::<String>("stderr").unwrap();
+        assert!(!result
+            .get::<bool>("ok")
+            .expect("should have ok field in exec result"));
+        let stderr = result
+            .get::<String>("stderr")
+            .expect("should have stderr field in exec result");
         assert!(
             stderr.contains("exec denied"),
             "expected 'exec denied', got: {stderr}"
         );
-        assert_eq!(result.get::<i64>("code").unwrap(), -1);
+        assert_eq!(
+            result
+                .get::<i64>("code")
+                .expect("should have code field in exec result"),
+            -1
+        );
     }
 
     #[test]
@@ -555,7 +568,7 @@ mod tests {
         assert!(lua.globals().get::<Table>(ORCS_TABLE_NAME).is_err());
 
         // ensure creates it
-        let table = ensure_orcs_table(&lua).unwrap();
+        let table = ensure_orcs_table(&lua).expect("should create orcs table when missing");
         assert!(table.is_empty());
 
         // Now it exists
@@ -565,35 +578,48 @@ mod tests {
     #[test]
     fn json_parse_object() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for json_parse object test");
 
         let result: Table = lua
             .load(r#"return orcs.json_parse('{"name":"test","count":42,"active":true}')"#)
             .eval()
-            .unwrap();
-        assert_eq!(result.get::<String>("name").unwrap(), "test");
-        assert_eq!(result.get::<i64>("count").unwrap(), 42);
-        assert!(result.get::<bool>("active").unwrap());
+            .expect("should parse json object");
+        assert_eq!(
+            result
+                .get::<String>("name")
+                .expect("should have name field"),
+            "test"
+        );
+        assert_eq!(
+            result.get::<i64>("count").expect("should have count field"),
+            42
+        );
+        assert!(result
+            .get::<bool>("active")
+            .expect("should have active field"));
     }
 
     #[test]
     fn json_parse_array() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for json_parse array test");
 
         let result: Table = lua
             .load(r#"return orcs.json_parse('[1,2,3]')"#)
             .eval()
-            .unwrap();
-        assert_eq!(result.get::<i64>(1).unwrap(), 1);
-        assert_eq!(result.get::<i64>(2).unwrap(), 2);
-        assert_eq!(result.get::<i64>(3).unwrap(), 3);
+            .expect("should parse json array");
+        assert_eq!(result.get::<i64>(1).expect("should have index 1"), 1);
+        assert_eq!(result.get::<i64>(2).expect("should have index 2"), 2);
+        assert_eq!(result.get::<i64>(3).expect("should have index 3"), 3);
     }
 
     #[test]
     fn json_parse_invalid_returns_error() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for json_parse invalid test");
 
         let result = lua
             .load(r#"return orcs.json_parse('not json')"#)
@@ -604,13 +630,15 @@ mod tests {
     #[test]
     fn json_encode_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for json_encode test");
 
         let result: String = lua
             .load(r#"return orcs.json_encode({name="test", count=42})"#)
             .eval()
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            .expect("should encode lua table to json string");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should parse json_encode output");
         assert_eq!(parsed["name"], "test");
         assert_eq!(parsed["count"], 42);
     }
@@ -618,7 +646,8 @@ mod tests {
     #[test]
     fn json_roundtrip() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for json roundtrip test");
 
         let result: String = lua
             .load(
@@ -628,8 +657,9 @@ mod tests {
                 "#,
             )
             .eval()
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            .expect("should complete json roundtrip");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should parse json roundtrip output");
         assert_eq!(parsed["tool"], "read");
         assert_eq!(parsed["args"]["path"], "src/main.rs");
     }
@@ -639,17 +669,25 @@ mod tests {
         let lua = Lua::new();
 
         // Create orcs table with a value
-        lua.load(r#"orcs = { test = 123 }"#).exec().unwrap();
+        lua.load(r#"orcs = { test = 123 }"#)
+            .exec()
+            .expect("should create orcs table with test field");
 
         // ensure returns existing
-        let table = ensure_orcs_table(&lua).unwrap();
-        assert_eq!(table.get::<i32>("test").unwrap(), 123);
+        let table = ensure_orcs_table(&lua).expect("should return existing orcs table");
+        assert_eq!(
+            table
+                .get::<i32>("test")
+                .expect("should have test field in existing orcs table"),
+            123
+        );
     }
 
     #[test]
     fn toml_parse_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for toml_parse table test");
 
         let result: Table = lua
             .load(
@@ -663,23 +701,33 @@ debug = true
 ]])"#,
             )
             .eval()
-            .unwrap();
+            .expect("should parse toml table");
 
-        let profile: Table = result.get("profile").unwrap();
-        assert_eq!(profile.get::<String>("name").unwrap(), "test");
+        let profile: Table = result.get("profile").expect("should have profile section");
         assert_eq!(
-            profile.get::<String>("description").unwrap(),
+            profile
+                .get::<String>("name")
+                .expect("should have name in profile"),
+            "test"
+        );
+        assert_eq!(
+            profile
+                .get::<String>("description")
+                .expect("should have description in profile"),
             "a test profile"
         );
 
-        let config: Table = result.get("config").unwrap();
-        assert!(config.get::<bool>("debug").unwrap());
+        let config: Table = result.get("config").expect("should have config section");
+        assert!(config
+            .get::<bool>("debug")
+            .expect("should have debug in config"));
     }
 
     #[test]
     fn toml_parse_array() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for toml_parse array test");
 
         let result: Table = lua
             .load(
@@ -689,19 +737,34 @@ activate = ["rust-dev", "git-workflow"]
 ]])"#,
             )
             .eval()
-            .unwrap();
+            .expect("should parse toml with array");
 
-        let components: Table = result.get("components").unwrap();
-        let sm: Table = components.get("skill_manager").unwrap();
-        let activate: Table = sm.get("activate").unwrap();
-        assert_eq!(activate.get::<String>(1).unwrap(), "rust-dev");
-        assert_eq!(activate.get::<String>(2).unwrap(), "git-workflow");
+        let components: Table = result
+            .get("components")
+            .expect("should have components section");
+        let sm: Table = components
+            .get("skill_manager")
+            .expect("should have skill_manager in components");
+        let activate: Table = sm.get("activate").expect("should have activate array");
+        assert_eq!(
+            activate
+                .get::<String>(1)
+                .expect("should have first element in activate"),
+            "rust-dev"
+        );
+        assert_eq!(
+            activate
+                .get::<String>(2)
+                .expect("should have second element in activate"),
+            "git-workflow"
+        );
     }
 
     #[test]
     fn toml_parse_invalid_returns_error() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for toml_parse invalid test");
 
         let result = lua
             .load(r#"return orcs.toml_parse('not valid toml {{{{')"#)
@@ -712,12 +775,13 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn toml_encode_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for toml_encode test");
 
         let result: String = lua
             .load(r#"return orcs.toml_encode({name = "test", count = 42})"#)
             .eval()
-            .unwrap();
+            .expect("should encode lua table to toml string");
         assert!(result.contains("name"));
         assert!(result.contains("test"));
     }
@@ -755,7 +819,8 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn toml_roundtrip() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).unwrap();
+        register_base_orcs_functions(&lua, test_sandbox())
+            .expect("should register base functions for toml roundtrip test");
 
         let result: String = lua
             .load(
@@ -768,7 +833,7 @@ value = 123
                 "#,
             )
             .eval()
-            .unwrap();
+            .expect("should complete toml roundtrip");
         assert!(result.contains("roundtrip"));
         assert!(result.contains("123"));
     }

@@ -1091,9 +1091,12 @@ mod tests {
     /// Creates a ProjectSandbox backed by a temp dir.
     /// Returns (TempDir, PathBuf, Sandbox). TempDir must be held alive for the test duration.
     fn test_sandbox() -> (tempfile::TempDir, PathBuf, Arc<dyn SandboxPolicy>) {
-        let td = tempfile::tempdir().unwrap();
-        let root = td.path().canonicalize().unwrap();
-        let sandbox = ProjectSandbox::new(&root).unwrap();
+        let td = tempfile::tempdir().expect("should create temp directory");
+        let root = td
+            .path()
+            .canonicalize()
+            .expect("should canonicalize temp dir path");
+        let sandbox = ProjectSandbox::new(&root).expect("should create project sandbox");
         (td, root, Arc::new(sandbox))
     }
 
@@ -1103,9 +1106,13 @@ mod tests {
     fn read_existing_file() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("test.txt");
-        fs::write(&file, "hello world").unwrap();
+        fs::write(&file, "hello world").expect("should write test file");
 
-        let (content, size) = tool_read(file.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let (content, size) = tool_read(
+            file.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should read existing file");
         assert_eq!(content, "hello world");
         assert_eq!(size, 11);
     }
@@ -1121,11 +1128,16 @@ mod tests {
     fn read_directory_fails() {
         let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("subdir");
-        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&sub).expect("should create subdirectory");
 
-        let result = tool_read(sub.to_str().unwrap(), sandbox.as_ref());
+        let result = tool_read(
+            sub.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a file"));
+        assert!(result
+            .expect_err("should fail for directory")
+            .contains("not a file"));
     }
 
     #[test]
@@ -1133,7 +1145,9 @@ mod tests {
         let (_td, _root, sandbox) = test_sandbox();
         let result = tool_read("/etc/hosts", sandbox.as_ref());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("access denied"));
+        assert!(result
+            .expect_err("should deny access outside root")
+            .contains("access denied"));
     }
 
     // ─── tool_write ─────────────────────────────────────────────────
@@ -1143,19 +1157,35 @@ mod tests {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("new.txt");
 
-        let bytes = tool_write(file.to_str().unwrap(), "new content", sandbox.as_ref()).unwrap();
+        let bytes = tool_write(
+            file.to_str().expect("path should be valid UTF-8"),
+            "new content",
+            sandbox.as_ref(),
+        )
+        .expect("should write new file");
         assert_eq!(bytes, 11);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "new content");
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read written file"),
+            "new content"
+        );
     }
 
     #[test]
     fn write_overwrites_existing() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("existing.txt");
-        fs::write(&file, "old").unwrap();
+        fs::write(&file, "old").expect("should write initial file");
 
-        tool_write(file.to_str().unwrap(), "new", sandbox.as_ref()).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+        tool_write(
+            file.to_str().expect("path should be valid UTF-8"),
+            "new",
+            sandbox.as_ref(),
+        )
+        .expect("should overwrite existing file");
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read overwritten file"),
+            "new"
+        );
     }
 
     #[test]
@@ -1163,8 +1193,16 @@ mod tests {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("sub/dir/file.txt");
 
-        tool_write(file.to_str().unwrap(), "nested", sandbox.as_ref()).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "nested");
+        tool_write(
+            file.to_str().expect("path should be valid UTF-8"),
+            "nested",
+            sandbox.as_ref(),
+        )
+        .expect("should write file with parent dir creation");
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read nested file"),
+            "nested"
+        );
     }
 
     #[test]
@@ -1172,7 +1210,12 @@ mod tests {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("atomic.txt");
 
-        tool_write(file.to_str().unwrap(), "content", sandbox.as_ref()).unwrap();
+        tool_write(
+            file.to_str().expect("path should be valid UTF-8"),
+            "content",
+            sandbox.as_ref(),
+        )
+        .expect("should write file atomically");
 
         // Temp file should not exist after successful write
         let temp = file.with_extension("tmp.orcs");
@@ -1184,7 +1227,9 @@ mod tests {
         let (_td, _root, sandbox) = test_sandbox();
         let result = tool_write("/etc/evil.txt", "bad", sandbox.as_ref());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("access denied"));
+        assert!(result
+            .expect_err("should deny write outside root")
+            .contains("access denied"));
     }
 
     // ─── tool_grep ──────────────────────────────────────────────────
@@ -1193,9 +1238,14 @@ mod tests {
     fn grep_finds_matches() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("search.txt");
-        fs::write(&file, "line one\nline two\nthird line").unwrap();
+        fs::write(&file, "line one\nline two\nthird line").expect("should write search file");
 
-        let matches = tool_grep("line", file.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let matches = tool_grep(
+            "line",
+            file.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should find grep matches");
         assert_eq!(matches.len(), 3);
         assert_eq!(matches[0].line_number, 1);
         assert_eq!(matches[0].line, "line one");
@@ -1205,9 +1255,14 @@ mod tests {
     fn grep_regex_pattern() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("regex.txt");
-        fs::write(&file, "foo123\nbar456\nfoo789").unwrap();
+        fs::write(&file, "foo123\nbar456\nfoo789").expect("should write regex test file");
 
-        let matches = tool_grep(r"foo\d+", file.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let matches = tool_grep(
+            r"foo\d+",
+            file.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should find regex matches");
         assert_eq!(matches.len(), 2);
     }
 
@@ -1215,9 +1270,14 @@ mod tests {
     fn grep_no_matches() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("empty.txt");
-        fs::write(&file, "nothing here").unwrap();
+        fs::write(&file, "nothing here").expect("should write test file");
 
-        let matches = tool_grep("nonexistent", file.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let matches = tool_grep(
+            "nonexistent",
+            file.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should return empty matches without error");
         assert!(matches.is_empty());
     }
 
@@ -1225,23 +1285,34 @@ mod tests {
     fn grep_invalid_regex() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("test.txt");
-        fs::write(&file, "content").unwrap();
+        fs::write(&file, "content").expect("should write test file");
 
-        let result = tool_grep("[invalid", file.to_str().unwrap(), sandbox.as_ref());
+        let result = tool_grep(
+            "[invalid",
+            file.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid regex"));
+        assert!(result
+            .expect_err("should fail for invalid regex")
+            .contains("invalid regex"));
     }
 
     #[test]
     fn grep_directory_recursive() {
         let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("sub");
-        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&sub).expect("should create subdirectory");
 
-        fs::write(root.join("a.txt"), "target line\nother").unwrap();
-        fs::write(sub.join("b.txt"), "no match\ntarget here").unwrap();
+        fs::write(root.join("a.txt"), "target line\nother").expect("should write a.txt");
+        fs::write(sub.join("b.txt"), "no match\ntarget here").expect("should write b.txt");
 
-        let matches = tool_grep("target", root.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let matches = tool_grep(
+            "target",
+            root.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should find recursive grep matches");
         assert_eq!(matches.len(), 2);
     }
 
@@ -1250,7 +1321,9 @@ mod tests {
         let (_td, _root, sandbox) = test_sandbox();
         let result = tool_grep("pattern", "/etc", sandbox.as_ref());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("access denied"));
+        assert!(result
+            .expect_err("should deny grep outside root")
+            .contains("access denied"));
     }
 
     // ─── tool_glob ──────────────────────────────────────────────────
@@ -1258,11 +1331,16 @@ mod tests {
     #[test]
     fn glob_finds_files() {
         let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("a.txt"), "").unwrap();
-        fs::write(root.join("b.txt"), "").unwrap();
-        fs::write(root.join("c.rs"), "").unwrap();
+        fs::write(root.join("a.txt"), "").expect("should write a.txt");
+        fs::write(root.join("b.txt"), "").expect("should write b.txt");
+        fs::write(root.join("c.rs"), "").expect("should write c.rs");
 
-        let files = tool_glob("*.txt", Some(root.to_str().unwrap()), sandbox.as_ref()).unwrap();
+        let files = tool_glob(
+            "*.txt",
+            Some(root.to_str().expect("path should be valid UTF-8")),
+            sandbox.as_ref(),
+        )
+        .expect("should find txt files via glob");
         assert_eq!(files.len(), 2);
     }
 
@@ -1270,25 +1348,39 @@ mod tests {
     fn glob_recursive() {
         let (_td, root, sandbox) = test_sandbox();
         let sub = root.join("sub");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(root.join("top.rs"), "").unwrap();
-        fs::write(sub.join("nested.rs"), "").unwrap();
+        fs::create_dir_all(&sub).expect("should create subdirectory");
+        fs::write(root.join("top.rs"), "").expect("should write top.rs");
+        fs::write(sub.join("nested.rs"), "").expect("should write nested.rs");
 
-        let files = tool_glob("**/*.rs", Some(root.to_str().unwrap()), sandbox.as_ref()).unwrap();
+        let files = tool_glob(
+            "**/*.rs",
+            Some(root.to_str().expect("path should be valid UTF-8")),
+            sandbox.as_ref(),
+        )
+        .expect("should find rs files recursively");
         assert_eq!(files.len(), 2);
     }
 
     #[test]
     fn glob_no_matches() {
         let (_td, root, sandbox) = test_sandbox();
-        let files = tool_glob("*.xyz", Some(root.to_str().unwrap()), sandbox.as_ref()).unwrap();
+        let files = tool_glob(
+            "*.xyz",
+            Some(root.to_str().expect("path should be valid UTF-8")),
+            sandbox.as_ref(),
+        )
+        .expect("should return empty matches for no-match glob");
         assert!(files.is_empty());
     }
 
     #[test]
     fn glob_invalid_pattern() {
         let (_td, root, sandbox) = test_sandbox();
-        let result = tool_glob("[invalid", Some(root.to_str().unwrap()), sandbox.as_ref());
+        let result = tool_glob(
+            "[invalid",
+            Some(root.to_str().expect("path should be valid UTF-8")),
+            sandbox.as_ref(),
+        );
         assert!(result.is_err());
     }
 
@@ -1297,7 +1389,9 @@ mod tests {
         let (_td, _root, sandbox) = test_sandbox();
         let result = tool_glob("*", Some("/etc"), sandbox.as_ref());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("access denied"));
+        assert!(result
+            .expect_err("should deny glob outside root")
+            .contains("access denied"));
     }
 
     #[test]
@@ -1306,7 +1400,9 @@ mod tests {
         let result = tool_glob("../../**/*", None, sandbox.as_ref());
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("'..'"),
+            result
+                .expect_err("should reject dotdot pattern")
+                .contains("'..'"),
             "expected dotdot rejection"
         );
     }
@@ -1322,13 +1418,18 @@ mod tests {
         for i in 0..35 {
             deep = deep.join(format!("d{i}"));
         }
-        fs::create_dir_all(&deep).unwrap();
-        fs::write(deep.join("deep.txt"), "needle").unwrap();
+        fs::create_dir_all(&deep).expect("should create deep directory structure");
+        fs::write(deep.join("deep.txt"), "needle").expect("should write deep file");
 
         // Also create a shallow file
-        fs::write(root.join("shallow.txt"), "needle").unwrap();
+        fs::write(root.join("shallow.txt"), "needle").expect("should write shallow file");
 
-        let matches = tool_grep("needle", root.to_str().unwrap(), sandbox.as_ref()).unwrap();
+        let matches = tool_grep(
+            "needle",
+            root.to_str().expect("path should be valid UTF-8"),
+            sandbox.as_ref(),
+        )
+        .expect("should grep respecting depth limit");
         // Shallow file should be found, deep file should be skipped
         assert_eq!(matches.len(), 1);
     }
@@ -1339,12 +1440,17 @@ mod tests {
     fn register_tools_in_lua() {
         let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
 
-        register_tool_functions(&lua, sandbox).unwrap();
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
-        let orcs: Table = lua.globals().get("orcs").unwrap();
+        let orcs: Table = lua
+            .globals()
+            .get("orcs")
+            .expect("should get orcs table back");
         assert!(orcs.get::<mlua::Function>("read").is_ok());
         assert!(orcs.get::<mlua::Function>("write").is_ok());
         assert!(orcs.get::<mlua::Function>("grep").is_ok());
@@ -1355,21 +1461,31 @@ mod tests {
     fn lua_read_file() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("lua_read.txt");
-        fs::write(&file, "lua content").unwrap();
+        fs::write(&file, "lua content").expect("should write lua read test file");
 
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let code = format!(
             r#"return orcs.read("{}")"#,
             file.display().to_string().replace('\\', "\\\\")
         );
-        let result: Table = lua.load(&code).eval().unwrap();
-        assert!(result.get::<bool>("ok").unwrap());
-        assert_eq!(result.get::<String>("content").unwrap(), "lua content");
-        assert_eq!(result.get::<u64>("size").unwrap(), 11);
+        let result: Table = lua.load(&code).eval().expect("should eval lua read");
+        assert!(result.get::<bool>("ok").expect("should have ok field"));
+        assert_eq!(
+            result
+                .get::<String>("content")
+                .expect("should have content field"),
+            "lua content"
+        );
+        assert_eq!(
+            result.get::<u64>("size").expect("should have size field"),
+            11
+        );
     }
 
     #[test]
@@ -1378,72 +1494,93 @@ mod tests {
         let file = root.join("lua_write.txt");
 
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let code = format!(
             r#"return orcs.write("{}", "written from lua")"#,
             file.display().to_string().replace('\\', "\\\\")
         );
-        let result: Table = lua.load(&code).eval().unwrap();
-        assert!(result.get::<bool>("ok").unwrap());
-        assert_eq!(fs::read_to_string(&file).unwrap(), "written from lua");
+        let result: Table = lua.load(&code).eval().expect("should eval lua write");
+        assert!(result.get::<bool>("ok").expect("should have ok field"));
+        assert_eq!(
+            fs::read_to_string(&file).expect("should read lua-written file"),
+            "written from lua"
+        );
     }
 
     #[test]
     fn lua_grep_file() {
         let (_td, root, sandbox) = test_sandbox();
         let file = root.join("lua_grep.txt");
-        fs::write(&file, "alpha\nbeta\nalpha_two").unwrap();
+        fs::write(&file, "alpha\nbeta\nalpha_two").expect("should write grep test file");
 
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let code = format!(
             r#"return orcs.grep("alpha", "{}")"#,
             file.display().to_string().replace('\\', "\\\\")
         );
-        let result: Table = lua.load(&code).eval().unwrap();
-        assert!(result.get::<bool>("ok").unwrap());
-        assert_eq!(result.get::<usize>("count").unwrap(), 2);
+        let result: Table = lua.load(&code).eval().expect("should eval lua grep");
+        assert!(result.get::<bool>("ok").expect("should have ok field"));
+        assert_eq!(
+            result
+                .get::<usize>("count")
+                .expect("should have count field"),
+            2
+        );
     }
 
     #[test]
     fn lua_glob_files() {
         let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("a.lua"), "").unwrap();
-        fs::write(root.join("b.lua"), "").unwrap();
+        fs::write(root.join("a.lua"), "").expect("should write a.lua");
+        fs::write(root.join("b.lua"), "").expect("should write b.lua");
 
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let code = format!(
             r#"return orcs.glob("*.lua", "{}")"#,
             root.display().to_string().replace('\\', "\\\\")
         );
-        let result: Table = lua.load(&code).eval().unwrap();
-        assert!(result.get::<bool>("ok").unwrap());
-        assert_eq!(result.get::<usize>("count").unwrap(), 2);
+        let result: Table = lua.load(&code).eval().expect("should eval lua glob");
+        assert!(result.get::<bool>("ok").expect("should have ok field"));
+        assert_eq!(
+            result
+                .get::<usize>("count")
+                .expect("should have count field"),
+            2
+        );
     }
 
     #[test]
     fn lua_read_nonexistent_returns_error() {
         let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let result: Table = lua
             .load(r#"return orcs.read("nonexistent_file_xyz.txt")"#)
             .eval()
-            .unwrap();
-        assert!(!result.get::<bool>("ok").unwrap());
+            .expect("should eval lua read for nonexistent file");
+        assert!(!result.get::<bool>("ok").expect("should have ok field"));
         assert!(result.get::<String>("error").is_ok());
     }
 
@@ -1451,16 +1588,20 @@ mod tests {
     fn lua_read_outside_sandbox_returns_error() {
         let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
-        let orcs = lua.create_table().unwrap();
-        lua.globals().set("orcs", orcs).unwrap();
-        register_tool_functions(&lua, sandbox).unwrap();
+        let orcs = lua.create_table().expect("should create orcs table");
+        lua.globals()
+            .set("orcs", orcs)
+            .expect("should set orcs global");
+        register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
         let result: Table = lua
             .load(r#"return orcs.read("/etc/hosts")"#)
             .eval()
-            .unwrap();
-        assert!(!result.get::<bool>("ok").unwrap());
-        let error = result.get::<String>("error").unwrap();
+            .expect("should eval lua read for outside sandbox");
+        assert!(!result.get::<bool>("ok").expect("should have ok field"));
+        let error = result
+            .get::<String>("error")
+            .expect("should have error field");
         assert!(
             error.contains("access denied"),
             "expected 'access denied', got: {error}"
@@ -1477,13 +1618,18 @@ mod tests {
         #[test]
         fn glob_skips_symlink_outside_sandbox() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().unwrap();
-            let outside_canon = outside.path().canonicalize().unwrap();
-            fs::write(outside_canon.join("leaked.txt"), "secret").unwrap();
-            symlink(&outside_canon, root.join("escape")).unwrap();
-            fs::write(root.join("ok.txt"), "safe").unwrap();
+            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside_canon = outside
+                .path()
+                .canonicalize()
+                .expect("should canonicalize outside path");
+            fs::write(outside_canon.join("leaked.txt"), "secret")
+                .expect("should write leaked file");
+            symlink(&outside_canon, root.join("escape")).expect("should create escape symlink");
+            fs::write(root.join("ok.txt"), "safe").expect("should write ok file");
 
-            let files = tool_glob("**/*.txt", None, sandbox.as_ref()).unwrap();
+            let files =
+                tool_glob("**/*.txt", None, sandbox.as_ref()).expect("should glob without error");
             for f in &files {
                 assert!(!f.contains("leaked"), "leaked file found: {f}");
             }
@@ -1493,13 +1639,22 @@ mod tests {
         #[test]
         fn grep_dir_skips_symlink_outside_sandbox() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().unwrap();
-            let outside_canon = outside.path().canonicalize().unwrap();
-            fs::write(outside_canon.join("secret.txt"), "password123").unwrap();
-            symlink(&outside_canon, root.join("escape")).unwrap();
-            fs::write(root.join("ok.txt"), "password123").unwrap();
+            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside_canon = outside
+                .path()
+                .canonicalize()
+                .expect("should canonicalize outside path");
+            fs::write(outside_canon.join("secret.txt"), "password123")
+                .expect("should write secret file");
+            symlink(&outside_canon, root.join("escape")).expect("should create escape symlink");
+            fs::write(root.join("ok.txt"), "password123").expect("should write ok file");
 
-            let matches = tool_grep("password", root.to_str().unwrap(), sandbox.as_ref()).unwrap();
+            let matches = tool_grep(
+                "password",
+                root.to_str().expect("path should be valid UTF-8"),
+                sandbox.as_ref(),
+            )
+            .expect("should grep without error");
             // Only sandbox-internal ok.txt should match
             assert_eq!(matches.len(), 1, "symlinked outside file should be skipped");
         }
@@ -1507,12 +1662,17 @@ mod tests {
         #[test]
         fn write_via_symlink_escape_rejected() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().unwrap();
-            let outside_canon = outside.path().canonicalize().unwrap();
-            symlink(&outside_canon, root.join("escape")).unwrap();
+            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside_canon = outside
+                .path()
+                .canonicalize()
+                .expect("should canonicalize outside path");
+            symlink(&outside_canon, root.join("escape")).expect("should create escape symlink");
 
             let result = tool_write(
-                root.join("escape/evil.txt").to_str().unwrap(),
+                root.join("escape/evil.txt")
+                    .to_str()
+                    .expect("path should be valid UTF-8"),
                 "evil",
                 sandbox.as_ref(),
             );
@@ -1525,13 +1685,19 @@ mod tests {
         #[test]
         fn read_via_symlink_escape_rejected() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().unwrap();
-            let outside_canon = outside.path().canonicalize().unwrap();
-            fs::write(outside_canon.join("secret.txt"), "secret").unwrap();
-            symlink(&outside_canon, root.join("escape")).unwrap();
+            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside_canon = outside
+                .path()
+                .canonicalize()
+                .expect("should canonicalize outside path");
+            fs::write(outside_canon.join("secret.txt"), "secret")
+                .expect("should write secret file");
+            symlink(&outside_canon, root.join("escape")).expect("should create escape symlink");
 
             let result = tool_read(
-                root.join("escape/secret.txt").to_str().unwrap(),
+                root.join("escape/secret.txt")
+                    .to_str()
+                    .expect("path should be valid UTF-8"),
                 sandbox.as_ref(),
             );
             assert!(
@@ -1549,14 +1715,20 @@ mod tests {
         use orcs_types::ComponentId;
 
         fn setup_lua_with_hooks() -> (Lua, orcs_hook::SharedHookRegistry, tempfile::TempDir) {
-            let td = tempfile::tempdir().unwrap();
-            let root = td.path().canonicalize().unwrap();
-            let sandbox: Arc<dyn SandboxPolicy> = Arc::new(ProjectSandbox::new(&root).unwrap());
+            let td = tempfile::tempdir().expect("should create temp dir for hooks");
+            let root = td
+                .path()
+                .canonicalize()
+                .expect("should canonicalize hook test root");
+            let sandbox: Arc<dyn SandboxPolicy> =
+                Arc::new(ProjectSandbox::new(&root).expect("should create hook sandbox"));
 
             let lua = Lua::new();
-            let orcs = lua.create_table().unwrap();
-            lua.globals().set("orcs", orcs).unwrap();
-            register_tool_functions(&lua, sandbox).unwrap();
+            let orcs = lua.create_table().expect("should create orcs table");
+            lua.globals()
+                .set("orcs", orcs)
+                .expect("should set orcs global");
+            register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
             let registry = std::sync::Arc::new(std::sync::RwLock::new(HookRegistry::new()));
             let comp_id = ComponentId::builtin("test");
@@ -1566,7 +1738,7 @@ mod tests {
                 component_id: comp_id,
             });
 
-            wrap_tools_with_hooks(&lua).unwrap();
+            wrap_tools_with_hooks(&lua).expect("should wrap tools with hooks");
 
             (lua, registry, td)
         }
@@ -1574,15 +1746,15 @@ mod tests {
         #[test]
         fn dispatch_function_registered() {
             let (lua, _registry, _td) = setup_lua_with_hooks();
-            let orcs: Table = lua.globals().get("orcs").unwrap();
+            let orcs: Table = lua.globals().get("orcs").expect("should get orcs table");
             assert!(orcs.get::<Function>("_dispatch_tool_hook").is_ok());
         }
 
         #[test]
         fn tools_work_normally_without_hooks() {
             let (lua, _registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("test.txt"), "hello").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("test.txt"), "hello").expect("should write test file");
 
             let code = format!(
                 r#"return orcs.read("{}")"#,
@@ -1591,19 +1763,27 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "hello");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read without hooks");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "hello"
+            );
         }
 
         #[test]
         fn pre_hook_abort_blocks_read() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("secret.txt"), "top secret").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("secret.txt"), "top secret").expect("should write secret file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
                     "block-read",
                     "*::*",
@@ -1619,9 +1799,14 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(!result.get::<bool>("ok").unwrap());
-            let error = result.get::<String>("error").unwrap();
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with abort hook");
+            assert!(!result.get::<bool>("ok").expect("should have ok field"));
+            let error = result
+                .get::<String>("error")
+                .expect("should have error field");
             assert!(
                 error.contains("blocked by hook"),
                 "expected 'blocked by hook', got: {error}"
@@ -1632,11 +1817,11 @@ mod tests {
         #[test]
         fn pre_hook_skip_returns_custom_value() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("real.txt"), "real content").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("real.txt"), "real content").expect("should write real file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::skipper(
                     "skip-read",
                     "*::*",
@@ -1652,19 +1837,28 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "cached");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with skip hook");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "cached"
+            );
         }
 
         #[test]
         fn pre_hook_continue_allows_tool() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("allowed.txt"), "allowed content").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("allowed.txt"), "allowed content")
+                .expect("should write allowed file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::pass_through(
                     "pass-read",
                     "*::*",
@@ -1679,19 +1873,27 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "allowed content");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with continue hook");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "allowed content"
+            );
         }
 
         #[test]
         fn post_hook_replace_changes_result() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("original.txt"), "original").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("original.txt"), "original").expect("should write original file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::replacer(
                     "replace-result",
                     "*::*",
@@ -1707,19 +1909,27 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "replaced");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with replace hook");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "replaced"
+            );
         }
 
         #[test]
         fn post_hook_continue_preserves_result() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("keep.txt"), "keep this").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("keep.txt"), "keep this").expect("should write keep file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::pass_through(
                     "observe-only",
                     "*::*",
@@ -1734,18 +1944,26 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "keep this");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with observe hook");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "keep this"
+            );
         }
 
         #[test]
         fn pre_hook_abort_blocks_write() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
                     "block-write",
                     "*::*",
@@ -1761,9 +1979,14 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(!result.get::<bool>("ok").unwrap());
-            let error = result.get::<String>("error").unwrap();
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval write with abort hook");
+            assert!(!result.get::<bool>("ok").expect("should have ok field"));
+            let error = result
+                .get::<String>("error")
+                .expect("should have error field");
             assert!(error.contains("writes disabled"));
 
             // Verify file was NOT created
@@ -1773,12 +1996,12 @@ mod tests {
         #[test]
         fn hooks_receive_tool_name_in_payload() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("check.txt"), "data").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("check.txt"), "data").expect("should write check file");
 
             // Use a modifier hook that only aborts for "write" tool
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::modifier(
                     "check-tool",
                     "*::*",
@@ -1798,26 +2021,32 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read with modifier hook");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
         }
 
         #[test]
         fn no_context_tools_work_normally() {
             // Setup WITHOUT ToolHookContext in app_data
-            let td = tempfile::tempdir().unwrap();
-            let root = td.path().canonicalize().unwrap();
-            let sandbox: Arc<dyn SandboxPolicy> = Arc::new(ProjectSandbox::new(&root).unwrap());
+            let td = tempfile::tempdir().expect("should create temp dir");
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            let sandbox: Arc<dyn SandboxPolicy> =
+                Arc::new(ProjectSandbox::new(&root).expect("should create sandbox"));
 
             let lua = Lua::new();
-            let orcs = lua.create_table().unwrap();
-            lua.globals().set("orcs", orcs).unwrap();
-            register_tool_functions(&lua, sandbox).unwrap();
+            let orcs = lua.create_table().expect("should create orcs table");
+            lua.globals()
+                .set("orcs", orcs)
+                .expect("should set orcs global");
+            register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
             // Wrap but don't set app_data — dispatch should no-op
-            wrap_tools_with_hooks(&lua).unwrap();
+            wrap_tools_with_hooks(&lua).expect("should wrap tools with hooks");
 
-            fs::write(root.join("nocontext.txt"), "works").unwrap();
+            fs::write(root.join("nocontext.txt"), "works").expect("should write nocontext file");
 
             let code = format!(
                 r#"return orcs.read("{}")"#,
@@ -1826,19 +2055,27 @@ mod tests {
                     .to_string()
                     .replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(result.get::<bool>("ok").unwrap());
-            assert_eq!(result.get::<String>("content").unwrap(), "works");
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval read without hook context");
+            assert!(result.get::<bool>("ok").expect("should have ok field"));
+            assert_eq!(
+                result
+                    .get::<String>("content")
+                    .expect("should have content field"),
+                "works"
+            );
         }
 
         #[test]
         fn pre_hook_abort_blocks_glob() {
             let (lua, registry, td) = setup_lua_with_hooks();
-            let root = td.path().canonicalize().unwrap();
-            fs::write(root.join("a.txt"), "").unwrap();
+            let root = td.path().canonicalize().expect("should canonicalize root");
+            fs::write(root.join("a.txt"), "").expect("should write test file");
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry.write().expect("should acquire write lock");
                 guard.register(Box::new(orcs_hook::testing::MockHook::aborter(
                     "block-glob",
                     "*::*",
@@ -1851,9 +2088,14 @@ mod tests {
                 r#"return orcs.glob("*.txt", "{}")"#,
                 root.display().to_string().replace('\\', "\\\\")
             );
-            let result: Table = lua.load(&code).eval().unwrap();
-            assert!(!result.get::<bool>("ok").unwrap());
-            let error = result.get::<String>("error").unwrap();
+            let result: Table = lua
+                .load(&code)
+                .eval()
+                .expect("should eval glob with abort hook");
+            assert!(!result.get::<bool>("ok").expect("should have ok field"));
+            let error = result
+                .get::<String>("error")
+                .expect("should have error field");
             assert!(error.contains("glob not allowed"));
         }
     }
