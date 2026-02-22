@@ -67,7 +67,7 @@ fn profile_manager_initializes() {
         .stdout(contains("ProfileManager initialized"));
 }
 
-/// Verifies AgentMgr emits Ready message with backend info.
+/// Verifies AgentMgr emits Ready message with backend and delegate info.
 ///
 /// Uses [`spawn_and_wait_for`] instead of `write_stdin("q\n")` to avoid
 /// the stdin-vs-init race condition. See `common/mod.rs` module doc for
@@ -76,13 +76,13 @@ fn profile_manager_initializes() {
 fn agent_mgr_ready_with_workers() {
     let tmp = tempfile::tempdir().expect("create temp dir for sandbox");
     let (stdout, _stderr) = spawn_and_wait_for(
-        "[AgentMgr] Ready (backend: builtin::llm-worker)",
+        "[AgentMgr] Ready (backend: builtin::llm-worker, delegate: ok)",
         &["-d"],
         tmp.path(),
     );
     assert!(
-        stdout.contains("[AgentMgr] Ready (backend: builtin::llm-worker)"),
-        "Expected Ready message in stdout.\nstdout:\n{stdout}"
+        stdout.contains("[AgentMgr] Ready (backend: builtin::llm-worker, delegate: ok)"),
+        "Expected Ready message with delegate status in stdout.\nstdout:\n{stdout}"
     );
 }
 

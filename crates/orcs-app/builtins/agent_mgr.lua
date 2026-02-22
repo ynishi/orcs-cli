@@ -2,7 +2,7 @@
 -- Agent Manager component: routes UserInput to specialized workers.
 --
 -- Architecture (Event-driven + RPC hybrid):
---   agent_mgr (Router Component, subscriptions=UserInput)
+--   agent_mgr (Router Component, subscriptions=UserInput,DelegateResult)
 --     │
 --     ├─ @prefix commands → targeted RPC to specific components
 --     │
@@ -12,8 +12,19 @@
 --     │   llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
 --     │     — receives AgentTask events via subscription
 --     │     — calls orcs.llm(resolve=true) for tool-use auto-dispatch
+--     │     — registers "delegate_task" IntentDef for LLM-initiated delegation
 --     │     — calls orcs.output() directly to display response (output_to_io inherited)
 --     │     — agent_mgr is NOT blocked during LLM processing
+--     │
+--     ├─ Delegation → LLM tool_call("delegate_task") → agent_mgr.delegate()
+--     │       │          → emit "DelegateTask" event (fire-and-forget)
+--     │       ▼
+--     │   delegate-worker (spawned via orcs.spawn_runner(), subscriptions=DelegateTask)
+--     │     — receives DelegateTask events via subscription
+--     │     — runs independent orcs.llm(resolve=true) session for the delegated task
+--     │     — calls orcs.output() directly to display results
+--     │     — emits "DelegateResult" event on completion
+--     │     — agent_mgr stores results for context injection in next turn
 --     │
 --     └─ init() → targeted RPC (ping) to llm-worker for health check
 --
@@ -26,6 +37,7 @@
 --   LLM uses tool_use (function calling) to invoke:
 --     - 8 builtin Internal tools (read, write, grep, glob, mkdir, remove, mv, exec)
 --     - Dynamically registered skill IntentDefs (from skill_manager.recommend)
+--     - delegate_task: delegates work to an independent sub-agent
 --   All tool calls are auto-dispatched via IntentRegistry resolve loop.
 --
 -- User @command routing (direct user input, not LLM-generated):
@@ -173,6 +185,7 @@ return {
 
         -- First call: full prompt assembly
         local history_context = input.history_context or ""
+        local delegation_context = input.delegation_context or ""
         local placement = input.prompt_placement or "both"
 
         -- 0a. Fetch foundation segments (system/task/guard from agent.md)
@@ -264,6 +277,36 @@ return {
             end
         end
 
+        -- Register delegate_task intent: allows LLM to delegate work to a sub-agent.
+        -- The IntentDef routes to agent_mgr, which spawns/dispatches to delegate-worker.
+        local delegate_reg = orcs.register_intent({
+            name = "delegate_task",
+            description = "Delegate a task to an independent sub-agent that runs its own LLM session with tool access. "
+                .. "Use when the task requires separate investigation, research, or multi-step work "
+                .. "that would benefit from independent processing. The sub-agent works asynchronously; "
+                .. "results appear in your context on the next turn.",
+            component = "builtin::agent_mgr",
+            operation = "delegate",
+            params = {
+                description = {
+                    type = "string",
+                    description = "Detailed description of the task to delegate",
+                    required = true,
+                },
+                context = {
+                    type = "string",
+                    description = "Relevant context for the sub-agent (file paths, constraints, background)",
+                    required = false,
+                },
+            },
+        })
+        if delegate_reg and delegate_reg.ok then
+            orcs.log("debug", "llm-worker: registered delegate_task intent")
+        else
+            orcs.log("warn", "llm-worker: delegate_task intent registration failed: "
+                .. ((delegate_reg and delegate_reg.error) or "unknown"))
+        end
+
         local tool_desc = ""
         if orcs.tool_descriptions then
             local td = orcs.tool_descriptions()
@@ -288,6 +331,12 @@ return {
             history_block = "## Recent Conversation\n" .. history_context
         end
 
+        -- 3b. Compose delegation results block (from completed sub-agent tasks)
+        local delegation_block = ""
+        if delegation_context ~= "" then
+            delegation_block = delegation_context
+        end
+
         -- 4. Assemble prompt based on placement strategy
         --
         -- Fixed positions:
@@ -306,27 +355,30 @@ return {
         if console_block ~= "" then sections[#sections + 1] = console_block end
 
         if placement == "top" then
-            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
+            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
+            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
             if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
 
         elseif placement == "bottom" then
-            -- [f:system] [Metrics] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+            -- [f:system] [Metrics] [f:task] [History] [Delegation] [f:guard] [UserInput] [Skills/Tools]
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
+            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
             if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
             if system_full ~= "" then sections[#sections + 1] = system_full end
 
         else
             -- "both" (default):
-            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]
+            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [Skills/Tools] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
             if f_task ~= "" then sections[#sections + 1] = f_task end
             if history_block ~= "" then sections[#sections + 1] = history_block end
+            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
             if system_full ~= "" then sections[#sections + 1] = system_full end
             if f_guard ~= "" then sections[#sections + 1] = f_guard end
             sections[#sections + 1] = message
@@ -379,6 +431,99 @@ return {
 }
 ]]
 
+-- Delegate Worker: spawned as an independent Component for task delegation.
+-- Has its own Lua VM, event loop, and ChannelRunner.
+--
+-- Communication: subscribes to "DelegateTask" Extension events (broadcast).
+-- agent_mgr emits DelegateTask events when LLM calls delegate_task tool;
+-- this worker receives them asynchronously and processes with its own LLM session.
+-- Output: calls orcs.output() directly (IO output channel inherited from parent).
+-- Completion: emits "DelegateResult" event for agent_mgr context injection.
+local delegate_worker_script = [[
+return {
+    id = "delegate-worker",
+    namespace = "builtin",
+    subscriptions = {"DelegateTask"},
+
+    -- Receives DelegateTask events via subscription.
+    -- Runs an independent LLM session (resolve=true) for the delegated task.
+    -- On completion, emits DelegateResult event and outputs directly to IO.
+    on_request = function(request)
+        local operation = request.operation or ""
+        if operation ~= "process" then
+            return { success = true }
+        end
+
+        local payload = request.payload or {}
+        local request_id = payload.request_id or "unknown"
+        local description = payload.description or ""
+        local context = payload.context or ""
+        local llm_config = payload.llm_config or {}
+
+        orcs.log("info", "delegate-worker: starting task " .. request_id)
+        orcs.output("[Delegate:" .. request_id .. "] Starting task...")
+
+        -- Build LLM options from parent config
+        local opts = {}
+        if llm_config.provider    then opts.provider    = llm_config.provider end
+        if llm_config.model       then opts.model       = llm_config.model end
+        if llm_config.base_url    then opts.base_url    = llm_config.base_url end
+        if llm_config.api_key     then opts.api_key     = llm_config.api_key end
+        if llm_config.temperature then opts.temperature = llm_config.temperature end
+        if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
+        if llm_config.timeout     then opts.timeout     = llm_config.timeout end
+        opts.resolve = true  -- Enable tool-use for the delegate
+
+        -- Build task-focused prompt
+        local prompt_parts = {}
+        prompt_parts[#prompt_parts + 1] = "You are a specialized sub-agent handling a delegated task."
+        prompt_parts[#prompt_parts + 1] = "Complete the following task thoroughly and report your findings concisely."
+        prompt_parts[#prompt_parts + 1] = "You have access to file tools (read, write, grep, glob, exec) to assist."
+        if context ~= "" then
+            prompt_parts[#prompt_parts + 1] = "## Context\n" .. context
+        end
+        prompt_parts[#prompt_parts + 1] = "## Task\n" .. description
+        local prompt = table.concat(prompt_parts, "\n\n")
+
+        local resp = orcs.llm(prompt, opts)
+
+        if resp and resp.ok then
+            local summary = resp.content or ""
+            orcs.output("[Delegate:" .. request_id .. "] " .. summary)
+            orcs.emit_event("DelegateResult", "completed", {
+                request_id = request_id,
+                summary = summary,
+                success = true,
+                cost = resp.cost,
+                session_id = resp.session_id,
+            })
+            orcs.log("info", string.format(
+                "delegate-worker: task %s completed (cost=%.4f)",
+                request_id, resp.cost or 0
+            ))
+        else
+            local err = (resp and resp.error) or "unknown error"
+            orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. tostring(err), "error")
+            orcs.emit_event("DelegateResult", "completed", {
+                request_id = request_id,
+                error = err,
+                success = false,
+            })
+            orcs.log("error", "delegate-worker: task " .. request_id .. " failed: " .. err)
+        end
+
+        return { success = true }
+    end,
+
+    on_signal = function(signal)
+        if signal.kind == "Veto" then
+            return "Abort"
+        end
+        return "Handled"
+    end,
+}
+]]
+
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
@@ -387,8 +532,20 @@ local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as conte
 local component_settings = {}
 
 -- FQN of the spawned LLM worker Component (set in init()).
--- Used by init() for health check RPC. Not used for dispatch (event-driven).
+-- Used by init() for health check RPC and dispatch_llm() guard check.
 local llm_worker_fqn = nil
+
+-- FQN of the spawned delegate worker Component (set in init()).
+local delegate_worker_fqn = nil
+
+-- Completed delegation results for context injection into next LLM turn.
+-- Stored as array of {request_id, summary, success, cost, timestamp}.
+-- Oldest entries are evicted when limit is exceeded.
+local delegation_results = {}
+local DELEGATION_RESULTS_LIMIT = 5
+
+-- Counter for generating unique delegation request IDs.
+local delegation_counter = 0
 
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
@@ -529,6 +686,26 @@ local function fetch_history_context()
     return ""
 end
 
+--- Fetch completed delegation results for context injection.
+--- Returns a formatted string summarizing recent delegation outcomes,
+--- or empty string if no results are available.
+local function fetch_delegation_context()
+    if #delegation_results == 0 then
+        return ""
+    end
+
+    local lines = {}
+    for _, r in ipairs(delegation_results) do
+        local status = r.success and "completed" or "failed"
+        local summary = utf8_truncate(r.summary or "", 500)
+        lines[#lines + 1] = string.format("- [%s] (%s) %s", r.request_id, status, summary)
+    end
+
+    return "## Delegation Results\n"
+        .. "The following tasks were delegated to sub-agents and have completed:\n"
+        .. table.concat(lines, "\n")
+end
+
 --- Default route: emit AgentTask event for LLM processing.
 --- The event is broadcast to all subscribed components (llm-worker or concierge).
 --- agent_mgr returns immediately — the worker handles LLM processing and output
@@ -546,6 +723,9 @@ local function dispatch_llm(message)
 
     -- Gather history in parent context (board_recent unavailable to child workers)
     local history_context = fetch_history_context()
+
+    -- Gather completed delegation results for context injection
+    local delegation_context = fetch_delegation_context()
 
     -- Resolve prompt placement strategy from config
     local placement = component_settings.prompt_placement or "both"
@@ -578,6 +758,7 @@ local function dispatch_llm(message)
         prompt_placement = placement,
         llm_config = llm_config,
         history_context = history_context,
+        delegation_context = delegation_context,
     }
     local delivered = orcs.emit_event("AgentTask", "process", payload)
 
@@ -612,12 +793,105 @@ end
 return {
     id = "agent_mgr",
     namespace = "builtin",
-    subscriptions = {"UserInput"},
+    subscriptions = {"UserInput", "DelegateResult"},
     output_to_io = true,
     elevated = true,
     child_spawner = true,
 
     on_request = function(request)
+        local operation = request.operation or "input"
+
+        -- Handle DelegateResult events from delegate-worker.
+        -- Store completed results for context injection into next LLM turn.
+        if operation == "completed" then
+            local payload = request.payload or {}
+            local request_id = payload.request_id
+            if request_id then
+                delegation_results[#delegation_results + 1] = {
+                    request_id = request_id,
+                    summary = payload.summary or payload.error or "",
+                    success = payload.success or false,
+                    cost = payload.cost,
+                    timestamp = os.time(),
+                }
+                -- Evict oldest entries
+                while #delegation_results > DELEGATION_RESULTS_LIMIT do
+                    table.remove(delegation_results, 1)
+                end
+                orcs.log("info", string.format(
+                    "AgentMgr: delegation %s %s (stored, %d results buffered)",
+                    request_id,
+                    payload.success and "completed" or "failed",
+                    #delegation_results
+                ))
+            end
+            return { success = true }
+        end
+
+        -- Handle delegation requests from llm-worker (via IntentRegistry dispatch).
+        -- Spawns delegate-worker task via DelegateTask event.
+        if operation == "delegate" then
+            local payload = request.payload or {}
+            local description = payload.description or ""
+            if description == "" then
+                return { success = false, error = "delegate_task requires a description" }
+            end
+
+            -- Guard: delegate-worker must be available
+            if not delegate_worker_fqn then
+                orcs.output_with_level("[AgentMgr] Error: delegate-worker not available", "error")
+                return { success = false, error = "delegate-worker not available" }
+            end
+
+            -- Generate unique request ID
+            delegation_counter = delegation_counter + 1
+            local request_id = string.format("d%03d", delegation_counter)
+
+            -- Extract LLM config for the delegate
+            local llm_config = {}
+            local llm_key_map = {
+                llm_provider    = "provider",
+                llm_model       = "model",
+                llm_base_url    = "base_url",
+                llm_api_key     = "api_key",
+                llm_temperature = "temperature",
+                llm_max_tokens  = "max_tokens",
+                llm_timeout     = "timeout",
+            }
+            for src_key, dst_key in pairs(llm_key_map) do
+                if component_settings[src_key] ~= nil then
+                    llm_config[dst_key] = component_settings[src_key]
+                end
+            end
+
+            -- Emit DelegateTask event (fire-and-forget)
+            local delivered = orcs.emit_event("DelegateTask", "process", {
+                request_id = request_id,
+                description = description,
+                context = payload.context or "",
+                llm_config = llm_config,
+            })
+
+            if not delivered then
+                orcs.output_with_level("[AgentMgr] Error: DelegateTask event not delivered", "error")
+                return { success = false, error = "DelegateTask event delivery failed" }
+            end
+
+            orcs.log("info", string.format(
+                "AgentMgr: delegated task %s (%d chars)",
+                request_id, #description
+            ))
+
+            return {
+                success = true,
+                data = {
+                    request_id = request_id,
+                    message = "Task delegated to sub-agent (id: " .. request_id .. "). Results will appear in your context on the next turn.",
+                },
+            }
+        end
+
+        -- Handle UserInput events (default path).
         local message = request.payload
         if type(message) == "table" then
             message = message.message or message.content or ""
@@ -738,6 +1012,21 @@ return {
             orcs.log("info", "concierge='" .. concierge .. "': skipping llm-worker spawn (external backend)")
         end
 
+        -- Spawn delegate-worker for LLM-initiated task delegation.
+        -- Same pattern as llm-worker: persistent, event-subscribed, non-blocking.
+        if not concierge then
+            local delegate = orcs.spawn_runner({
+                script = delegate_worker_script,
+            })
+            if delegate.ok then
+                delegate_worker_fqn = delegate.fqn
+                orcs.log("info", "spawned delegate-worker as Component (fqn=" .. delegate_worker_fqn .. ")")
+            else
+                orcs.log("warn", "failed to spawn delegate-worker: " .. (delegate.error or ""))
+                -- Non-fatal: delegation will be unavailable but core LLM flow works
+            end
+        end
+
         -- Register observability hook: log routing outcomes
         if orcs.hook then
             local ok, err = pcall(function()
@@ -761,7 +1050,8 @@ return {
         end
 
         local backend = concierge or llm_worker_fqn or "failed"
-        orcs.output("[AgentMgr] Ready (backend: " .. backend .. ")")
+        local delegate_status = delegate_worker_fqn and "ok" or "off"
+        orcs.output("[AgentMgr] Ready (backend: " .. backend .. ", delegate: " .. delegate_status .. ")")
         orcs.log("info", "agent_mgr initialized")
     end,
 
