@@ -1,19 +1,21 @@
 -- agent_mgr.lua
 -- Agent Manager component: routes UserInput to specialized workers.
 --
--- Architecture (Event-driven):
+-- Architecture (Event-driven + RPC hybrid):
 --   agent_mgr (Router Component, subscriptions=UserInput)
 --     │
 --     ├─ @prefix commands → targeted RPC to specific components
 --     │
---     └─ LLM tasks → emit "AgentTask" event (fire-and-forget, non-blocking)
---           │
---           ▼ (broadcast via EventBus)
---       llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
---         — receives AgentTask events via subscription
---         — calls orcs.llm(resolve=true) for tool-use auto-dispatch
---         — calls orcs.output() directly to display response (output_to_io inherited)
---         — agent_mgr is NOT blocked during LLM processing
+--     ├─ LLM tasks → emit "AgentTask" event (fire-and-forget, non-blocking)
+--     │       │
+--     │       ▼ (broadcast via EventBus)
+--     │   llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
+--     │     — receives AgentTask events via subscription
+--     │     — calls orcs.llm(resolve=true) for tool-use auto-dispatch
+--     │     — calls orcs.output() directly to display response (output_to_io inherited)
+--     │     — agent_mgr is NOT blocked during LLM processing
+--     │
+--     └─ init() → targeted RPC (ping) to llm-worker for health check
 --
 -- Concierge mode:
 --   When concierge is set (e.g. concierge="claude"), agent_mgr does NOT spawn
@@ -93,6 +95,9 @@ return {
 
     -- Receives AgentTask events via subscription and targeted RPCs (ping).
     -- operation="process" — main LLM processing (from AgentTask event)
+    --   NOTE: When invoked via event (fire-and-forget), the return value of
+    --   on_request is discarded by the runtime. Output and observability are
+    --   handled inside emit_success() / orcs.output_with_level().
     -- operation="ping"    — lightweight connectivity check (from init RPC)
     on_request = function(request)
         local input = request.payload or {}
@@ -529,8 +534,12 @@ end
 --- agent_mgr returns immediately — the worker handles LLM processing and output
 --- asynchronously via its own event loop.
 local function dispatch_llm(message)
+    -- Normalize concierge: Lua treats "" as truthy, so coerce to nil
+    local concierge = component_settings.concierge
+    if concierge == "" then concierge = nil end
+
     -- Guard: at least one subscriber (llm-worker or concierge) must be available
-    if not component_settings.concierge and not llm_worker_fqn then
+    if not concierge and not llm_worker_fqn then
         orcs.output_with_level("[AgentMgr] Error: no LLM backend available (worker not spawned, concierge not set)", "error")
         return { success = false, error = "no LLM backend available" }
     end
@@ -570,7 +579,17 @@ local function dispatch_llm(message)
         llm_config = llm_config,
         history_context = history_context,
     }
-    orcs.emit_event("AgentTask", "process", payload)
+    local delivered = orcs.emit_event("AgentTask", "process", payload)
+
+    -- emit_event returns true if at least one channel received the event.
+    -- NOTE: The count includes the emitter's own channel (agent_mgr), so
+    -- delivered=true does not guarantee a real subscriber matched. However,
+    -- delivered=false reliably detects that NO channel was reachable (e.g.
+    -- all workers crashed and their channels are closed).
+    if not delivered then
+        orcs.output_with_level("[AgentMgr] Error: AgentTask event was not delivered to any channel", "error")
+        return { success = false, error = "AgentTask event delivery failed" }
+    end
 
     orcs.log("debug", string.format(
         "dispatch_llm: emitted AgentTask event (message=%d chars)",
@@ -583,6 +602,7 @@ local function dispatch_llm(message)
         data = {
             dispatched = true,
             message = message,
+            source = "event:AgentTask",
         },
     }
 end
@@ -643,7 +663,10 @@ return {
             orcs.log("debug", "agent_mgr: config received: " .. orcs.json_encode(cfg))
         end
 
+        -- Normalize concierge: Lua treats "" as truthy, so coerce to nil
         local concierge = component_settings.concierge
+        if concierge == "" then concierge = nil end
+
         local placement = component_settings.prompt_placement or "both"
         local llm_provider = component_settings.llm_provider or "(default)"
         local llm_model = component_settings.llm_model or "(default)"

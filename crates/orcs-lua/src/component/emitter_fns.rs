@@ -35,15 +35,18 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
     })?;
     orcs_table.set("output_with_level", output_level_fn)?;
 
-    // orcs.emit_event(category, operation, payload) - broadcast Extension event
+    // orcs.emit_event(category, operation, payload) -> bool
+    // Returns true if at least one channel received the event.
+    // Note: "received" means injected into the channel buffer, not that a
+    // subscriber matched.  The count includes the emitter's own channel.
     let emitter_clone3 = Arc::clone(&emitter);
     let emit_event_fn = lua.create_function(
         move |lua, (category, operation, payload): (String, String, LuaValue)| {
             let json_payload: serde_json::Value = lua.from_value(payload)?;
-            emitter_clone3
+            let delivered = emitter_clone3
                 .lock()
                 .emit_event(&category, &operation, json_payload);
-            Ok(())
+            Ok(delivered)
         },
     )?;
     orcs_table.set("emit_event", emit_event_fn)?;

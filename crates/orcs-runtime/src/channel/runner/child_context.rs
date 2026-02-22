@@ -470,7 +470,7 @@ impl ChildContextImpl {
         // Without this, orcs.output() in the child would send to the parent
         // (e.g. agent_mgr), which processes it as a new request — causing
         // an infinite dispatch loop.
-        let output_tx = self
+        let effective_output_tx = self
             .io_output_tx
             .clone()
             .unwrap_or_else(|| self.output_tx.clone());
@@ -544,7 +544,7 @@ impl ChildContextImpl {
                 component,
             )
             .with_emitter(signal_tx_clone)
-            .with_output_channel(output_tx);
+            .with_output_channel(effective_output_tx);
 
             // Enable RPC inbound so other Components can reach this one
             // via orcs.request(fqn, ...).
