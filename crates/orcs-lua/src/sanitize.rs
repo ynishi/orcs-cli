@@ -29,11 +29,9 @@
 //! local check = orcs.sanitize_arg(opts.model)
 //! if not check.ok then return { ok = false, error = check.error } end
 //!
-//! local result = orcs.exec_argv("claude", {
-//!     "-p", "--output-format", "json",
-//!     "--model", check.value,
-//!     prompt,
-//! }, { env_remove = {"CLAUDECODE"} })
+//! local result = orcs.llm(prompt, {
+//!     model = check.value,
+//! })
 //! ```
 
 use mlua::{Lua, Table};

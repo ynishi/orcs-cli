@@ -163,7 +163,7 @@ pub struct ClientRunnerConfig {
 ///            ↓ UserInput Event (broadcast)
 ///         EventBus
 ///            ↓
-///         ChannelRunner(claude_cli, etc.)
+///         ChannelRunner(agent_mgr, etc.)
 ///            ↓ Output Event
 ///         ClientRunner
 ///            ↓

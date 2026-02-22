@@ -79,7 +79,7 @@
 //! debug = false
 //!
 //! [model]
-//! default = "claude-3-opus"
+//! default = "llama3.2:latest"
 //! temperature = 0.7
 //!
 //! [hil]

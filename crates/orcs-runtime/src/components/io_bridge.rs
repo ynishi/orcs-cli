@@ -513,7 +513,7 @@ mod tests {
         let (bridge, _input_handle, mut output_handle) = setup();
 
         bridge
-            .show_processing("claude_cli", "input")
+            .show_processing("agent_mgr", "input")
             .await
             .expect("send should succeed");
 
@@ -523,7 +523,7 @@ mod tests {
                 component,
                 operation,
             } => {
-                assert_eq!(component, "claude_cli");
+                assert_eq!(component, "agent_mgr");
                 assert_eq!(operation, "input");
             }
             other => panic!("Expected ShowProcessing, got {:?}", other),

@@ -159,7 +159,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default: "claude-3-opus".into(),
+            default: "llama3.2:latest".into(),
             temperature: 0.7,
             max_tokens: None,
         }
@@ -580,7 +580,7 @@ mod tests {
     fn default_config() {
         let config = OrcsConfig::default();
         assert!(!config.debug);
-        assert_eq!(config.model.default, "claude-3-opus");
+        assert_eq!(config.model.default, "llama3.2:latest");
         assert!(!config.hil.auto_approve);
         assert!(config.hooks.hooks.is_empty());
     }
@@ -1038,7 +1038,7 @@ max_history = 20
         let global = config.global_config_for_lua();
 
         assert_eq!(global["debug"], false);
-        assert_eq!(global["model"]["default"], "claude-3-opus");
+        assert_eq!(global["model"]["default"], "llama3.2:latest");
         assert_eq!(global["model"]["temperature"], 0.7_f32 as f64);
         assert!(global["model"]["max_tokens"].is_null());
         assert_eq!(global["hil"]["auto_approve"], false);

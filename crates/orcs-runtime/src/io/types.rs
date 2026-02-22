@@ -200,7 +200,7 @@ pub enum IOOutput {
     /// Displayed to the user so they know the system is working
     /// (especially important for LLM calls that take time).
     ShowProcessing {
-        /// Component name (e.g. `"claude_cli"`).
+        /// Component name (e.g. `"agent_mgr"`).
         component: String,
         /// Operation being processed (e.g. `"input"`).
         operation: String,
@@ -439,13 +439,13 @@ mod tests {
 
     #[test]
     fn io_output_processing() {
-        let processing = IOOutput::processing("claude_cli", "input");
+        let processing = IOOutput::processing("agent_mgr", "input");
         match processing {
             IOOutput::ShowProcessing {
                 component,
                 operation,
             } => {
-                assert_eq!(component, "claude_cli");
+                assert_eq!(component, "agent_mgr");
                 assert_eq!(operation, "input");
             }
             other => panic!("Expected ShowProcessing, got {:?}", other),

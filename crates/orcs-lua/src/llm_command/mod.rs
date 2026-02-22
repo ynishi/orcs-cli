@@ -1,7 +1,7 @@
 //! Multi-provider LLM client for `orcs.llm()`.
 //!
 //! Direct HTTP implementation (via `ureq`) supporting Ollama, OpenAI, and Anthropic.
-//! Replaces the previous Claude CLI handler with a provider-agnostic blocking HTTP client.
+//! Provider-agnostic blocking HTTP client supporting Ollama, OpenAI, and Anthropic.
 //!
 //! # Architecture
 //!
