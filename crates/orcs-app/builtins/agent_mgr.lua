@@ -29,9 +29,10 @@
 --     └─ init() → targeted RPC (ping) to llm-worker for health check
 --
 -- Concierge mode:
---   When concierge is set (e.g. concierge="claude"), agent_mgr does NOT spawn
+--   When concierge is set (e.g. concierge="custom::my_llm"), agent_mgr does NOT spawn
 --   llm-worker. Instead, the external component (loaded via config.toml) subscribes
 --   to "AgentTask" events and handles LLM processing independently.
+--   delegate-worker IS always spawned (delegation is orthogonal to LLM backend).
 --
 -- Tool execution:
 --   LLM uses tool_use (function calling) to invoke:
@@ -67,15 +68,67 @@
 --
 -- | Key               | Type                              | Default          | Description                        |
 -- |-------------------|-----------------------------------|------------------|------------------------------------|
--- | concierge         | string                            | nil              | External backend component name (e.g. "claude"). Omit for built-in llm-worker. |
+-- | concierge         | string (FQN)                      | nil              | Main conversation LLM backend      |
+-- | delegate_backend  | string (FQN)                      | nil              | Delegate-worker LLM backend        |
 -- | prompt_placement  | "top" | "both" | "bottom"         | "both"           | Where skills/tools appear in prompt|
--- | llm_provider      | "ollama" | "openai" | "anthropic" | "ollama"         | LLM provider for agent conversation|
--- | llm_model         | string                            | provider default | Model name                         |
+-- | llm_provider      | "ollama" | "openai" | "anthropic" | "ollama"         | LLM provider (non-concierge only)  |
+-- | llm_model         | string                            | provider default | Model name (non-concierge only)    |
 -- | llm_base_url      | string                            | provider default | Provider base URL                  |
 -- | llm_api_key       | string                            | env var fallback | API key                            |
 -- | llm_temperature   | number                            | (none)           | Sampling temperature               |
 -- | llm_max_tokens    | number                            | (none)           | Max completion tokens              |
 -- | llm_timeout       | number                            | 120              | Request timeout (seconds)          |
+--
+-- ## Concierge Mode (concierge setting)
+--
+-- When `concierge` is set to a component FQN (e.g. "custom::my_llm"), agent_mgr
+-- replaces the built-in llm-worker with the specified external component:
+--
+--   1. llm-worker is NOT spawned (the concierge handles AgentTask events instead)
+--   2. llm_* settings are UNUSED for main conversation (the concierge component
+--      manages its own LLM configuration independently)
+--
+-- The concierge component must:
+--   - Subscribe to "AgentTask" events (subscriptions = {"AgentTask"})
+--   - Handle on_request(operation="process") with payload.message
+--   - Return { success=true, data={ response="..." } }
+--   - Call orcs.output() to display the response to the user
+--
+-- ## Delegate Backend (delegate_backend setting)
+--
+-- Controls which LLM backend the delegate-worker uses (independent from concierge).
+-- When set to a component FQN, delegate-worker routes via RPC:
+--   orcs.request(delegate_backend, "process", { message = prompt })
+-- When unset (nil), delegate-worker uses orcs.llm() with llm_* settings.
+--
+-- The backend component must handle on_request(operation="process") same as concierge.
+--
+-- ### Config Examples
+--
+-- Built-in mode (default — uses llm-worker + orcs.llm for both):
+--   [components.settings.agent_mgr]
+--   llm_provider = "ollama"
+--   llm_model    = "qwen2.5-coder:7b"
+--
+-- Concierge + delegate both via external backend:
+--   [components]
+--   load = ["agent_mgr", "...", "my_llm"]   # load the external backend component
+--
+--   [components.settings.agent_mgr]
+--   concierge        = "custom::my_llm"   # main conversation → external backend
+--   delegate_backend = "custom::my_llm"   # delegate-worker   → external backend
+--
+-- Mixed: concierge via external backend, delegate via built-in ollama:
+--   [components.settings.agent_mgr]
+--   concierge    = "custom::my_llm"
+--   # delegate_backend omitted → delegate-worker uses orcs.llm() with llm_* below
+--   llm_provider = "ollama"
+--   llm_model    = "qwen2.5-coder:7b"
+--
+-- NOTE: Config layering — project-local .orcs/config.toml replaces global settings
+-- per component name (not per key). If the project config defines
+-- [components.settings.agent_mgr], it must include ALL needed keys (including
+-- concierge, delegate_backend) because the global agent_mgr settings are replaced.
 --
 -- ## Global Config: cfg._global (injected by builder)
 --
@@ -446,7 +499,7 @@ return {
     subscriptions = {"DelegateTask"},
 
     -- Receives DelegateTask events via subscription.
-    -- Runs an independent LLM session (resolve=true) for the delegated task.
+    -- Routes LLM processing through concierge (if configured) or orcs.llm().
     -- On completion, emits DelegateResult event and outputs directly to IO.
     on_request = function(request)
         local operation = request.operation or ""
@@ -459,20 +512,11 @@ return {
         local description = payload.description or ""
         local context = payload.context or ""
         local llm_config = payload.llm_config or {}
+        local delegate_backend = payload.delegate_backend  -- FQN of backend component (nil = use orcs.llm)
 
-        orcs.log("info", "delegate-worker: starting task " .. request_id)
+        orcs.log("info", "delegate-worker: starting task " .. request_id
+            .. (delegate_backend and (" via " .. delegate_backend) or " via orcs.llm"))
         orcs.output("[Delegate:" .. request_id .. "] Starting task...")
-
-        -- Build LLM options from parent config
-        local opts = {}
-        if llm_config.provider    then opts.provider    = llm_config.provider end
-        if llm_config.model       then opts.model       = llm_config.model end
-        if llm_config.base_url    then opts.base_url    = llm_config.base_url end
-        if llm_config.api_key     then opts.api_key     = llm_config.api_key end
-        if llm_config.temperature then opts.temperature = llm_config.temperature end
-        if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
-        if llm_config.timeout     then opts.timeout     = llm_config.timeout end
-        opts.resolve = true  -- Enable tool-use for the delegate
 
         -- Build task-focused prompt
         local prompt_parts = {}
@@ -485,24 +529,55 @@ return {
         prompt_parts[#prompt_parts + 1] = "## Task\n" .. description
         local prompt = table.concat(prompt_parts, "\n\n")
 
-        local resp = orcs.llm(prompt, opts)
+        local summary, cost, session_id, err
 
-        if resp and resp.ok then
-            local summary = resp.content or ""
-            orcs.output("[Delegate:" .. request_id .. "] " .. summary)
+        if delegate_backend then
+            -- Route through external backend component (e.g. custom::my_llm)
+            -- Sends RPC to the backend's on_request(operation="process") handler.
+            local result = orcs.request(delegate_backend, "process", {
+                message = prompt,
+            })
+            if result and result.success then
+                summary = (result.data and result.data.response) or ""
+            else
+                err = (result and result.error) or "concierge request failed"
+            end
+        else
+            -- Fallback: use built-in orcs.llm() with configured provider
+            local opts = {}
+            if llm_config.provider    then opts.provider    = llm_config.provider end
+            if llm_config.model       then opts.model       = llm_config.model end
+            if llm_config.base_url    then opts.base_url    = llm_config.base_url end
+            if llm_config.api_key     then opts.api_key     = llm_config.api_key end
+            if llm_config.temperature then opts.temperature = llm_config.temperature end
+            if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
+            if llm_config.timeout     then opts.timeout     = llm_config.timeout end
+            opts.resolve = true  -- Enable tool-use for the delegate
+
+            local resp = orcs.llm(prompt, opts)
+            if resp and resp.ok then
+                summary = resp.content or ""
+                cost = resp.cost
+                session_id = resp.session_id
+            else
+                err = (resp and resp.error) or "unknown error"
+            end
+        end
+
+        if not err then
+            orcs.output("[Delegate:" .. request_id .. "] " .. (summary or ""))
             orcs.emit_event("DelegateResult", "completed", {
                 request_id = request_id,
-                summary = summary,
+                summary = summary or "",
                 success = true,
-                cost = resp.cost,
-                session_id = resp.session_id,
+                cost = cost,
+                session_id = session_id,
             })
             orcs.log("info", string.format(
                 "delegate-worker: task %s completed (cost=%.4f)",
-                request_id, resp.cost or 0
+                request_id, cost or 0
             ))
         else
-            local err = (resp and resp.error) or "unknown error"
             orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. tostring(err), "error")
             orcs.emit_event("DelegateResult", "completed", {
                 request_id = request_id,
@@ -863,12 +938,17 @@ return {
             -- Extract LLM config for the delegate
             local llm_config = extract_llm_config()
 
+            -- Resolve delegate_backend FQN (independent from concierge)
+            local delegate_backend = component_settings.delegate_backend
+            if delegate_backend == "" then delegate_backend = nil end
+
             -- Emit DelegateTask event (fire-and-forget)
             local delivered = orcs.emit_event("DelegateTask", "process", {
                 request_id = request_id,
                 description = description,
                 context = payload.context or "",
                 llm_config = llm_config,
+                delegate_backend = delegate_backend,
             })
 
             if not delivered then
@@ -1006,18 +1086,18 @@ return {
         end
 
         -- Spawn delegate-worker for LLM-initiated task delegation.
-        -- Same pattern as llm-worker: persistent, event-subscribed, non-blocking.
-        if not concierge then
-            local delegate = orcs.spawn_runner({
-                script = delegate_worker_script,
-            })
-            if delegate.ok then
-                delegate_worker_fqn = delegate.fqn
-                orcs.log("info", "spawned delegate-worker as Component (fqn=" .. delegate_worker_fqn .. ")")
-            else
-                orcs.log("warn", "failed to spawn delegate-worker: " .. (delegate.error or ""))
-                -- Non-fatal: delegation will be unavailable but core LLM flow works
-            end
+        -- Always spawned regardless of concierge mode: delegation is orthogonal
+        -- to the LLM backend choice. Both built-in llm-worker and concierge
+        -- backends can emit delegate_task actions that need a delegate-worker.
+        local delegate = orcs.spawn_runner({
+            script = delegate_worker_script,
+        })
+        if delegate.ok then
+            delegate_worker_fqn = delegate.fqn
+            orcs.log("info", "spawned delegate-worker as Component (fqn=" .. delegate_worker_fqn .. ")")
+        else
+            orcs.log("warn", "failed to spawn delegate-worker: " .. (delegate.error or ""))
+            -- Non-fatal: delegation will be unavailable but core LLM flow works
         end
 
         -- Register observability hook: log routing outcomes
