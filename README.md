@@ -287,6 +287,14 @@ Dev Tools:
   orcs-lint --- Architecture lint (OL002: no unwrap, layer dependency checks)
 ```
 
+## Documentation
+
+API documentation is generated from source via rustdoc. Each crate has module-level documentation with architecture diagrams, usage examples, and security notes.
+
+```bash
+cargo doc --workspace --no-deps --open
+```
+
 ## Dev Tools
 
 ### orcs-lint
