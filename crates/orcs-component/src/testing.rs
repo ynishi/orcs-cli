@@ -1007,7 +1007,10 @@ mod tests {
             serde_json::json!({"msg": "hello"}),
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), serde_json::json!({"msg": "hello"}));
+        assert_eq!(
+            result.expect("echo request should succeed"),
+            serde_json::json!({"msg": "hello"})
+        );
 
         assert_eq!(harness.request_log().len(), 1);
         assert_eq!(harness.request_log()[0].operation, "echo");
@@ -1062,7 +1065,7 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "count", Value::Null)
-            .unwrap();
+            .expect("count request should succeed");
         assert_eq!(harness.component().request_count, 1);
 
         harness.component_mut().request_count = 100;
@@ -1076,7 +1079,7 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "echo", Value::Null)
-            .unwrap();
+            .expect("echo request should succeed for log clearing test");
         harness.cancel();
 
         assert_eq!(harness.request_log().len(), 1);
@@ -1480,7 +1483,7 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("async child with long delay should timeout");
         assert!(err.timeout_ms == 10);
     }
 
@@ -1529,18 +1532,21 @@ mod tests {
         let ok_result = RunResult::Ok {
             value: serde_json::json!({"key": "value"}),
         };
-        let json = serde_json::to_string(&ok_result).unwrap();
+        let json =
+            serde_json::to_string(&ok_result).expect("RunResult::Ok should serialize to JSON");
         assert!(json.contains("\"type\":\"Ok\""));
 
         let err_result = RunResult::Err {
             kind: "timeout".into(),
             message: "timed out".into(),
         };
-        let json = serde_json::to_string(&err_result).unwrap();
+        let json =
+            serde_json::to_string(&err_result).expect("RunResult::Err should serialize to JSON");
         assert!(json.contains("\"type\":\"Err\""));
 
         let aborted_result = RunResult::Aborted;
-        let json = serde_json::to_string(&aborted_result).unwrap();
+        let json = serde_json::to_string(&aborted_result)
+            .expect("RunResult::Aborted should serialize to JSON");
         assert!(json.contains("\"type\":\"Aborted\""));
     }
 
@@ -1554,10 +1560,11 @@ mod tests {
             elapsed_ms: Some(42),
         };
 
-        let json = serde_json::to_string(&record).unwrap();
+        let json = serde_json::to_string(&record).expect("RunRecord should serialize to JSON");
         assert!(json.contains("\"elapsed_ms\":42"));
 
-        let restored: RunRecord = serde_json::from_str(&json).unwrap();
+        let restored: RunRecord =
+            serde_json::from_str(&json).expect("RunRecord should deserialize from JSON");
         assert_eq!(restored.elapsed_ms, Some(42));
     }
 }

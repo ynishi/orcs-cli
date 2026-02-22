@@ -332,16 +332,19 @@ mod tests {
         let config = TestConfig {
             value: "decorated".into(),
         };
-        let package = Package::new(info, &config).unwrap();
+        let package =
+            Package::new(info, &config).expect("Package::new should create a valid package");
 
         // Install
-        comp.install_package(&package).unwrap();
+        comp.install_package(&package)
+            .expect("first install of 'decorator' package should succeed");
         assert!(comp.is_installed("decorator"));
         assert_eq!(comp.config_value, "decorated");
         assert_eq!(comp.list_packages().len(), 1);
 
         // Uninstall
-        comp.uninstall_package("decorator").unwrap();
+        comp.uninstall_package("decorator")
+            .expect("uninstall of installed 'decorator' package should succeed");
         assert!(!comp.is_installed("decorator"));
         assert_eq!(comp.config_value, "");
         assert!(comp.list_packages().is_empty());
@@ -356,9 +359,11 @@ mod tests {
 
         let info = PackageInfo::new("test", "Test", "1.0.0", "Test");
         let config = TestConfig { value: "a".into() };
-        let package = Package::new(info, &config).unwrap();
+        let package =
+            Package::new(info, &config).expect("Package::new should create a valid test package");
 
-        comp.install_package(&package).unwrap();
+        comp.install_package(&package)
+            .expect("first install of 'test' package should succeed");
         let result = comp.install_package(&package);
         assert!(matches!(result, Err(PackageError::AlreadyInstalled(_))));
     }

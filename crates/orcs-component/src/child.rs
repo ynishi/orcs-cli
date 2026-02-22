@@ -630,7 +630,11 @@ mod tests {
         let result = ChildResult::Err(ChildError::InvalidInput("bad input".into()));
         let err = result.err();
         assert!(err.is_some());
-        assert_eq!(err.unwrap().kind(), "invalid_input");
+        assert_eq!(
+            err.expect("ChildResult::Err should yield Some(ChildError)")
+                .kind(),
+            "invalid_input"
+        );
     }
 
     #[test]
@@ -693,8 +697,10 @@ mod tests {
             message: "timeout after 5000ms".into(),
         };
 
-        let json = serde_json::to_string(&dto).unwrap();
-        let restored: ChildResultDto = serde_json::from_str(&json).unwrap();
+        let json =
+            serde_json::to_string(&dto).expect("ChildResultDto::Err should serialize to JSON");
+        let restored: ChildResultDto =
+            serde_json::from_str(&json).expect("ChildResultDto::Err should deserialize from JSON");
 
         assert_eq!(dto, restored);
     }
@@ -702,8 +708,10 @@ mod tests {
     #[test]
     fn child_result_dto_serialization_ok_roundtrip() {
         let original = ChildResultDto::Ok(serde_json::json!({"key": "value", "count": 42}));
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: ChildResultDto = serde_json::from_str(&json).unwrap();
+        let json =
+            serde_json::to_string(&original).expect("ChildResultDto::Ok should serialize to JSON");
+        let restored: ChildResultDto =
+            serde_json::from_str(&json).expect("ChildResultDto::Ok should deserialize from JSON");
 
         assert_eq!(original, restored);
     }
@@ -711,8 +719,10 @@ mod tests {
     #[test]
     fn child_result_dto_serialization_aborted_roundtrip() {
         let original = ChildResultDto::Aborted;
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: ChildResultDto = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&original)
+            .expect("ChildResultDto::Aborted should serialize to JSON");
+        let restored: ChildResultDto = serde_json::from_str(&json)
+            .expect("ChildResultDto::Aborted should deserialize from JSON");
 
         assert_eq!(original, restored);
     }
@@ -724,8 +734,10 @@ mod tests {
             reason: "network error".into(),
         });
         let dto: ChildResultDto = result.into();
-        let json = serde_json::to_string(&dto).unwrap();
-        let restored: ChildResultDto = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&dto)
+            .expect("ChildResultDto from ChildResult::Err should serialize to JSON");
+        let restored: ChildResultDto = serde_json::from_str(&json)
+            .expect("ChildResultDto should deserialize from JSON in roundtrip test");
 
         assert_eq!(dto, restored);
         if let ChildResultDto::Err { kind, message } = restored {
