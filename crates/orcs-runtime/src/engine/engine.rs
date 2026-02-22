@@ -1302,7 +1302,7 @@ mod tests {
 
             assert!(result.is_some(), "elevated session should be allowed");
 
-            let child_id = result.unwrap();
+            let child_id = result.expect("elevated session should produce a child channel id");
             // Verify child was created in world
             let w = engine.world_read().read().await;
             assert!(w.get(&child_id).is_some());

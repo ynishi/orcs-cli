@@ -455,7 +455,7 @@ mod tests {
         let result = comp.on_request(&req);
 
         assert!(result.is_ok());
-        let response = result.unwrap();
+        let response = result.expect("echo request should succeed");
         assert_eq!(response["status"], "pending_approval");
         assert!(response["approval_id"].is_string());
 
@@ -468,7 +468,7 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        comp.on_request(&req).unwrap();
+        comp.on_request(&req).expect("echo request should succeed");
 
         assert_eq!(comp.pending_description(), Some("You say 'Hi'?"));
     }
@@ -478,8 +478,11 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap().to_string();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string")
+            .to_string();
 
         assert!(comp.has_pending());
         assert!(comp.last_result().is_none());
@@ -498,15 +501,21 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Bad message".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap().to_string();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string")
+            .to_string();
 
         let signal = Signal::reject(&approval_id, Some("Not allowed".into()), test_user());
         let response = comp.on_signal(&signal);
 
         assert_eq!(response, SignalResponse::Handled);
         assert!(!comp.has_pending());
-        assert!(comp.last_result().unwrap().starts_with("Rejected:"));
+        assert!(comp
+            .last_result()
+            .expect("should have result after rejection")
+            .starts_with("Rejected:"));
         assert_eq!(comp.status(), Status::Idle);
     }
 
@@ -515,8 +524,11 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Original".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap().to_string();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string")
+            .to_string();
 
         let modified_payload = serde_json::json!({ "message": "Modified" });
         let signal = Signal::modify(&approval_id, modified_payload, test_user());
@@ -548,16 +560,23 @@ mod tests {
 
         // Check idle state
         let req = test_request("check", Value::Null);
-        let result = comp.on_request(&req).unwrap();
+        let result = comp.on_request(&req).expect("check request should succeed");
         assert_eq!(result["status"], "idle");
 
         // Start echo
         let echo_req = test_request("echo", Value::String("Hi".into()));
-        let echo_result = comp.on_request(&echo_req).unwrap();
-        let approval_id = echo_result["approval_id"].as_str().unwrap().to_string();
+        let echo_result = comp
+            .on_request(&echo_req)
+            .expect("echo request should succeed");
+        let approval_id = echo_result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string")
+            .to_string();
 
         // Check pending state
-        let result = comp.on_request(&req).unwrap();
+        let result = comp
+            .on_request(&req)
+            .expect("check request should succeed while pending");
         assert_eq!(result["status"], "pending_approval");
 
         // Approve
@@ -565,7 +584,9 @@ mod tests {
         comp.on_signal(&signal);
 
         // Check completed state
-        let result = comp.on_request(&req).unwrap();
+        let result = comp
+            .on_request(&req)
+            .expect("check request should succeed after approval");
         assert_eq!(result["status"], "completed");
         assert_eq!(result["result"], "Echo: Hi");
     }
@@ -578,9 +599,9 @@ mod tests {
         let result = comp.on_request(&req);
 
         assert!(result.is_err());
-        match result.unwrap_err() {
+        match result.expect_err("should return InvalidPayload error for missing message field") {
             ComponentError::InvalidPayload(_) => {}
-            _ => panic!("Expected InvalidPayload error"),
+            other => panic!("Expected InvalidPayload error, got: {:?}", other),
         }
     }
 
@@ -592,9 +613,9 @@ mod tests {
         let result = comp.on_request(&req);
 
         assert!(result.is_err());
-        match result.unwrap_err() {
+        match result.expect_err("should return NotSupported error for unknown operation") {
             ComponentError::NotSupported(op) => assert_eq!(op, "unknown"),
-            _ => panic!("Expected NotSupported error"),
+            other => panic!("Expected NotSupported error, got: {:?}", other),
         }
     }
 
@@ -631,11 +652,13 @@ mod tests {
 
         // User: "Hi"
         let req = test_request("echo", Value::String("Hi".into()));
-        let result = comp.on_request(&req).unwrap();
+        let result = comp.on_request(&req).expect("echo request should succeed");
 
         // System prompts: "You say 'Hi'?"
         assert_eq!(result["status"], "pending_approval");
-        let approval_id = result["approval_id"].as_str().unwrap();
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string");
 
         // Verify the approval description
         assert_eq!(comp.pending_description(), Some("You say 'Hi'?"));
@@ -655,8 +678,10 @@ mod tests {
 
         // User: "BadWord"
         let req = test_request("echo", Value::String("BadWord".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string");
 
         // System prompts: "You say 'BadWord'?"
         assert_eq!(comp.pending_description(), Some("You say 'BadWord'?"));
@@ -666,7 +691,10 @@ mod tests {
         comp.on_signal(&signal);
 
         // No echo output
-        assert!(comp.last_result().unwrap().contains("Rejected"));
+        assert!(comp
+            .last_result()
+            .expect("should have result after rejection")
+            .contains("Rejected"));
     }
 
     // --- Package tests ---
@@ -677,7 +705,7 @@ mod tests {
             prefix: prefix.to_string(),
             suffix: suffix.to_string(),
         };
-        Package::new(info, &config).unwrap()
+        Package::new(info, &config).expect("package creation should succeed with valid config")
     }
 
     #[test]
@@ -685,7 +713,8 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let package = create_decorator_package("angle-brackets", "<<", ">>");
-        comp.install_package(&package).unwrap();
+        comp.install_package(&package)
+            .expect("package install should succeed");
 
         assert!(comp.is_installed("angle-brackets"));
         assert_eq!(comp.decorator().prefix, "<<");
@@ -698,8 +727,10 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let package = create_decorator_package("stars", "***", "***");
-        comp.install_package(&package).unwrap();
-        comp.uninstall_package("stars").unwrap();
+        comp.install_package(&package)
+            .expect("package install should succeed");
+        comp.uninstall_package("stars")
+            .expect("package uninstall should succeed");
 
         assert!(!comp.is_installed("stars"));
         assert_eq!(comp.decorator().prefix, "");
@@ -712,7 +743,8 @@ mod tests {
         let mut comp = EchoWithHilComponent::new();
 
         let package = create_decorator_package("test-pkg", "[", "]");
-        comp.install_package(&package).unwrap();
+        comp.install_package(&package)
+            .expect("first install should succeed");
 
         let result = comp.install_package(&package);
         assert!(matches!(result, Err(PackageError::AlreadyInstalled(_))));
@@ -732,12 +764,15 @@ mod tests {
 
         // Install decorator
         let package = create_decorator_package("brackets", "[", "]");
-        comp.install_package(&package).unwrap();
+        comp.install_package(&package)
+            .expect("package install should succeed");
 
         // Request echo
         let req = test_request("echo", Value::String("Hello".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string");
 
         // Approve
         let signal = Signal::approve(approval_id, test_user());
@@ -753,13 +788,17 @@ mod tests {
 
         // Install and then uninstall
         let package = create_decorator_package("brackets", "[", "]");
-        comp.install_package(&package).unwrap();
-        comp.uninstall_package("brackets").unwrap();
+        comp.install_package(&package)
+            .expect("package install should succeed");
+        comp.uninstall_package("brackets")
+            .expect("package uninstall should succeed");
 
         // Request echo
         let req = test_request("echo", Value::String("Hello".into()));
-        let result = comp.on_request(&req).unwrap();
-        let approval_id = result["approval_id"].as_str().unwrap();
+        let result = comp.on_request(&req).expect("echo request should succeed");
+        let approval_id = result["approval_id"]
+            .as_str()
+            .expect("approval_id should be a string");
 
         // Approve
         let signal = Signal::approve(approval_id, test_user());

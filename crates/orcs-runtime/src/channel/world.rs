@@ -482,8 +482,18 @@ mod tests {
 
         assert_eq!(world.channel_count(), 1);
         assert!(world.get(&io).is_some());
-        assert!(world.get(&io).unwrap().parent().is_none());
-        assert_eq!(world.get(&io).unwrap().priority(), 255);
+        assert!(world
+            .get(&io)
+            .expect("interactive channel should exist")
+            .parent()
+            .is_none());
+        assert_eq!(
+            world
+                .get(&io)
+                .expect("interactive channel should exist for priority check")
+                .priority(),
+            255
+        );
     }
 
     #[test]
@@ -493,20 +503,38 @@ mod tests {
         let bg = world.create_channel(ChannelConfig::background());
 
         assert_eq!(world.channel_count(), 2);
-        assert!(world.get(&io).unwrap().parent().is_none());
-        assert!(world.get(&bg).unwrap().parent().is_none());
+        assert!(world
+            .get(&io)
+            .expect("IO channel should exist")
+            .parent()
+            .is_none());
+        assert!(world
+            .get(&bg)
+            .expect("background channel should exist")
+            .parent()
+            .is_none());
     }
 
     #[test]
     fn spawn_child() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(root).unwrap();
+        let child = world.spawn(root).expect("spawn child from root");
 
         assert_eq!(world.channel_count(), 2);
         assert!(world.get(&child).is_some());
-        assert_eq!(world.get(&child).unwrap().parent(), Some(root));
-        assert!(world.get(&root).unwrap().children().contains(&child));
+        assert_eq!(
+            world
+                .get(&child)
+                .expect("child channel should exist")
+                .parent(),
+            Some(root)
+        );
+        assert!(world
+            .get(&root)
+            .expect("root channel should exist")
+            .children()
+            .contains(&child));
     }
 
     #[test]
@@ -522,21 +550,29 @@ mod tests {
     fn kill_channel() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(root).unwrap();
+        let child = world.spawn(root).expect("spawn child for kill test");
 
         world.kill(child, "test".into());
 
         assert_eq!(world.channel_count(), 1);
         assert!(world.get(&child).is_none());
-        assert!(!world.get(&root).unwrap().children().contains(&child));
+        assert!(!world
+            .get(&root)
+            .expect("root should exist after killing child")
+            .children()
+            .contains(&child));
     }
 
     #[test]
     fn kill_with_children() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(root).unwrap();
-        let grandchild = world.spawn(child).unwrap();
+        let child = world
+            .spawn(root)
+            .expect("spawn child for cascade kill test");
+        let grandchild = world
+            .spawn(child)
+            .expect("spawn grandchild for cascade kill test");
 
         assert_eq!(world.channel_count(), 3);
 
@@ -554,7 +590,13 @@ mod tests {
 
         assert!(world.complete(root));
 
-        assert_eq!(world.get(&root).unwrap().state(), &ChannelState::Completed);
+        assert_eq!(
+            world
+                .get(&root)
+                .expect("root channel should exist after complete")
+                .state(),
+            &ChannelState::Completed
+        );
 
         // Cannot complete twice
         assert!(!world.complete(root));
@@ -572,7 +614,9 @@ mod tests {
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
 
-        let channel = world.get(&io).unwrap();
+        let channel = world
+            .get(&io)
+            .expect("IO channel should exist for priority check");
         assert_eq!(channel.priority(), 255);
         assert!(channel.can_spawn());
     }
@@ -582,9 +626,11 @@ mod tests {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
 
-        let bg = world.spawn_with(root, ChannelConfig::background()).unwrap();
+        let bg = world
+            .spawn_with(root, ChannelConfig::background())
+            .expect("spawn background channel from root");
 
-        let channel = world.get(&bg).unwrap();
+        let channel = world.get(&bg).expect("background channel should exist");
         assert_eq!(channel.priority(), 10);
         assert!(!channel.can_spawn());
     }
@@ -594,9 +640,11 @@ mod tests {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
 
-        let tool = world.spawn_with(root, ChannelConfig::tool()).unwrap();
+        let tool = world
+            .spawn_with(root, ChannelConfig::tool())
+            .expect("spawn tool channel from root");
 
-        let channel = world.get(&tool).unwrap();
+        let channel = world.get(&tool).expect("tool channel should exist");
         assert_eq!(channel.priority(), 100);
         assert!(channel.can_spawn());
     }
@@ -607,9 +655,11 @@ mod tests {
         let root = world.create_channel(ChannelConfig::interactive());
 
         let config = ChannelConfig::new(200, false);
-        let custom = world.spawn_with(root, config).unwrap();
+        let custom = world
+            .spawn_with(root, config)
+            .expect("spawn custom config channel from root");
 
-        let channel = world.get(&custom).unwrap();
+        let channel = world.get(&custom).expect("custom channel should exist");
         assert_eq!(channel.priority(), 200);
         assert!(!channel.can_spawn());
     }
@@ -619,9 +669,11 @@ mod tests {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
 
-        let child = world.spawn(root).unwrap();
+        let child = world.spawn(root).expect("spawn child with default config");
 
-        let channel = world.get(&child).unwrap();
+        let channel = world
+            .get(&child)
+            .expect("child channel should exist for default config check");
         // Default config: NORMAL priority (50), can_spawn = true
         assert_eq!(channel.priority(), 50);
         assert!(channel.can_spawn());
@@ -631,7 +683,7 @@ mod tests {
     fn is_descendant_direct_child() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(root).unwrap();
+        let child = world.spawn(root).expect("spawn child for descendant test");
 
         assert!(world.is_descendant_of(child, root));
         assert!(!world.is_descendant_of(root, child));
@@ -641,8 +693,12 @@ mod tests {
     fn is_descendant_grandchild() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(root).unwrap();
-        let grandchild = world.spawn(child).unwrap();
+        let child = world
+            .spawn(root)
+            .expect("spawn child for grandchild descendant test");
+        let grandchild = world
+            .spawn(child)
+            .expect("spawn grandchild for descendant test");
 
         assert!(world.is_descendant_of(grandchild, root));
         assert!(world.is_descendant_of(grandchild, child));
@@ -661,8 +717,8 @@ mod tests {
     fn is_descendant_siblings_not_related() {
         let mut world = World::new();
         let root = world.create_channel(ChannelConfig::interactive());
-        let child1 = world.spawn(root).unwrap();
-        let child2 = world.spawn(root).unwrap();
+        let child1 = world.spawn(root).expect("spawn first sibling");
+        let child2 = world.spawn(root).expect("spawn second sibling");
 
         assert!(!world.is_descendant_of(child1, child2));
         assert!(!world.is_descendant_of(child2, child1));

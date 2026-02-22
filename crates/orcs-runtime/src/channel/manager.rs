@@ -309,10 +309,12 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send Spawn command to WorldManager");
 
         // Wait for reply
-        let child_id = reply_rx.await.unwrap();
+        let child_id = reply_rx
+            .await
+            .expect("receive Spawn reply from WorldManager");
         assert!(child_id.is_some());
 
         // Verify in world
@@ -322,15 +324,19 @@ mod tests {
         }
 
         // Shutdown
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly");
     }
 
     #[tokio::test]
     async fn kill_command() {
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
-        let child = world.spawn(io).unwrap();
+        let child = world.spawn(io).expect("spawn child under IO channel");
 
         let (manager, tx) = WorldManager::with_world(world);
         let world_handle = manager.world();
@@ -343,7 +349,7 @@ mod tests {
             reason: "test".into(),
         })
         .await
-        .unwrap();
+        .expect("send Kill command to WorldManager");
 
         // Give time to process
         tokio::task::yield_now().await;
@@ -355,8 +361,12 @@ mod tests {
             assert!(w.get(&child).is_none());
         }
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly after kill");
     }
 
     #[tokio::test]
@@ -376,20 +386,26 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send Complete command to WorldManager");
 
-        let result = reply_rx.await.unwrap();
+        let result = reply_rx
+            .await
+            .expect("receive Complete reply from WorldManager");
         assert!(result);
 
         // Verify state
         {
             let w = world_handle.read().await;
-            let ch = w.get(&io).unwrap();
+            let ch = w.get(&io).expect("IO channel should exist after complete");
             assert_eq!(ch.state(), &ChannelState::Completed);
         }
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly after complete");
     }
 
     #[tokio::test]
@@ -410,13 +426,18 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send Pause command to WorldManager");
 
-        assert!(reply_rx.await.unwrap());
+        assert!(reply_rx
+            .await
+            .expect("receive Pause reply from WorldManager"));
 
         {
             let w = world_handle.read().await;
-            assert!(w.get(&io).unwrap().is_paused());
+            assert!(w
+                .get(&io)
+                .expect("IO channel should exist after pause")
+                .is_paused());
         }
 
         // Resume
@@ -427,17 +448,26 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send Resume command to WorldManager");
 
-        assert!(reply_rx.await.unwrap());
+        assert!(reply_rx
+            .await
+            .expect("receive Resume reply from WorldManager"));
 
         {
             let w = world_handle.read().await;
-            assert!(w.get(&io).unwrap().is_running());
+            assert!(w
+                .get(&io)
+                .expect("IO channel should exist after resume")
+                .is_running());
         }
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly after pause/resume");
     }
 
     #[tokio::test]
@@ -456,9 +486,11 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send GetState command for existing channel");
 
-        let state = reply_rx.await.unwrap();
+        let state = reply_rx
+            .await
+            .expect("receive GetState reply for existing channel");
         assert_eq!(state, Some(ChannelState::Running));
 
         // Get non-existing
@@ -468,13 +500,19 @@ mod tests {
             reply: reply_tx,
         })
         .await
-        .unwrap();
+        .expect("send GetState command for non-existing channel");
 
-        let state = reply_rx.await.unwrap();
+        let state = reply_rx
+            .await
+            .expect("receive GetState reply for non-existing channel");
         assert!(state.is_none());
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly after get_state");
     }
 
     #[tokio::test]
@@ -482,7 +520,9 @@ mod tests {
         let (manager, tx) = WorldManager::new();
         let manager_handle = tokio::spawn(manager.run());
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command");
 
         // Should complete without hanging
         let result =
@@ -517,7 +557,11 @@ mod tests {
         assert!(r1);
         assert_eq!(r2, 1);
 
-        tx.send(WorldCommand::Shutdown).await.unwrap();
-        manager_handle.await.unwrap();
+        tx.send(WorldCommand::Shutdown)
+            .await
+            .expect("send Shutdown command for concurrent_read test");
+        manager_handle
+            .await
+            .expect("WorldManager task should complete cleanly after concurrent reads");
     }
 }

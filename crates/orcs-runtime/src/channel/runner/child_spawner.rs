@@ -482,7 +482,9 @@ mod tests {
 
         let config1 = ChildConfig::new("worker-1");
         let worker1 = Box::new(TestWorker::new("worker-1"));
-        spawner.spawn(config1, worker1).unwrap();
+        spawner
+            .spawn(config1, worker1)
+            .expect("spawn first worker should succeed");
 
         let config2 = ChildConfig::new("worker-1");
         let worker2 = Box::new(TestWorker::new("worker-1"));
@@ -498,7 +500,9 @@ mod tests {
         for i in 0..2 {
             let config = ChildConfig::new(format!("worker-{}", i));
             let worker = Box::new(TestWorker::new(&format!("worker-{}", i)));
-            spawner.spawn(config, worker).unwrap();
+            spawner
+                .spawn(config, worker)
+                .expect("spawn worker within limit should succeed");
         }
 
         let config = ChildConfig::new("worker-overflow");
@@ -514,8 +518,12 @@ mod tests {
         let config = ChildConfig::new("worker-1");
         let worker = Box::new(TestWorker::new("worker-1"));
 
-        let mut handle = spawner.spawn(config, worker).unwrap();
-        let result = handle.run_sync(json!({"test": true})).unwrap();
+        let mut handle = spawner
+            .spawn(config, worker)
+            .expect("spawn worker for run test");
+        let result = handle
+            .run_sync(json!({"test": true}))
+            .expect("run_sync should succeed");
 
         assert!(result.is_ok());
         if let ChildResult::Ok(data) = result {
@@ -529,7 +537,9 @@ mod tests {
         let config = ChildConfig::new("worker-1");
         let worker = Box::new(TestWorker::new("worker-1"));
 
-        let handle = spawner.spawn(config, worker).unwrap();
+        let handle = spawner
+            .spawn(config, worker)
+            .expect("spawn worker for status check");
         assert_eq!(handle.status(), Status::Idle);
     }
 
@@ -539,7 +549,9 @@ mod tests {
         let config = ChildConfig::new("worker-1");
         let worker = Box::new(TestWorker::new("worker-1"));
 
-        let mut handle = spawner.spawn(config, worker).unwrap();
+        let mut handle = spawner
+            .spawn(config, worker)
+            .expect("spawn worker for abort test");
         handle.abort();
 
         // Status should be aborted
@@ -553,7 +565,9 @@ mod tests {
         for i in 0..3 {
             let config = ChildConfig::new(format!("worker-{}", i));
             let worker = Box::new(TestWorker::new(&format!("worker-{}", i)));
-            spawner.spawn(config, worker).unwrap();
+            spawner
+                .spawn(config, worker)
+                .expect("spawn worker for abort_all test");
         }
 
         spawner.abort_all();
@@ -573,7 +587,9 @@ mod tests {
         for i in 0..3 {
             let config = ChildConfig::new(format!("worker-{}", i));
             let worker = Box::new(TestWorker::new(&format!("worker-{}", i)));
-            spawner.spawn(config, worker).unwrap();
+            spawner
+                .spawn(config, worker)
+                .expect("spawn worker for child_ids test");
         }
 
         let ids = spawner.child_ids();
@@ -600,7 +616,7 @@ mod tests {
 
         let result = AsyncChildHandle::run(&mut handle, json!({"async": true}))
             .await
-            .unwrap();
+            .expect("async child run should succeed");
 
         assert!(result.is_ok());
         if let ChildResult::Ok(data) = result {

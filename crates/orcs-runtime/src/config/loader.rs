@@ -408,7 +408,7 @@ mod tests {
 
     fn create_config_file(dir: &Path, content: &str) -> PathBuf {
         let path = dir.join("config.toml");
-        std::fs::write(&path, content).unwrap();
+        std::fs::write(&path, content).expect("should write config file to temp dir");
         path
     }
 
@@ -419,14 +419,14 @@ mod tests {
             .skip_project_config()
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load config with all sources skipped");
 
         assert_eq!(config, OrcsConfig::default());
     }
 
     #[test]
     fn load_global_config() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("should create temp dir for global config test");
         let config_path = create_config_file(
             temp.path(),
             r#"
@@ -442,7 +442,7 @@ default = "test-model"
             .skip_project_config()
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load config from global config file");
 
         assert!(config.debug);
         assert_eq!(config.model.default, "test-model");
@@ -450,12 +450,12 @@ default = "test-model"
 
     #[test]
     fn load_project_overrides_global() {
-        let global_temp = TempDir::new().unwrap();
-        let project_temp = TempDir::new().unwrap();
+        let global_temp = TempDir::new().expect("should create temp dir for global config");
+        let project_temp = TempDir::new().expect("should create temp dir for project config");
 
         // Create .orcs directory in project
         let orcs_dir = project_temp.path().join(".orcs");
-        std::fs::create_dir_all(&orcs_dir).unwrap();
+        std::fs::create_dir_all(&orcs_dir).expect("should create .orcs dir in project temp");
 
         // Global config
         let global_path = create_config_file(
@@ -482,7 +482,7 @@ default = "project-model"
             .with_project_root(project_temp.path())
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load config with project overriding global");
 
         // debug from global (not overridden in project)
         assert!(config.debug);
@@ -497,7 +497,7 @@ default = "project-model"
             .with_project_root("/nonexistent/project")
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load defaults when config files are missing");
 
         // Should return defaults
         assert_eq!(config, OrcsConfig::default());
@@ -522,11 +522,11 @@ default = "project-model"
 
     #[test]
     fn load_with_profile_overlay() {
-        let project_temp = TempDir::new().unwrap();
+        let project_temp = TempDir::new().expect("should create temp dir for profile test");
 
         // Create profile
         let profiles_dir = project_temp.path().join(".orcs").join("profiles");
-        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::create_dir_all(&profiles_dir).expect("should create profiles dir");
         std::fs::write(
             profiles_dir.join("test-profile.toml"),
             r#"
@@ -541,7 +541,7 @@ debug = true
 default = "profile-model"
 "#,
         )
-        .unwrap();
+        .expect("should write test-profile.toml");
 
         let config = ConfigLoader::new()
             .skip_global_config()
@@ -549,7 +549,7 @@ default = "profile-model"
             .with_profile("test-profile")
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load config with profile overlay applied");
 
         assert!(config.debug);
         assert_eq!(config.model.default, "profile-model");
@@ -563,7 +563,7 @@ default = "profile-model"
             .with_profile("nonexistent")
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load defaults when profile does not exist");
 
         // Should fall back to defaults
         assert_eq!(config, OrcsConfig::default());
@@ -584,7 +584,7 @@ default = "profile-model"
             .skip_project_config()
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config with env overrides applied");
 
         assert!(config.debug);
         assert_eq!(config.model.default, "env-model");
@@ -610,7 +610,7 @@ default = "profile-model"
             .skip_project_config()
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config with all env override fields applied");
 
         assert!(config.debug);
         assert!(config.hil.auto_approve);
@@ -638,17 +638,17 @@ default = "profile-model"
             .with_env_overrides(overrides)
             .skip_env_vars()
             .load()
-            .unwrap();
+            .expect("should load defaults when skip_env_vars overrides injected overrides");
 
         assert!(!config.debug); // default, not overridden
     }
 
     #[test]
     fn env_profile_activates_profile() {
-        let project_temp = TempDir::new().unwrap();
+        let project_temp = TempDir::new().expect("should create temp dir for env profile test");
 
         let profiles_dir = project_temp.path().join(".orcs").join("profiles");
-        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::create_dir_all(&profiles_dir).expect("should create profiles dir");
         std::fs::write(
             profiles_dir.join("env-profile.toml"),
             r#"
@@ -659,7 +659,7 @@ name = "env-profile"
 debug = true
 "#,
         )
-        .unwrap();
+        .expect("should write env-profile.toml");
 
         let overrides = EnvOverrides {
             profile: Some("env-profile".into()),
@@ -671,16 +671,17 @@ debug = true
             .with_project_root(project_temp.path())
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config with env profile activated");
 
         assert!(config.debug);
     }
 
     #[test]
     fn explicit_profile_overrides_env_profile() {
-        let project_temp = TempDir::new().unwrap();
+        let project_temp =
+            TempDir::new().expect("should create temp dir for explicit profile override test");
         let profiles_dir = project_temp.path().join(".orcs").join("profiles");
-        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::create_dir_all(&profiles_dir).expect("should create profiles dir");
 
         std::fs::write(
             profiles_dir.join("env-profile.toml"),
@@ -692,7 +693,7 @@ name = "env-profile"
 default = "env-model"
 "#,
         )
-        .unwrap();
+        .expect("should write env-profile.toml");
 
         std::fs::write(
             profiles_dir.join("explicit-profile.toml"),
@@ -704,7 +705,7 @@ name = "explicit-profile"
 default = "explicit-model"
 "#,
         )
-        .unwrap();
+        .expect("should write explicit-profile.toml");
 
         let overrides = EnvOverrides {
             profile: Some("env-profile".into()),
@@ -717,7 +718,7 @@ default = "explicit-model"
             .with_profile("explicit-profile")
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config with explicit profile overriding env profile");
 
         // explicit profile wins over env
         assert_eq!(config.model.default, "explicit-model");
@@ -743,7 +744,7 @@ default = "explicit-model"
             .skip_project_config()
             .with_env_overrides(EnvOverrides::default())
             .load()
-            .unwrap();
+            .expect("should load config preserving defaults with empty overrides");
 
         assert_eq!(config, OrcsConfig::default());
     }
@@ -760,7 +761,7 @@ default = "explicit-model"
             .skip_project_config()
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config with experimental components activated");
 
         // life_game should now be in load
         assert!(config.components.load.contains(&"life_game".to_string()));
@@ -778,7 +779,7 @@ default = "explicit-model"
             .skip_project_config()
             .with_env_overrides(overrides)
             .load()
-            .unwrap();
+            .expect("should load config without activating experimental when false");
 
         // life_game should NOT be in load
         assert!(!config.components.load.contains(&"life_game".to_string()));

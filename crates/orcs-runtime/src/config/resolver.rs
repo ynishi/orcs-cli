@@ -66,7 +66,9 @@ mod tests {
 
     #[test]
     fn noop_resolver_returns_default() {
-        let config = NoOpResolver.resolve().unwrap();
+        let config = NoOpResolver
+            .resolve()
+            .expect("NoOpResolver should return default config");
         assert_eq!(config, OrcsConfig::default());
     }
 
@@ -85,7 +87,9 @@ mod tests {
             }
         }
 
-        let config = TestResolver { debug: true }.resolve().unwrap();
+        let config = TestResolver { debug: true }
+            .resolve()
+            .expect("custom TestResolver should return config with debug=true");
         assert!(config.debug);
     }
 }

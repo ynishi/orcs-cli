@@ -206,8 +206,8 @@ mod tests {
     use std::fs;
 
     fn test_sandbox() -> (tempfile::TempDir, ProjectSandbox) {
-        let tmp = tempfile::tempdir().unwrap();
-        let sandbox = ProjectSandbox::new(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().expect("should create temp dir for sandbox test");
+        let sandbox = ProjectSandbox::new(tmp.path()).expect("should create sandbox from temp dir");
         (tmp, sandbox)
     }
 
@@ -216,7 +216,10 @@ mod tests {
     #[test]
     fn new_sandbox_canonicalizes_root() {
         let (tmp, sandbox) = test_sandbox();
-        let expected = tmp.path().canonicalize().unwrap();
+        let expected = tmp
+            .path()
+            .canonicalize()
+            .expect("should canonicalize temp dir path");
         assert_eq!(sandbox.root(), expected);
         assert_eq!(sandbox.project_root(), expected);
     }
@@ -232,7 +235,7 @@ mod tests {
     #[test]
     fn read_accepts_file_under_root() {
         let (tmp, sandbox) = test_sandbox();
-        fs::write(tmp.path().join("ok.txt"), "data").unwrap();
+        fs::write(tmp.path().join("ok.txt"), "data").expect("should write ok.txt to temp dir");
 
         let result = sandbox.validate_read("ok.txt");
         assert!(result.is_ok());
@@ -242,9 +245,10 @@ mod tests {
     fn read_accepts_absolute_under_root() {
         let (tmp, sandbox) = test_sandbox();
         let file = tmp.path().join("abs.txt");
-        fs::write(&file, "data").unwrap();
+        fs::write(&file, "data").expect("should write abs.txt to temp dir");
 
-        let result = sandbox.validate_read(file.to_str().unwrap());
+        let result =
+            sandbox.validate_read(file.to_str().expect("should convert abs.txt path to str"));
         assert!(result.is_ok());
     }
 
@@ -253,7 +257,9 @@ mod tests {
         let (_tmp, sandbox) = test_sandbox();
         let result = sandbox.validate_read("/etc/hosts");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("read outside root should fail")
+            .to_string();
         assert!(err.contains("access denied"), "got: {err}");
     }
 
@@ -261,13 +267,18 @@ mod tests {
     fn read_rejects_traversal_via_dotdot() {
         let (tmp, sandbox) = test_sandbox();
         let sub = tmp.path().join("sub");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(tmp.path().join("secret.txt"), "secret").unwrap();
+        fs::create_dir_all(&sub).expect("should create sub dir");
+        fs::write(tmp.path().join("secret.txt"), "secret")
+            .expect("should write secret.txt to temp dir");
 
-        let scoped = sandbox.scoped("sub").unwrap();
+        let scoped = sandbox
+            .scoped("sub")
+            .expect("should create scoped sandbox for sub");
         let result = scoped.validate_read("../secret.txt");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("traversal via .. should fail")
+            .to_string();
         assert!(err.contains("access denied"), "got: {err}");
     }
 
@@ -276,7 +287,9 @@ mod tests {
         let (_tmp, sandbox) = test_sandbox();
         let result = sandbox.validate_read("nonexistent.txt");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("read of nonexistent file should fail")
+            .to_string();
         assert!(err.contains("path not found"), "got: {err}");
     }
 
@@ -301,7 +314,9 @@ mod tests {
         let (_tmp, sandbox) = test_sandbox();
         let result = sandbox.validate_write("/etc/evil.txt");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("write outside root should fail")
+            .to_string();
         assert!(err.contains("access denied"), "got: {err}");
     }
 
@@ -310,7 +325,9 @@ mod tests {
         let (_tmp, sandbox) = test_sandbox();
         let result = sandbox.validate_write("../escape.txt");
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("write via .. traversal should fail")
+            .to_string();
         assert!(err.contains("access denied"), "got: {err}");
     }
 
@@ -320,11 +337,13 @@ mod tests {
     fn scoped_narrows_boundary() {
         let (tmp, sandbox) = test_sandbox();
         let sub = tmp.path().join("components");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("comp.lua"), "-- lua").unwrap();
-        fs::write(tmp.path().join("top.txt"), "top").unwrap();
+        fs::create_dir_all(&sub).expect("should create components dir");
+        fs::write(sub.join("comp.lua"), "-- lua").expect("should write comp.lua");
+        fs::write(tmp.path().join("top.txt"), "top").expect("should write top.txt");
 
-        let scoped = sandbox.scoped("components").unwrap();
+        let scoped = sandbox
+            .scoped("components")
+            .expect("should create scoped sandbox for components dir");
 
         // Can read within scoped boundary
         assert!(scoped.validate_read("comp.lua").is_ok());
@@ -337,9 +356,11 @@ mod tests {
     fn scoped_preserves_project_root() {
         let (tmp, sandbox) = test_sandbox();
         let sub = tmp.path().join("sub");
-        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&sub).expect("should create sub dir for scoped test");
 
-        let scoped = sandbox.scoped("sub").unwrap();
+        let scoped = sandbox
+            .scoped("sub")
+            .expect("should create scoped sandbox for sub");
         assert_eq!(scoped.project_root(), sandbox.project_root());
         assert_ne!(scoped.root(), sandbox.root());
     }
@@ -363,7 +384,7 @@ mod tests {
     #[test]
     fn trait_object_works() {
         let (tmp, sandbox) = test_sandbox();
-        fs::write(tmp.path().join("trait_test.txt"), "ok").unwrap();
+        fs::write(tmp.path().join("trait_test.txt"), "ok").expect("should write trait_test.txt");
 
         let policy: Box<dyn SandboxPolicy> = Box::new(sandbox);
         assert!(policy.validate_read("trait_test.txt").is_ok());
@@ -375,7 +396,7 @@ mod tests {
         use std::sync::Arc;
 
         let (tmp, sandbox) = test_sandbox();
-        fs::write(tmp.path().join("arc_test.txt"), "ok").unwrap();
+        fs::write(tmp.path().join("arc_test.txt"), "ok").expect("should write arc_test.txt");
 
         let policy: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
         let clone = Arc::clone(&policy);
@@ -394,12 +415,16 @@ mod tests {
         #[test]
         fn read_rejects_symlink_escape() {
             let (tmp, sandbox) = test_sandbox();
-            symlink("/etc/hosts", tmp.path().join("evil_link")).unwrap();
+            symlink("/etc/hosts", tmp.path().join("evil_link"))
+                .expect("should create symlink to /etc/hosts");
 
             let result = sandbox.validate_read("evil_link");
             assert!(result.is_err());
             assert!(
-                result.unwrap_err().to_string().contains("access denied"),
+                result
+                    .expect_err("symlink escape read should fail")
+                    .to_string()
+                    .contains("access denied"),
                 "symlink to /etc/hosts should be rejected"
             );
         }
@@ -407,13 +432,18 @@ mod tests {
         #[test]
         fn write_rejects_symlink_parent_escape() {
             let (tmp, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().unwrap();
-            symlink(outside.path(), tmp.path().join("escape_dir")).unwrap();
+            let outside =
+                tempfile::tempdir().expect("should create outside temp dir for symlink test");
+            symlink(outside.path(), tmp.path().join("escape_dir"))
+                .expect("should create symlink to outside dir");
 
             let result = sandbox.validate_write("escape_dir/evil.txt");
             assert!(result.is_err());
             assert!(
-                result.unwrap_err().to_string().contains("access denied"),
+                result
+                    .expect_err("symlink parent escape write should fail")
+                    .to_string()
+                    .contains("access denied"),
                 "symlink directory escape should be rejected"
             );
         }
@@ -422,8 +452,9 @@ mod tests {
         fn read_allows_symlink_within_sandbox() {
             let (tmp, sandbox) = test_sandbox();
             let real = tmp.path().join("real.txt");
-            fs::write(&real, "ok").unwrap();
-            symlink(&real, tmp.path().join("good_link")).unwrap();
+            fs::write(&real, "ok").expect("should write real.txt for internal symlink test");
+            symlink(&real, tmp.path().join("good_link"))
+                .expect("should create symlink within sandbox");
 
             let result = sandbox.validate_read("good_link");
             assert!(result.is_ok(), "symlink within sandbox should be allowed");
@@ -433,11 +464,15 @@ mod tests {
         fn scoped_read_rejects_symlink_to_parent() {
             let (tmp, sandbox) = test_sandbox();
             let sub = tmp.path().join("sub");
-            fs::create_dir_all(&sub).unwrap();
-            fs::write(tmp.path().join("secret.txt"), "secret").unwrap();
-            symlink(tmp.path().join("secret.txt"), sub.join("link_to_parent")).unwrap();
+            fs::create_dir_all(&sub).expect("should create sub dir for scoped symlink test");
+            fs::write(tmp.path().join("secret.txt"), "secret")
+                .expect("should write secret.txt for scoped symlink test");
+            symlink(tmp.path().join("secret.txt"), sub.join("link_to_parent"))
+                .expect("should create symlink to parent file");
 
-            let scoped = sandbox.scoped("sub").unwrap();
+            let scoped = sandbox
+                .scoped("sub")
+                .expect("should create scoped sandbox for sub dir");
             let result = scoped.validate_read("link_to_parent");
             assert!(
                 result.is_err(),

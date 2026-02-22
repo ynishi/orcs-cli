@@ -660,7 +660,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Send quit command via IO
-        input_handle.send(IOInput::line("q")).await.unwrap();
+        input_handle
+            .send(IOInput::line("q"))
+            .await
+            .expect("send quit command via IO");
 
         // Runner should stop
         let result = tokio::time::timeout(std::time::Duration::from_millis(200), runner_task).await;
@@ -687,7 +690,7 @@ mod tests {
         input_handle
             .send(IOInput::line_with_context("y", ctx))
             .await
-            .unwrap();
+            .expect("send approval input via IO");
 
         // Wait for feedback
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -701,7 +704,7 @@ mod tests {
         // Cleanup
         signal_tx
             .send(Signal::cancel(primary, Principal::System))
-            .unwrap();
+            .expect("send cancel signal for cleanup");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
 
         teardown(manager_task, world_tx).await;
@@ -719,7 +722,9 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Send veto
-        signal_tx.send(Signal::veto(Principal::System)).unwrap();
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("send veto signal");
 
         // Runner should stop
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;

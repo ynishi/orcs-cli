@@ -250,7 +250,7 @@ mod tests {
         let signal = cmd.to_signal(principal, None);
 
         assert!(signal.is_some());
-        let signal = signal.unwrap();
+        let signal = signal.expect("approve command with id should produce signal");
         assert!(signal.is_approve());
     }
 
@@ -261,7 +261,7 @@ mod tests {
         let signal = cmd.to_signal(principal, Some("default-id"));
 
         assert!(signal.is_some());
-        let signal = signal.unwrap();
+        let signal = signal.expect("approve command with default id should produce signal");
         assert!(signal.is_approve());
         if let SignalKind::Approve { approval_id } = &signal.kind {
             assert_eq!(approval_id, "default-id");
@@ -288,7 +288,7 @@ mod tests {
         let signal = cmd.to_signal(principal, None);
 
         assert!(signal.is_some());
-        let signal = signal.unwrap();
+        let signal = signal.expect("reject command with id should produce signal");
         assert!(signal.is_reject());
     }
 
@@ -299,7 +299,7 @@ mod tests {
         let signal = cmd.to_signal(principal, None);
 
         assert!(signal.is_some());
-        let signal = signal.unwrap();
+        let signal = signal.expect("veto command should produce signal");
         assert!(signal.is_veto());
         assert!(signal.is_global());
     }

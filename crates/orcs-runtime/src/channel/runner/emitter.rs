@@ -436,7 +436,7 @@ mod tests {
 
         assert!(emitter.emit(event));
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx.try_recv().expect("should receive emitted event");
         assert_eq!(received.category, EventCategory::Echo);
         assert_eq!(received.operation, "test");
     }
@@ -447,7 +447,9 @@ mod tests {
 
         emitter.emit_output("Hello, World!");
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx
+            .try_recv()
+            .expect("should receive emit_output event");
         assert_eq!(received.category, EventCategory::Output);
         assert_eq!(received.operation, "display");
         assert_eq!(received.payload["message"], "Hello, World!");
@@ -460,7 +462,9 @@ mod tests {
 
         emitter.emit_output_with_level("Warning message", "warn");
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx
+            .try_recv()
+            .expect("should receive emit_output_with_level event");
         assert_eq!(received.category, EventCategory::Output);
         assert_eq!(received.payload["message"], "Warning message");
         assert_eq!(received.payload["level"], "warn");
@@ -478,7 +482,10 @@ mod tests {
 
         assert!(emitter.broadcast(signal));
 
-        let received = signal_rx.recv().await.unwrap();
+        let received = signal_rx
+            .recv()
+            .await
+            .expect("should receive broadcast signal");
         assert!(matches!(received.kind, orcs_event::SignalKind::Pause));
     }
 
@@ -495,7 +502,9 @@ mod tests {
         let cloned = emitter.clone();
         cloned.emit_output("From clone");
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx
+            .try_recv()
+            .expect("should receive event from cloned emitter");
         assert_eq!(received.payload["message"], "From clone");
     }
 
@@ -510,7 +519,9 @@ mod tests {
         );
         assert!(result);
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx
+            .try_recv()
+            .expect("should receive Extension event via fallback");
         assert_eq!(
             received.category,
             EventCategory::Extension {
@@ -557,8 +568,12 @@ mod tests {
         assert!(result);
 
         // Both channels should receive the event as Broadcast
-        let evt1 = rx1.try_recv().unwrap();
-        let evt2 = rx2.try_recv().unwrap();
+        let evt1 = rx1
+            .try_recv()
+            .expect("channel 1 should receive broadcast event");
+        let evt2 = rx2
+            .try_recv()
+            .expect("channel 2 should receive broadcast event");
 
         assert!(!evt1.is_direct()); // Should be Broadcast
         assert!(!evt2.is_direct());
@@ -589,7 +604,9 @@ mod tests {
         );
         assert!(result);
 
-        let received = channel_rx.try_recv().unwrap();
+        let received = channel_rx
+            .try_recv()
+            .expect("should receive Extension event via trait");
         assert_eq!(
             received.category,
             EventCategory::Extension {

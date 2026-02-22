@@ -177,13 +177,15 @@ mod child_spawner_integration {
         let run_count = Arc::new(AtomicUsize::new(0));
         let worker = Box::new(TestWorker::with_counter("worker-1", Arc::clone(&run_count)));
 
-        let mut handle = spawner.spawn(config, worker).expect("spawn");
+        let mut handle = spawner
+            .spawn(config, worker)
+            .expect("spawn should succeed for worker-1");
 
         // Run the child
         let result = handle.run_sync(json!({"value": 42}));
         assert!(result.is_ok());
 
-        let child_result = result.unwrap();
+        let child_result = result.expect("run_sync should return Ok for valid input");
         assert!(child_result.is_ok());
 
         // Verify run was called
@@ -199,7 +201,9 @@ mod child_spawner_integration {
             let id = format!("worker-{}", i);
             let config = ChildConfig::new(&id);
             let worker = Box::new(TestWorker::new(&id));
-            spawner.spawn(config, worker).expect("spawn");
+            spawner
+                .spawn(config, worker)
+                .expect("spawn should succeed for each worker");
         }
 
         assert_eq!(spawner.child_count(), 3);
@@ -222,7 +226,9 @@ mod child_spawner_integration {
             let id = format!("worker-{}", i);
             let config = ChildConfig::new(&id);
             let worker = Box::new(TestWorker::new(&id));
-            spawner.spawn(config, worker).expect("spawn");
+            spawner
+                .spawn(config, worker)
+                .expect("spawn should succeed for abort test worker");
         }
 
         // Abort all
@@ -247,7 +253,9 @@ mod child_spawner_integration {
             let id = format!("worker-{}", i);
             let config = ChildConfig::new(&id);
             let worker = Box::new(TestWorker::new(&id));
-            spawner.spawn(config, worker).expect("spawn");
+            spawner
+                .spawn(config, worker)
+                .expect("spawn should succeed within max children limit");
         }
 
         // Try to exceed limit
@@ -309,7 +317,7 @@ mod child_context_integration {
         let result = ctx.spawn_child(config);
 
         assert!(result.is_ok());
-        let handle = result.unwrap();
+        let handle = result.expect("spawn_child should return Ok for sub-child-1");
         assert_eq!(handle.id(), "sub-child-1");
 
         assert_eq!(ctx.child_count(), 1);
@@ -323,8 +331,10 @@ mod child_context_integration {
         assert!(ctx.max_children() > 0);
 
         // Spawn children
-        ctx.spawn_child(ChildConfig::new("child-1")).unwrap();
-        ctx.spawn_child(ChildConfig::new("child-2")).unwrap();
+        ctx.spawn_child(ChildConfig::new("child-1"))
+            .expect("spawn child-1 should succeed");
+        ctx.spawn_child(ChildConfig::new("child-2"))
+            .expect("spawn child-2 should succeed");
 
         assert_eq!(ctx.child_count(), 2);
     }
@@ -410,7 +420,7 @@ mod runner_integration {
         let ctx = runner.create_child_context("test-child");
         assert!(ctx.is_some());
 
-        let ctx = ctx.unwrap();
+        let ctx = ctx.expect("create_child_context should return Some when spawner is configured");
         assert_eq!(ctx.parent_id(), "test-child");
 
         teardown(manager_task, world_tx).await;
@@ -434,7 +444,9 @@ mod runner_integration {
         let ctx = runner.create_child_context_with_loader("test-child", loader);
         assert!(ctx.is_some());
 
-        let ctx = ctx.unwrap();
+        let ctx = ctx.expect(
+            "create_child_context_with_loader should return Some when spawner is configured",
+        );
 
         // Spawn a child via context
         let result = ctx.spawn_child(ChildConfig::new("spawned-child"));
@@ -501,12 +513,16 @@ mod runner_integration {
 
         // Spawn children via spawner directly for testing
         if let Some(spawner) = runner.child_spawner() {
-            let mut spawner = spawner.lock().unwrap();
+            let mut spawner = spawner
+                .lock()
+                .expect("should acquire spawner lock for child spawning");
             for i in 0..3 {
                 let id = format!("child-{}", i);
                 let config = ChildConfig::new(&id);
                 let worker = Box::new(TestWorker::new(&id));
-                spawner.spawn(config, worker).expect("spawn");
+                spawner
+                    .spawn(config, worker)
+                    .expect("spawn should succeed for signal test children");
             }
             assert_eq!(spawner.child_count(), 3);
         }
@@ -518,7 +534,9 @@ mod runner_integration {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         // Send veto signal
-        signal_tx.send(Signal::veto(Principal::System)).unwrap();
+        signal_tx
+            .send(Signal::veto(Principal::System))
+            .expect("should send veto signal to runner");
 
         // Wait for runner to stop
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
@@ -550,7 +568,9 @@ mod e2e_workflow {
 
         // 3. Spawn child via context
         let config = ChildConfig::new("worker-1");
-        let handle = ctx.spawn_child(config).expect("spawn");
+        let handle = ctx
+            .spawn_child(config)
+            .expect("spawn child via context should succeed");
         assert_eq!(handle.id(), "worker-1");
 
         // 4. Verify child count
@@ -560,19 +580,25 @@ mod e2e_workflow {
         ctx.emit_output("Child spawned successfully");
 
         // 6. Verify output event
-        let event = output_rx.try_recv().expect("receive");
+        let event = output_rx
+            .try_recv()
+            .expect("should receive output event from child context");
         assert_eq!(event.payload["message"], "Child spawned successfully");
 
         // 7. Propagate signal to children
         let cancel = Signal::cancel(orcs_types::ChannelId::new(), Principal::System);
         {
-            let mut spawner = spawner_arc.lock().unwrap();
+            let mut spawner = spawner_arc
+                .lock()
+                .expect("should acquire spawner lock for signal propagation");
             spawner.propagate_signal(&cancel);
         }
 
         // 8. Abort all children
         {
-            let mut spawner = spawner_arc.lock().unwrap();
+            let mut spawner = spawner_arc
+                .lock()
+                .expect("should acquire spawner lock for abort all");
             spawner.abort_all();
             let finished = spawner.reap_finished();
             assert_eq!(finished.len(), 1);
@@ -594,7 +620,9 @@ mod e2e_workflow {
                 .with_lua_loader(parent_loader);
 
         // Spawn first-level child
-        let child1 = parent_ctx.spawn_child(ChildConfig::new("child-1")).unwrap();
+        let child1 = parent_ctx
+            .spawn_child(ChildConfig::new("child-1"))
+            .expect("spawn first-level child should succeed");
         assert_eq!(child1.id(), "child-1");
 
         // Create child spawner for second level
@@ -609,7 +637,7 @@ mod e2e_workflow {
         // Spawn grandchild
         let grandchild = child_ctx
             .spawn_child(ChildConfig::new("grandchild-1"))
-            .unwrap();
+            .expect("spawn grandchild should succeed in nested hierarchy");
         assert_eq!(grandchild.id(), "grandchild-1");
 
         // Verify hierarchy

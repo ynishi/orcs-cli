@@ -309,9 +309,9 @@ mod tests {
 
     fn write_profile(dir: &Path, name: &str, content: &str) -> PathBuf {
         let profiles_dir = dir.join(PROFILES_DIR);
-        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::create_dir_all(&profiles_dir).expect("should create profiles directory");
         let path = profiles_dir.join(format!("{name}.toml"));
-        std::fs::write(&path, content).unwrap();
+        std::fs::write(&path, content).expect("should write profile TOML file");
         path
     }
 
@@ -321,7 +321,7 @@ mod tests {
 [profile]
 name = "test"
 "#;
-        let def = ProfileDef::from_toml(toml).unwrap();
+        let def = ProfileDef::from_toml(toml).expect("should parse minimal profile TOML");
         assert_eq!(def.name(), "test");
         assert!(def.description().is_empty());
         assert!(def.config.is_none());
@@ -348,12 +348,15 @@ deactivate = ["python-dev"]
 [components.agent_mgr]
 default_model = "claude-opus-4-6"
 "#;
-        let def = ProfileDef::from_toml(toml).unwrap();
+        let def = ProfileDef::from_toml(toml).expect("should parse full profile TOML");
         assert_eq!(def.name(), "rust-dev");
         assert_eq!(def.description(), "Rust development mode");
 
         // Config override
-        let config = def.config.as_ref().unwrap();
+        let config = def
+            .config
+            .as_ref()
+            .expect("should have config section in full profile");
         assert!(config.debug);
         assert_eq!(config.model.default, "claude-opus-4-6");
 
@@ -363,7 +366,11 @@ default_model = "claude-opus-4-6"
         assert!(def.components.contains_key("agent_mgr"));
 
         let sm = &def.components["skill_manager"];
-        let activate = sm.get("activate").unwrap().as_array().unwrap();
+        let activate = sm
+            .get("activate")
+            .expect("should have 'activate' key in skill_manager")
+            .as_array()
+            .expect("'activate' should be an array");
         assert_eq!(activate.len(), 2);
     }
 
@@ -374,15 +381,16 @@ default_model = "claude-opus-4-6"
 name = "test"
 description = "test profile"
 "#;
-        let def = ProfileDef::from_toml(toml).unwrap();
-        let serialized = def.to_toml().unwrap();
-        let restored = ProfileDef::from_toml(&serialized).unwrap();
+        let def = ProfileDef::from_toml(toml).expect("should parse profile for roundtrip test");
+        let serialized = def.to_toml().expect("should serialize profile to TOML");
+        let restored =
+            ProfileDef::from_toml(&serialized).expect("should deserialize roundtripped TOML");
         assert_eq!(def.profile, restored.profile);
     }
 
     #[test]
     fn store_list_profiles() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("should create temp dir for store list test");
 
         write_profile(
             temp.path(),
@@ -415,7 +423,7 @@ description = "Second profile"
 
     #[test]
     fn store_load_by_name() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("should create temp dir for store load test");
 
         write_profile(
             temp.path(),
@@ -431,7 +439,9 @@ activate = ["rust-dev"]
         );
 
         let store = ProfileStore::with_dirs(vec![temp.path().join(PROFILES_DIR)]);
-        let def = store.load("rust-dev").unwrap();
+        let def = store
+            .load("rust-dev")
+            .expect("should load rust-dev profile by name");
 
         assert_eq!(def.name(), "rust-dev");
         assert_eq!(def.components.len(), 1);
@@ -439,7 +449,7 @@ activate = ["rust-dev"]
 
     #[test]
     fn store_load_not_found() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("should create temp dir for not-found test");
         let store = ProfileStore::with_dirs(vec![temp.path().join(PROFILES_DIR)]);
         let result = store.load("nonexistent");
         assert!(result.is_err());
@@ -447,8 +457,8 @@ activate = ["rust-dev"]
 
     #[test]
     fn store_priority_first_wins() {
-        let high = TempDir::new().unwrap();
-        let low = TempDir::new().unwrap();
+        let high = TempDir::new().expect("should create temp dir for high-priority profiles");
+        let low = TempDir::new().expect("should create temp dir for low-priority profiles");
 
         write_profile(
             high.path(),
@@ -475,13 +485,15 @@ description = "low priority"
             low.path().join(PROFILES_DIR),
         ]);
 
-        let def = store.load("shared").unwrap();
+        let def = store
+            .load("shared")
+            .expect("should load shared profile from high-priority dir");
         assert_eq!(def.description(), "high priority");
     }
 
     #[test]
     fn name_defaults_to_filename() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("should create temp dir for filename-default test");
 
         write_profile(
             temp.path(),
@@ -493,7 +505,9 @@ description = "No name field"
         );
 
         let store = ProfileStore::with_dirs(vec![temp.path().join(PROFILES_DIR)]);
-        let def = store.load("my-profile").unwrap();
+        let def = store
+            .load("my-profile")
+            .expect("should load profile and default name to filename");
         assert_eq!(def.name(), "my-profile");
     }
 
@@ -509,7 +523,7 @@ activate = ["a"]
 [components."skill::skill_manager"]
 fql_setting = true
 "#;
-        let def = ProfileDef::from_toml(toml).unwrap();
+        let def = ProfileDef::from_toml(toml).expect("should parse profile with component names");
         let names = def.component_names();
         assert_eq!(names.len(), 2);
     }

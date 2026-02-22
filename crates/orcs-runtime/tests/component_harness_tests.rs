@@ -23,7 +23,10 @@ mod noop_component {
         let result = harness.request(EventCategory::Echo, "any_operation", json!({"data": 123}));
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), json!({"data": 123}));
+        assert_eq!(
+            result.expect("echo request should return Ok"),
+            json!({"data": 123})
+        );
     }
 
     #[test]
@@ -107,15 +110,17 @@ mod hil_component {
         );
 
         assert!(result.is_ok());
-        let response = result.unwrap();
+        let response = result.expect("submit request should return Ok");
         assert_eq!(response["status"], "pending");
 
         // List pending requests
         let result = harness.request(EventCategory::Hil, "list", json!({}));
         assert!(result.is_ok());
 
-        let list_response = result.unwrap();
-        let pending = list_response["pending"].as_array().unwrap();
+        let list_response = result.expect("list request should return Ok");
+        let pending = list_response["pending"]
+            .as_array()
+            .expect("pending field should be an array");
         assert_eq!(pending.len(), 1);
     }
 
@@ -131,7 +136,7 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-approve", "write"),
             )
-            .unwrap();
+            .expect("submit approval request should succeed");
 
         // Check status (pending)
         let result = harness.request(
@@ -139,7 +144,10 @@ mod hil_component {
             "status",
             json!({"approval_id": "req-approve"}),
         );
-        assert_eq!(result.unwrap()["status"], "pending");
+        assert_eq!(
+            result.expect("status request should return Ok")["status"],
+            "pending"
+        );
 
         // Approve via signal
         let response = harness.approve("req-approve");
@@ -151,7 +159,10 @@ mod hil_component {
             "status",
             json!({"approval_id": "req-approve"}),
         );
-        assert_eq!(result.unwrap()["status"], "resolved");
+        assert_eq!(
+            result.expect("status request after approve should return Ok")["status"],
+            "resolved"
+        );
     }
 
     #[test]
@@ -166,7 +177,7 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-reject", "bash"),
             )
-            .unwrap();
+            .expect("submit rejection request should succeed");
 
         // Reject via signal
         let response = harness.reject("req-reject", Some("Too dangerous".to_string()));
@@ -178,7 +189,7 @@ mod hil_component {
             "status",
             json!({"approval_id": "req-reject"}),
         );
-        let status_response = result.unwrap();
+        let status_response = result.expect("status request after reject should return Ok");
         assert_eq!(status_response["status"], "resolved");
         assert!(status_response["result"]["Rejected"].is_object());
     }
@@ -204,20 +215,26 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-1", "op1"),
             )
-            .unwrap();
+            .expect("submit first approval request should succeed");
         harness
             .request(
                 EventCategory::Hil,
                 "submit",
                 create_approval_request("req-2", "op2"),
             )
-            .unwrap();
+            .expect("submit second approval request should succeed");
 
         // Verify pending
         let result = harness
             .request(EventCategory::Hil, "list", json!({}))
-            .unwrap();
-        assert_eq!(result["pending"].as_array().unwrap().len(), 2);
+            .expect("list request should return Ok");
+        assert_eq!(
+            result["pending"]
+                .as_array()
+                .expect("pending field should be an array")
+                .len(),
+            2
+        );
 
         // Veto
         let response = harness.veto();
@@ -227,8 +244,14 @@ mod hil_component {
         // All pending should be rejected
         let result = harness
             .request(EventCategory::Hil, "list", json!({}))
-            .unwrap();
-        assert_eq!(result["pending"].as_array().unwrap().len(), 0);
+            .expect("list request after veto should return Ok");
+        assert_eq!(
+            result["pending"]
+                .as_array()
+                .expect("pending field should be an array after veto")
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -253,11 +276,11 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-log", "write"),
             )
-            .unwrap();
+            .expect("submit request for log test should succeed");
         harness.approve("req-log");
         harness
             .request(EventCategory::Hil, "list", json!({}))
-            .unwrap();
+            .expect("list request for log test should return Ok");
 
         // Check logs
         assert_eq!(harness.request_log().len(), 2);

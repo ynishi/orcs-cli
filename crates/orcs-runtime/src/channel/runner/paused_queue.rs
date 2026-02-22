@@ -193,10 +193,14 @@ mod tests {
         queue.try_enqueue(test_event("first"), "TestRunner", "ch-1");
         queue.try_enqueue(test_event("second"), "TestRunner", "ch-1");
 
-        let first = queue.pop_front().unwrap();
+        let first = queue
+            .pop_front()
+            .expect("first event should be present in queue");
         assert_eq!(first.operation, "first");
 
-        let second = queue.pop_front().unwrap();
+        let second = queue
+            .pop_front()
+            .expect("second event should be present in queue");
         assert_eq!(second.operation, "second");
 
         assert!(queue.pop_front().is_none());

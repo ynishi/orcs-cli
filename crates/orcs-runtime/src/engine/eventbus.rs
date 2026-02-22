@@ -706,7 +706,7 @@ mod tests {
 
         let signal = handle.try_recv_signal();
         assert!(signal.is_some());
-        assert!(signal.unwrap().is_veto());
+        assert!(signal.expect("should receive veto signal").is_veto());
     }
 
     #[tokio::test]
@@ -723,7 +723,12 @@ mod tests {
 
         let result = bus.request(req).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), "ENGINE_COMPONENT_NOT_FOUND");
+        assert_eq!(
+            result
+                .expect_err("request to nonexistent target should fail")
+                .code(),
+            "ENGINE_COMPONENT_NOT_FOUND"
+        );
     }
 
     #[tokio::test]
@@ -738,7 +743,12 @@ mod tests {
 
         let result = bus.request(req).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), "ENGINE_NO_TARGET");
+        assert_eq!(
+            result
+                .expect_err("request without target should fail")
+                .code(),
+            "ENGINE_NO_TARGET"
+        );
     }
 
     #[tokio::test]
@@ -773,7 +783,7 @@ mod tests {
             bus.request(req).await
         });
 
-        let received_req = rx.await.unwrap();
+        let received_req = rx.await.expect("should receive request via oneshot");
         assert_eq!(received_req.id, request_id);
     }
 
@@ -807,13 +817,18 @@ mod tests {
         bus.pending_responses.insert(request_id, tx);
 
         if let Some(sender) = bus.request_senders.get(&target) {
-            sender.send(req).await.unwrap();
+            sender
+                .send(req)
+                .await
+                .expect("send request to target should succeed");
         }
 
-        let result = resp_rx.await.unwrap();
+        let result = resp_rx.await.expect("should receive response from handler");
         bus.respond(request_id, result);
 
-        let received = rx.await.unwrap();
+        let received = rx
+            .await
+            .expect("should receive completed response via oneshot");
         assert!(received.is_ok());
     }
 
@@ -829,7 +844,7 @@ mod tests {
 
         let received = rx.try_recv();
         assert!(received.is_ok());
-        assert!(received.unwrap().is_ok());
+        assert!(received.expect("should receive response value").is_ok());
     }
 
     #[test]
@@ -884,7 +899,7 @@ mod tests {
         let result = bus.request(req).await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("request should timeout");
         assert_eq!(err.code(), "ENGINE_TIMEOUT");
         assert!(err.is_recoverable());
     }
@@ -934,7 +949,7 @@ mod tests {
         let result = bus.publish(req).await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("publish without subscriber should fail");
         assert_eq!(err.code(), "ENGINE_NO_SUBSCRIBER");
     }
 
@@ -965,7 +980,7 @@ mod tests {
             bus.publish(req).await
         });
 
-        let received = rx.await.unwrap();
+        let received = rx.await.expect("should receive published request");
         assert_eq!(received.id, request_id);
         assert_eq!(received.operation, "submit");
     }
@@ -1027,8 +1042,18 @@ mod tests {
         let evt2 = rx2.try_recv();
         assert!(evt1.is_ok());
         assert!(evt2.is_ok());
-        assert_eq!(evt1.unwrap().into_event().operation, "input");
-        assert_eq!(evt2.unwrap().into_event().operation, "input");
+        assert_eq!(
+            evt1.expect("channel 1 should receive broadcast")
+                .into_event()
+                .operation,
+            "input"
+        );
+        assert_eq!(
+            evt2.expect("channel 2 should receive broadcast")
+                .into_event()
+                .operation,
+            "input"
+        );
     }
 
     #[tokio::test]
@@ -1053,7 +1078,12 @@ mod tests {
 
         let evt = rx1.try_recv();
         assert!(evt.is_ok());
-        assert_eq!(evt.unwrap().into_event().operation, "async_input");
+        assert_eq!(
+            evt.expect("channel should receive async broadcast")
+                .into_event()
+                .operation,
+            "async_input"
+        );
     }
 
     // === Component-to-Component RPC via ChannelHandle Tests ===
@@ -1157,7 +1187,10 @@ mod tests {
 
         let result = bus.request(req).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::String("rpc_test".into()));
+        assert_eq!(
+            result.expect("RPC request should succeed"),
+            Value::String("rpc_test".into())
+        );
 
         // Cleanup
         signal_tx
@@ -1165,7 +1198,7 @@ mod tests {
                 channel_id,
                 crate::Principal::System,
             ))
-            .unwrap();
+            .expect("send cancel signal for cleanup should succeed");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         let _ = world_tx.send(crate::channel::WorldCommand::Shutdown).await;
         let _ = manager_task.await;
@@ -1189,7 +1222,7 @@ mod tests {
         // Stop the runner first so reply never comes
         signal_tx
             .send(orcs_event::Signal::veto(crate::Principal::System))
-            .unwrap();
+            .expect("send veto signal to stop runner should succeed");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), runner_task).await;
 
         let req = Request::new(
@@ -1207,7 +1240,7 @@ mod tests {
         // After runner stops, request_rx is dropped, so send_request fails
         // or the oneshot reply_tx is dropped → ChannelClosed
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("request after runner stop should fail");
         let code = err.code();
         assert!(
             code == "ENGINE_SEND_FAILED" || code == "ENGINE_CHANNEL_CLOSED",
@@ -1252,7 +1285,9 @@ mod tests {
             bus.request(req).await
         });
 
-        let received = rx.await.unwrap();
+        let received = rx
+            .await
+            .expect("should receive request via fallback ComponentHandle path");
         assert_eq!(received.id, request_id);
     }
 
@@ -1297,7 +1332,10 @@ mod tests {
 
             let hook = MockHook::pass_through("reg-observer", "*::*", HookPoint::BusOnRegister);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let _handle =
                 bus.register(ComponentId::builtin("test"), vec![EventCategory::Lifecycle]);
@@ -1310,11 +1348,16 @@ mod tests {
 
             let hook = MockHook::modifier("reg-checker", "*::*", HookPoint::BusOnRegister, |ctx| {
                 assert_eq!(ctx.payload["component_id"], "builtin::test-comp");
-                let subs = ctx.payload["subscriptions"].as_array().unwrap();
+                let subs = ctx.payload["subscriptions"]
+                    .as_array()
+                    .expect("subscriptions should be an array");
                 assert!(!subs.is_empty());
             });
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let _handle = bus.register(
                 ComponentId::builtin("test-comp"),
@@ -1332,7 +1375,10 @@ mod tests {
 
             let hook = MockHook::pass_through("unreg-observer", "*::*", HookPoint::BusOnUnregister);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             bus.unregister(&id);
             assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1350,7 +1396,10 @@ mod tests {
                     assert_eq!(ctx.payload["component_id"], "builtin::my-comp");
                 });
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             bus.unregister(&id);
             assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1370,7 +1419,10 @@ mod tests {
                 HookPoint::BusPreBroadcast,
                 "policy",
             );
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let event = Event {
                 category: EventCategory::UserInput,
@@ -1397,7 +1449,10 @@ mod tests {
                 HookPoint::BusPreBroadcast,
                 json!(null),
             );
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let event = Event {
                 category: EventCategory::UserInput,
@@ -1421,7 +1476,10 @@ mod tests {
             let hook =
                 MockHook::pass_through("allow-broadcast", "*::*", HookPoint::BusPreBroadcast);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let event = Event {
                 category: EventCategory::UserInput,
@@ -1450,7 +1508,10 @@ mod tests {
                     assert_eq!(ctx.payload["operation"], "input");
                 });
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let event = Event {
                 category: EventCategory::UserInput,
@@ -1473,7 +1534,10 @@ mod tests {
 
             let hook =
                 MockHook::aborter("block-async", "*::*", HookPoint::BusPreBroadcast, "blocked");
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("hook registry write lock should succeed")
+                .register(Box::new(hook));
 
             let event = Event {
                 category: EventCategory::UserInput,

@@ -373,7 +373,7 @@ mod tests {
         // With explicit ID in input
         let signal = bridge.parse_line_to_signal("y req-123", &principal, None);
         assert!(signal.is_some());
-        assert!(signal.unwrap().is_approve());
+        assert!(signal.expect("should produce approve signal").is_approve());
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         let signal = bridge.parse_line_to_signal("y", &principal, Some("default-id"));
         assert!(signal.is_some());
 
-        let signal = signal.unwrap();
+        let signal = signal.expect("should produce signal with default approval id");
         assert!(signal.is_approve());
         if let SignalKind::Approve { approval_id } = &signal.kind {
             assert_eq!(approval_id, "default-id");
@@ -399,7 +399,7 @@ mod tests {
 
         let signal = bridge.parse_line_to_signal("veto", &principal, None);
         assert!(signal.is_some());
-        assert!(signal.unwrap().is_veto());
+        assert!(signal.expect("should produce veto signal").is_veto());
     }
 
     #[test]
@@ -424,17 +424,23 @@ mod tests {
         input_handle
             .send(IOInput::line_with_context("y", ctx.clone()))
             .await
-            .unwrap();
+            .expect("send approve input should succeed");
         input_handle
             .send(IOInput::line_with_context("n", ctx.clone()))
             .await
-            .unwrap();
+            .expect("send reject input should succeed");
         input_handle
             .send(IOInput::line_with_context("veto", ctx.clone()))
             .await
-            .unwrap();
-        input_handle.send(IOInput::line("q")).await.unwrap();
-        input_handle.send(IOInput::line("unknown")).await.unwrap();
+            .expect("send veto input should succeed");
+        input_handle
+            .send(IOInput::line("q"))
+            .await
+            .expect("send quit input should succeed");
+        input_handle
+            .send(IOInput::line("unknown"))
+            .await
+            .expect("send unknown input should succeed");
 
         // Small delay to ensure messages are received
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -464,11 +470,11 @@ mod tests {
         input_handle
             .send(IOInput::line_with_context("y", ctx))
             .await
-            .unwrap();
+            .expect("send approve input should succeed");
 
         let result = bridge.recv_input(&principal).await;
         assert!(result.is_some());
-        assert!(result.unwrap().is_ok());
+        assert!(result.expect("recv_input should return Some").is_ok());
     }
 
     #[tokio::test]
@@ -476,11 +482,16 @@ mod tests {
         let (mut bridge, input_handle, _output_handle) = setup();
         let principal = test_principal();
 
-        input_handle.send(IOInput::line("q")).await.unwrap();
+        input_handle
+            .send(IOInput::line("q"))
+            .await
+            .expect("send quit input should succeed");
 
         let result = bridge.recv_input(&principal).await;
         assert!(result.is_some());
-        let cmd = result.unwrap().unwrap_err();
+        let cmd = result
+            .expect("recv_input should return Some")
+            .expect_err("quit should not map to a signal");
         assert!(matches!(cmd, InputCommand::Quit));
     }
 
@@ -488,9 +499,12 @@ mod tests {
     async fn send_output() {
         let (bridge, _input_handle, mut output_handle) = setup();
 
-        bridge.info("test message").await.unwrap();
+        bridge
+            .info("test message")
+            .await
+            .expect("send info should succeed");
 
-        let output = output_handle.recv().await.unwrap();
+        let output = output_handle.recv().await.expect("should receive output");
         assert!(matches!(output, IOOutput::Print { .. }));
     }
 
@@ -526,9 +540,15 @@ mod tests {
             "Write file",
             serde_json::json!({}),
         );
-        bridge.show_approval_request(&req).await.unwrap();
+        bridge
+            .show_approval_request(&req)
+            .await
+            .expect("send approval request should succeed");
 
-        let output = output_handle.recv().await.unwrap();
+        let output = output_handle
+            .recv()
+            .await
+            .expect("should receive approval request output");
         if let IOOutput::ShowApprovalRequest { id, operation, .. } = output {
             assert_eq!(id, "req-123");
             assert_eq!(operation, "write");

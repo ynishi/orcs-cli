@@ -26,11 +26,11 @@ async fn view_to_bridge_input_flow() {
     input_handle
         .send(IOInput::line_with_context("y", ctx.clone()))
         .await
-        .unwrap();
+        .expect("should send approve input to the bridge");
     input_handle
         .send(IOInput::line_with_context("veto", ctx))
         .await
-        .unwrap();
+        .expect("should send veto input to the bridge");
 
     // Small delay to ensure messages are buffered
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -52,9 +52,18 @@ async fn bridge_to_view_output_flow() {
     let bridge = IOBridge::new(port);
 
     // Bridge layer sends output
-    bridge.info("Test message").await.unwrap();
-    bridge.warn("Warning!").await.unwrap();
-    bridge.error("Error occurred").await.unwrap();
+    bridge
+        .info("Test message")
+        .await
+        .expect("should send info output");
+    bridge
+        .warn("Warning!")
+        .await
+        .expect("should send warn output");
+    bridge
+        .error("Error occurred")
+        .await
+        .expect("should send error output");
 
     // View layer receives output
     let outputs = output_handle.drain();
@@ -82,10 +91,16 @@ async fn approval_request_flow() {
         serde_json::json!({"path": "/etc/config"}),
     );
 
-    bridge.show_approval_request(&request).await.unwrap();
+    bridge
+        .show_approval_request(&request)
+        .await
+        .expect("should display approval request");
 
     // View receives the approval request display
-    let output = output_handle.recv().await.unwrap();
+    let output = output_handle
+        .recv()
+        .await
+        .expect("should receive approval request output");
     if let IOOutput::ShowApprovalRequest {
         id,
         operation,
@@ -104,7 +119,7 @@ async fn approval_request_flow() {
     input_handle
         .send(IOInput::line_with_context("y", ctx))
         .await
-        .unwrap();
+        .expect("should send approve input with approval ID context");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals(&principal);
@@ -118,8 +133,14 @@ async fn approval_request_flow() {
     }
 
     // Confirm approval display
-    bridge.show_approved("req-integration-test").await.unwrap();
-    let output = output_handle.recv().await.unwrap();
+    bridge
+        .show_approved("req-integration-test")
+        .await
+        .expect("should display approved status");
+    let output = output_handle
+        .recv()
+        .await
+        .expect("should receive approved output");
     assert!(matches!(output, IOOutput::ShowApproved { .. }));
 }
 
@@ -137,7 +158,7 @@ async fn rejection_flow_with_reason() {
     input_handle
         .send(IOInput::line("n req-reject-test too-dangerous"))
         .await
-        .unwrap();
+        .expect("should send rejection input with reason");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals(&principal);
@@ -159,8 +180,11 @@ async fn rejection_flow_with_reason() {
     bridge
         .show_rejected("req-reject-test", Some("too-dangerous"))
         .await
-        .unwrap();
-    let output = output_handle.recv().await.unwrap();
+        .expect("should display rejected status with reason");
+    let output = output_handle
+        .recv()
+        .await
+        .expect("should receive rejected output");
     if let IOOutput::ShowRejected {
         approval_id,
         reason,
@@ -185,7 +209,7 @@ async fn preparsed_signal_from_view() {
     input_handle
         .send(IOInput::Signal(SignalKind::Veto))
         .await
-        .unwrap();
+        .expect("should send pre-parsed veto signal");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals(&principal);
@@ -203,7 +227,10 @@ async fn eof_handling() {
     let principal = test_principal();
 
     // View layer sends EOF
-    input_handle.send(IOInput::Eof).await.unwrap();
+    input_handle
+        .send(IOInput::Eof)
+        .await
+        .expect("should send EOF input");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, commands) = bridge.drain_input_to_signals(&principal);
@@ -227,16 +254,20 @@ async fn async_recv_input() {
         input_handle
             .send(IOInput::line_with_context("y", ctx))
             .await
-            .unwrap();
+            .expect("should send approve input from spawned task");
     });
 
     // Wait for input
     let result = bridge.recv_input(&principal).await;
     assert!(result.is_some());
-    let signal = result.unwrap().unwrap();
+    let signal = result
+        .expect("should receive input result")
+        .expect("should parse as valid signal");
     assert!(signal.is_approve());
 
-    handle.await.unwrap();
+    handle
+        .await
+        .expect("spawned input task should complete successfully");
 }
 
 /// Test ConsoleRenderer integration
@@ -247,9 +278,18 @@ async fn console_renderer_integration() {
     let bridge = IOBridge::new(port);
 
     // Send various outputs
-    bridge.info("Info message").await.unwrap();
-    bridge.warn("Warning message").await.unwrap();
-    bridge.prompt("Enter value:").await.unwrap();
+    bridge
+        .info("Info message")
+        .await
+        .expect("should send info message");
+    bridge
+        .warn("Warning message")
+        .await
+        .expect("should send warning message");
+    bridge
+        .prompt("Enter value:")
+        .await
+        .expect("should send prompt message");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     // Create renderer and drain outputs
@@ -294,11 +334,11 @@ async fn multiple_input_sources() {
     input_handle
         .send(IOInput::line_with_context("y", ctx.clone()))
         .await
-        .unwrap();
+        .expect("should send approve input from first handle");
     input_handle2
         .send(IOInput::line_with_context("veto", ctx))
         .await
-        .unwrap();
+        .expect("should send veto input from cloned handle");
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let (signals, _) = bridge.drain_input_to_signals(&principal);

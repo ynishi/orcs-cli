@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn config_serialize() {
         let config = ChannelConfig::interactive();
-        let json = serde_json::to_string(&config).unwrap();
+        let json = serde_json::to_string(&config).expect("serialize ChannelConfig to JSON");
         assert!(json.contains("255"));
         assert!(json.contains("true"));
         assert!(json.contains("Elevated"));
@@ -497,7 +497,8 @@ mod tests {
     #[test]
     fn config_deserialize() {
         let json = r#"{"priority":100,"can_spawn":false}"#;
-        let config: ChannelConfig = serde_json::from_str(json).unwrap();
+        let config: ChannelConfig =
+            serde_json::from_str(json).expect("deserialize ChannelConfig from JSON");
         assert_eq!(config.priority(), 100);
         assert!(!config.can_spawn());
     }

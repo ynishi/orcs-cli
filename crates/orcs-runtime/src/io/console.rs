@@ -367,9 +367,12 @@ mod tests {
         let (mut port, input_handle, _output_handle) = IOPort::with_defaults(channel_id);
 
         let reader = ConsoleInputReader::new(input_handle);
-        reader.send_veto().await.unwrap();
+        reader
+            .send_veto()
+            .await
+            .expect("send veto signal should succeed");
 
-        let input = port.recv().await.unwrap();
+        let input = port.recv().await.expect("should receive veto input");
         assert!(matches!(input, IOInput::Signal(SignalKind::Veto)));
     }
 }

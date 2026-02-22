@@ -588,8 +588,10 @@ mod tests {
     #[test]
     fn toml_roundtrip() {
         let config = OrcsConfig::default();
-        let toml = config.to_toml().unwrap();
-        let restored = OrcsConfig::from_toml(&toml).unwrap();
+        let toml = config
+            .to_toml()
+            .expect("should serialize default config to TOML");
+        let restored = OrcsConfig::from_toml(&toml).expect("should deserialize roundtripped TOML");
         assert_eq!(config, restored);
     }
 
@@ -601,7 +603,7 @@ debug = true
 [model]
 default = "custom-model"
 "#;
-        let config = OrcsConfig::from_toml(toml).unwrap();
+        let config = OrcsConfig::from_toml(toml).expect("should parse partial TOML with defaults");
         assert!(config.debug);
         assert_eq!(config.model.default, "custom-model");
         // Defaults for unspecified fields
@@ -658,7 +660,7 @@ default = "custom-model"
 dirs = ["~/.orcs/scripts", ".orcs/scripts"]
 auto_load = true
 "#;
-        let config = OrcsConfig::from_toml(toml).unwrap();
+        let config = OrcsConfig::from_toml(toml).expect("should parse scripts config from TOML");
         assert_eq!(config.scripts.dirs.len(), 2);
         assert!(config.scripts.auto_load);
     }
@@ -726,7 +728,7 @@ script = "hooks/audit.lua"
 priority = 50
 enabled = true
 "#;
-        let config = OrcsConfig::from_toml(toml).unwrap();
+        let config = OrcsConfig::from_toml(toml).expect("should parse hooks config from TOML");
         assert_eq!(config.hooks.hooks.len(), 1);
         assert_eq!(config.hooks.hooks[0].id.as_deref(), Some("audit"));
         assert_eq!(config.hooks.hooks[0].priority, 50);
@@ -747,8 +749,11 @@ enabled = true
             }],
         };
 
-        let toml = config.to_toml().unwrap();
-        let restored = OrcsConfig::from_toml(&toml).unwrap();
+        let toml = config
+            .to_toml()
+            .expect("should serialize config with hooks to TOML");
+        let restored =
+            OrcsConfig::from_toml(&toml).expect("should deserialize hooks roundtrip TOML");
         assert_eq!(config.hooks, restored.hooks);
     }
 

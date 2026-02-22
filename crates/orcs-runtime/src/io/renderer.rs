@@ -275,8 +275,12 @@ mod tests {
         let (port, _input_handle, mut output_handle) = IOPort::with_defaults(channel_id);
 
         // Send some outputs
-        port.send(IOOutput::info("test1")).await.unwrap();
-        port.send(IOOutput::info("test2")).await.unwrap();
+        port.send(IOOutput::info("test1"))
+            .await
+            .expect("send first output should succeed");
+        port.send(IOOutput::info("test2"))
+            .await
+            .expect("send second output should succeed");
 
         // Small delay to ensure messages are received
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

@@ -301,17 +301,22 @@ mod tests {
         let (mut port, input_handle, mut output_handle) = IOPort::new(channel_id, 8);
 
         // Send input from View
-        input_handle.send(IOInput::line("hello")).await.unwrap();
+        input_handle
+            .send(IOInput::line("hello"))
+            .await
+            .expect("send input should succeed");
 
         // Receive in Bridge
-        let input = port.recv().await.unwrap();
+        let input = port.recv().await.expect("should receive input");
         assert_eq!(input.as_line(), Some("hello"));
 
         // Send output from Bridge
-        port.send(IOOutput::info("received")).await.unwrap();
+        port.send(IOOutput::info("received"))
+            .await
+            .expect("send output should succeed");
 
         // Receive in View
-        let output = output_handle.recv().await.unwrap();
+        let output = output_handle.recv().await.expect("should receive output");
         assert!(matches!(output, IOOutput::Print { .. }));
     }
 
@@ -330,9 +335,18 @@ mod tests {
         let (mut port, input_handle, _output_handle) = IOPort::new(channel_id, 8);
 
         // Send multiple inputs
-        input_handle.send(IOInput::line("one")).await.unwrap();
-        input_handle.send(IOInput::line("two")).await.unwrap();
-        input_handle.send(IOInput::line("three")).await.unwrap();
+        input_handle
+            .send(IOInput::line("one"))
+            .await
+            .expect("send first input should succeed");
+        input_handle
+            .send(IOInput::line("two"))
+            .await
+            .expect("send second input should succeed");
+        input_handle
+            .send(IOInput::line("three"))
+            .await
+            .expect("send third input should succeed");
 
         // Drain all
         let inputs = port.drain_input();
@@ -350,9 +364,12 @@ mod tests {
         let channel_id = ChannelId::new();
         let (mut port, input_handle, _output_handle) = IOPort::new(channel_id, 8);
 
-        input_handle.send_line("test").await.unwrap();
+        input_handle
+            .send_line("test")
+            .await
+            .expect("send_line should succeed");
 
-        let input = port.recv().await.unwrap();
+        let input = port.recv().await.expect("should receive input line");
         assert_eq!(input.as_line(), Some("test"));
     }
 
@@ -362,8 +379,12 @@ mod tests {
         let (port, _input_handle, mut output_handle) = IOPort::new(channel_id, 8);
 
         // Send multiple outputs
-        port.send(IOOutput::info("one")).await.unwrap();
-        port.send(IOOutput::warn("two")).await.unwrap();
+        port.send(IOOutput::info("one"))
+            .await
+            .expect("send info output should succeed");
+        port.send(IOOutput::warn("two"))
+            .await
+            .expect("send warn output should succeed");
 
         // Drain all
         let outputs = output_handle.drain();
@@ -403,8 +424,14 @@ mod tests {
         let input_handle2 = input_handle.clone();
 
         // Both handles can send
-        input_handle.send_line("from handle 1").await.unwrap();
-        input_handle2.send_line("from handle 2").await.unwrap();
+        input_handle
+            .send_line("from handle 1")
+            .await
+            .expect("send from handle 1 should succeed");
+        input_handle2
+            .send_line("from handle 2")
+            .await
+            .expect("send from handle 2 should succeed");
 
         let inputs = port.drain_input();
         assert_eq!(inputs.len(), 2);

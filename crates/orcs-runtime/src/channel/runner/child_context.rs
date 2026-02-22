@@ -1337,7 +1337,9 @@ mod tests {
 
         ChildContext::emit_output(&ctx, "Hello, World!");
 
-        let event = output_rx.try_recv().unwrap();
+        let event = output_rx
+            .try_recv()
+            .expect("should receive emit_output event");
         assert_eq!(event.category, EventCategory::Output);
         assert_eq!(event.payload["message"], "Hello, World!");
         assert_eq!(event.payload["level"], "info");
@@ -1349,7 +1351,9 @@ mod tests {
 
         ChildContext::emit_output_with_level(&ctx, "Warning message", "warn");
 
-        let event = output_rx.try_recv().unwrap();
+        let event = output_rx
+            .try_recv()
+            .expect("should receive emit_output_with_level event");
         assert_eq!(event.payload["message"], "Warning message");
         assert_eq!(event.payload["level"], "warn");
     }
@@ -1397,7 +1401,9 @@ mod tests {
         let (ctx, _) = setup();
 
         let config = ChildConfig::new("async-worker-2");
-        let mut handle = AsyncChildContext::spawn_child(&ctx, config).await.unwrap();
+        let mut handle = AsyncChildContext::spawn_child(&ctx, config)
+            .await
+            .expect("async spawn child should succeed");
 
         let result = handle.run(serde_json::json!({"test": true})).await;
 
@@ -1413,7 +1419,9 @@ mod tests {
 
         AsyncChildContext::emit_output(&ctx, "Async Hello!");
 
-        let event = output_rx.try_recv().unwrap();
+        let event = output_rx
+            .try_recv()
+            .expect("should receive async emit_output event");
         assert_eq!(event.payload["message"], "Async Hello!");
     }
 
@@ -1986,7 +1994,10 @@ mod tests {
                 HookPoint::AuthPreCheck,
                 "blocked by policy",
             );
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let result = ctx.check_command("rm -rf /");
             assert!(result.is_denied());
@@ -2004,7 +2015,10 @@ mod tests {
                 HookPoint::AuthPreCheck,
                 json!({"allowed": true}),
             );
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let result = ctx.check_command("rm -rf /");
             assert!(result.is_allowed());
@@ -2020,7 +2034,10 @@ mod tests {
                 HookPoint::AuthPreCheck,
                 json!({"allowed": false, "reason": "custom deny"}),
             );
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let result = ctx.check_command("echo hello");
             assert!(result.is_denied());
@@ -2034,7 +2051,10 @@ mod tests {
             // Register pass-through hook
             let hook = MockHook::pass_through("observer", "*::*", HookPoint::AuthPreCheck);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let result = ctx.check_command("ls -la");
             // Hook was called
@@ -2049,7 +2069,10 @@ mod tests {
 
             let hook = MockHook::pass_through("post-observer", "*::*", HookPoint::AuthPostCheck);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let result = ctx.check_command("echo hello");
             assert!(result.is_allowed());
@@ -2068,7 +2091,10 @@ mod tests {
                     assert_eq!(ctx.payload["command"], "echo hello");
                 });
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             let _ = ctx.check_command("echo hello");
             assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -2080,7 +2106,10 @@ mod tests {
 
             let hook = MockHook::pass_through("grant-observer", "*::*", HookPoint::AuthOnGrant);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             ctx.grant_command("rm -rf");
 
@@ -2096,7 +2125,10 @@ mod tests {
                 assert_eq!(ctx.payload["granted_by"], "test-parent");
             });
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             ctx.grant_command("rm -rf");
             assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -2128,7 +2160,10 @@ mod tests {
 
             let hook = MockHook::pass_through("trait-grant", "*::*", HookPoint::AuthOnGrant);
             let counter = hook.call_count.clone();
-            registry.write().unwrap().register(Box::new(hook));
+            registry
+                .write()
+                .expect("acquire hook registry write lock")
+                .register(Box::new(hook));
 
             ctx_dyn.grant_command("ls");
             assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -2145,7 +2180,9 @@ mod tests {
             let post_counter = post_hook.call_count.clone();
 
             {
-                let mut guard = registry.write().unwrap();
+                let mut guard = registry
+                    .write()
+                    .expect("acquire hook registry write lock for multi-hook test");
                 guard.register(Box::new(pre_hook));
                 guard.register(Box::new(post_hook));
             }

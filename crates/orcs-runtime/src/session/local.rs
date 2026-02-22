@@ -198,8 +198,9 @@ mod tests {
     use tempfile::TempDir;
 
     async fn test_store() -> (LocalFileStore, TempDir) {
-        let temp = TempDir::new().unwrap();
-        let store = LocalFileStore::new(temp.path().to_path_buf()).unwrap();
+        let temp = TempDir::new().expect("should create temp dir");
+        let store =
+            LocalFileStore::new(temp.path().to_path_buf()).expect("should create local file store");
         (store, temp)
     }
 
@@ -211,10 +212,16 @@ mod tests {
         asset.add_turn(super::super::ConversationTurn::user("test"));
 
         // Save
-        store.save(&asset).await.unwrap();
+        store
+            .save(&asset)
+            .await
+            .expect("save session should succeed");
 
         // Load
-        let loaded = store.load(&asset.id).await.unwrap();
+        let loaded = store
+            .load(&asset.id)
+            .await
+            .expect("load session should succeed");
         assert_eq!(loaded.id, asset.id);
         assert_eq!(loaded.history.len(), 1);
     }
@@ -235,11 +242,14 @@ mod tests {
         for i in 0..3 {
             let mut asset = SessionAsset::new();
             asset.project_context.name = Some(format!("project-{i}"));
-            store.save(&asset).await.unwrap();
+            store
+                .save(&asset)
+                .await
+                .expect("save session should succeed");
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
-        let sessions = store.list().await.unwrap();
+        let sessions = store.list().await.expect("list sessions should succeed");
         assert_eq!(sessions.len(), 3);
 
         // Should be sorted by updated_at descending
@@ -251,13 +261,25 @@ mod tests {
         let (store, _temp) = test_store().await;
 
         let asset = SessionAsset::new();
-        store.save(&asset).await.unwrap();
+        store
+            .save(&asset)
+            .await
+            .expect("save session should succeed");
 
-        assert!(store.exists(&asset.id).await.unwrap());
+        assert!(store
+            .exists(&asset.id)
+            .await
+            .expect("exists check should succeed"));
 
-        store.delete(&asset.id).await.unwrap();
+        store
+            .delete(&asset.id)
+            .await
+            .expect("delete session should succeed");
 
-        assert!(!store.exists(&asset.id).await.unwrap());
+        assert!(!store
+            .exists(&asset.id)
+            .await
+            .expect("exists check after delete should succeed"));
     }
 
     #[tokio::test]
@@ -273,10 +295,19 @@ mod tests {
         let (store, _temp) = test_store().await;
 
         let asset = SessionAsset::new();
-        assert!(!store.exists(&asset.id).await.unwrap());
+        assert!(!store
+            .exists(&asset.id)
+            .await
+            .expect("exists check before save should succeed"));
 
-        store.save(&asset).await.unwrap();
-        assert!(store.exists(&asset.id).await.unwrap());
+        store
+            .save(&asset)
+            .await
+            .expect("save session should succeed");
+        assert!(store
+            .exists(&asset.id)
+            .await
+            .expect("exists check after save should succeed"));
     }
 
     #[tokio::test]
@@ -292,7 +323,10 @@ mod tests {
         let expanded = expand_tilde(&path);
 
         if dirs::home_dir().is_some() {
-            assert!(!expanded.to_str().unwrap().starts_with("~/"));
+            assert!(!expanded
+                .to_str()
+                .expect("expanded path should be valid UTF-8")
+                .starts_with("~/"));
         }
     }
 
