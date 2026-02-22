@@ -164,6 +164,7 @@ pub fn shared_hook_registry() -> SharedHookRegistry {
 }
 
 // Re-export testing utilities
+#[cfg(any(test, feature = "test-utils"))]
 pub mod testing {
     //! Test utilities for the hook system.
     //!

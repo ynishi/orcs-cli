@@ -1125,6 +1125,7 @@ dependencies = [
  "orcs-component",
  "orcs-event",
  "orcs-hook",
+ "orcs-lua",
  "orcs-runtime",
  "orcs-types",
  "parking_lot",

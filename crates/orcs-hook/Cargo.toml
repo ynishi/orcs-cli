@@ -6,6 +6,9 @@ description = "Lifecycle hook definitions and configuration for ORCS"
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 orcs-types = { workspace = true }
 serde = { workspace = true }

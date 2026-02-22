@@ -24,6 +24,7 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+orcs-hook = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

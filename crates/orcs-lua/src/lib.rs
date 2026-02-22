@@ -101,7 +101,9 @@ mod loader;
 mod lua_env;
 pub mod orcs_helpers;
 pub mod sanitize;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod scenario;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 pub mod tool_registry;
 pub mod tools;

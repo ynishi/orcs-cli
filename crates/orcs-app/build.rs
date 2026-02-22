@@ -47,12 +47,9 @@ fn collect_lua_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) 
         if path.is_dir() {
             collect_lua_files(base, &path, out);
         } else if path.extension().is_some_and(|ext| ext == "lua") {
-            let rel = path
-                .strip_prefix(base)
-                .expect("strip prefix")
-                .to_string_lossy()
-                .to_string();
-            out.push((rel, path));
+            if let Ok(rel) = path.strip_prefix(base) {
+                out.push((rel.to_string_lossy().to_string(), path));
+            }
         }
     }
 }

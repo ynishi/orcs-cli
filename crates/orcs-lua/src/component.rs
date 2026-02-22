@@ -394,6 +394,7 @@ impl LuaComponent {
     /// Provides closure-based access to the internal Lua state.
     ///
     /// Intended for test mock injection (e.g. overriding `orcs.llm()`).
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_lua<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Lua) -> R,

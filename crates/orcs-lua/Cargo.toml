@@ -54,8 +54,13 @@ uuid = { workspace = true }
 # Async runtime (for non-blocking process execution)
 tokio = { version = "1", features = ["process", "rt"] }
 
+[features]
+test-utils = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+orcs-hook = { path = "../orcs-hook", features = ["test-utils"] }
+orcs-lua = { path = ".", features = ["test-utils"] }
 
 [lints.rust]
 # Required for mlua Send/Sync wrapper

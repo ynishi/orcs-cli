@@ -42,6 +42,7 @@ pub trait Hook: Send + Sync {
 }
 
 /// Test utilities for the hook system.
+#[cfg(any(test, feature = "test-utils"))]
 pub mod testing {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

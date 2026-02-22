@@ -162,6 +162,7 @@ fn detect_test_file(path: &Path) -> bool {
             || file_name.ends_with("_tests.rs")
             || file_name.starts_with("test_")
             || file_name == "tests.rs"
+            || file_name == "testing.rs"
         {
             return true;
         }

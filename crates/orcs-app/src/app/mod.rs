@@ -298,7 +298,7 @@ impl OrcsApp {
         let (printer_tx, printer_rx) =
             std::sync::mpsc::sync_channel::<Option<Box<dyn RustylineExternalPrinter + Send>>>(1);
 
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("orcs-readline".into())
             .spawn(move || {
                 let config = rustyline::Config::builder().auto_add_history(true).build();
@@ -354,7 +354,9 @@ impl OrcsApp {
                 // Final history save
                 let _ = rl.save_history(&history_path);
             })
-            .expect("failed to spawn readline thread");
+        {
+            tracing::error!("failed to spawn readline thread: {e}");
+        }
 
         // Block until the readline thread sends the printer (or fails)
         let printer = printer_rx.recv().ok().flatten();

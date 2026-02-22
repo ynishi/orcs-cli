@@ -105,14 +105,34 @@ fn parse_allow_directive(line: &str) -> Option<AllowDirective> {
     Some(AllowDirective { rules, reason })
 }
 
-/// `#[cfg(test)]` 属性の検出。
+/// `#[cfg(test)]` or `#[cfg(any(test, ...))]` 属性の検出。
 pub fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("cfg") {
             return false;
         }
-        attr.parse_args::<syn::Ident>()
+        // #[cfg(test)]
+        if attr
+            .parse_args::<syn::Ident>()
             .is_ok_and(|ident| ident == "test")
+        {
+            return true;
+        }
+        // #[cfg(any(test, ...))] — normalized token check
+        let Ok(meta_list) = attr.meta.require_list() else {
+            return false;
+        };
+        let normalized: String = meta_list
+            .tokens
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        normalized.starts_with("any(")
+            && (normalized.contains("(test,")
+                || normalized.contains(",test,")
+                || normalized.contains(",test)")
+                || normalized == "any(test)")
     })
 }
 
