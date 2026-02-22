@@ -299,6 +299,10 @@ API documentation is generated from source via rustdoc. Each crate has module-le
 cargo doc --workspace --no-deps --open
 ```
 
+## Contributing
+
+Bug reports, feature requests, and questions are welcome via [GitHub Issues](https://github.com/ynishi/orcs-cli/issues).
+
 ## License
 
 Licensed under either of
