@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared E2E test helpers for `orcs` binary tests.
 //!
 //! # Test Isolation: stdin Timing & Component Init
