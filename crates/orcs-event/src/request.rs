@@ -442,7 +442,7 @@ mod tests {
         let result = Request::try_new(args);
         assert!(result.is_ok());
 
-        let req = result.unwrap();
+        let req = result.expect("try_new with valid 'echo' operation should succeed");
         assert_eq!(req.category, EventCategory::Echo);
         assert_eq!(req.operation, "echo");
     }
@@ -462,7 +462,7 @@ mod tests {
         let result = Request::try_new(args);
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("try_new with empty operation should return error");
         assert_eq!(err.code(), "EVENT_INVALID_REQUEST");
     }
 
@@ -481,7 +481,7 @@ mod tests {
         let result = Request::try_new(args);
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("try_new with whitespace-only operation should return error");
         assert_eq!(err.code(), "EVENT_INVALID_REQUEST");
     }
 
@@ -498,7 +498,9 @@ mod tests {
         let result = Request::try_new(args);
         assert!(result.is_ok());
 
-        let req = result.unwrap();
+        let req = result.expect(
+            "try_new with whitespace-padded 'echo' operation should succeed after trimming",
+        );
         assert_eq!(req.operation, "echo");
     }
 

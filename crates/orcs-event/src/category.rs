@@ -318,11 +318,13 @@ mod tests {
     #[test]
     fn category_serialize() {
         let hil = EventCategory::Hil;
-        let json = serde_json::to_string(&hil).unwrap();
+        let json =
+            serde_json::to_string(&hil).expect("EventCategory::Hil should serialize to JSON");
         assert!(json.contains("Hil"));
 
         let ext = EventCategory::extension("ns", "kind");
-        let json = serde_json::to_string(&ext).unwrap();
+        let json =
+            serde_json::to_string(&ext).expect("EventCategory::Extension should serialize to JSON");
         assert!(json.contains("Extension"));
         assert!(json.contains("ns"));
         assert!(json.contains("kind"));
@@ -331,11 +333,13 @@ mod tests {
     #[test]
     fn category_deserialize() {
         let json = r#""Hil""#;
-        let cat: EventCategory = serde_json::from_str(json).unwrap();
+        let cat: EventCategory = serde_json::from_str(json)
+            .expect("'Hil' JSON string should deserialize to EventCategory::Hil");
         assert_eq!(cat, EventCategory::Hil);
 
         let json = r#"{"Extension":{"namespace":"ns","kind":"k"}}"#;
-        let cat: EventCategory = serde_json::from_str(json).unwrap();
+        let cat: EventCategory = serde_json::from_str(json)
+            .expect("Extension JSON should deserialize to EventCategory::Extension");
         assert_eq!(cat, EventCategory::extension("ns", "k"));
     }
 
