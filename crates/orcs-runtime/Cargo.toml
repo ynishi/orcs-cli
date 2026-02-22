@@ -3,9 +3,12 @@ name = "orcs-runtime"
 description = "ORCS Runtime - Internal implementation (auth, channel, engine)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "runtime", "engine", "channel"]
+categories = ["development-tools"]
 
 [dependencies]
 orcs-types = { workspace = true }

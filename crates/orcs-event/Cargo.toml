@@ -3,9 +3,12 @@ name = "orcs-event"
 description = "Event system for ORCS CLI (Signal, Request, Response)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "event", "signal", "request"]
+categories = ["development-tools"]
 
 [dependencies]
 orcs-types = { workspace = true }

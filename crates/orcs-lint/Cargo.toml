@@ -1,11 +1,14 @@
 [package]
 name = "orcs-lint"
+description = "Architecture lint rules for ORCS (OL002: unwrap ban)"
 version.workspace = true
 edition.workspace = true
-description = "Architecture lint rules for ORCS (OL002: unwrap ban)"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "lint", "architecture", "code-quality"]
+categories = ["development-tools"]
 
 [[bin]]
 name = "orcs-lint"

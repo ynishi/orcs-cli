@@ -1,11 +1,14 @@
 [package]
 name = "orcs-lua"
+description = "Lua scripting support for ORCS components"
 version.workspace = true
 edition.workspace = true
-description = "Lua scripting support for ORCS components"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "lua", "scripting", "plugin"]
+categories = ["development-tools"]
 
 [dependencies]
 # Lua bindings

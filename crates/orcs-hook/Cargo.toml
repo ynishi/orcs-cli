@@ -1,11 +1,14 @@
 [package]
 name = "orcs-hook"
+description = "Lifecycle hook definitions and configuration for ORCS"
 version.workspace = true
 edition.workspace = true
-description = "Lifecycle hook definitions and configuration for ORCS"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "hook", "lifecycle", "fql"]
+categories = ["development-tools"]
 
 [features]
 test-utils = []

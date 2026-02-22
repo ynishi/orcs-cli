@@ -1,11 +1,14 @@
 [package]
 name = "orcs-auth"
+description = "Permission primitives for ORCS: Capability, Session, SandboxPolicy, PermissionPolicy"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Permission primitives for ORCS: Capability, Session, SandboxPolicy, PermissionPolicy"
+keywords = ["orcs", "auth", "capability", "sandbox"]
+categories = ["development-tools"]
 
 [dependencies]
 orcs-types = { workspace = true }

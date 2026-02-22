@@ -1,10 +1,17 @@
 # ORCS CLI
 
+[![CI](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
 Lua-extensible Agentic Shell for building AI-powered development tools.
 
 ORCS (Orchestrated Runtime Component System) provides a component-based architecture where every behavior is implemented as a Lua script, capability-gated, and sandboxed.
 
 Part of the [ORCS](https://github.com/ynishi/orcs) family — a suite of multi-agent AI tools built around orchestrated reasoning and collaboration. See also [ORCS Desktop](https://github.com/ynishi/orcs) for the GUI workspace application.
+
+## Prerequisites
+
+- Rust 1.80.0 or later
 
 ## Features
 
@@ -21,10 +28,10 @@ Part of the [ORCS](https://github.com/ynishi/orcs) family — a suite of multi-a
 ## Install
 
 ```bash
-cargo install --path crates/orcs-cli
+cargo install orcs-cli
 ```
 
-Or build from source:
+Or from source:
 
 ```bash
 cargo build --release

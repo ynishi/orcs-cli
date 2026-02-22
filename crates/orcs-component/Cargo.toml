@@ -3,9 +3,12 @@ name = "orcs-component"
 description = "Component trait for ORCS CLI"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["orcs", "component", "plugin", "agent"]
+categories = ["development-tools"]
 
 [dependencies]
 orcs-types = { workspace = true }
