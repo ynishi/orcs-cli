@@ -523,10 +523,16 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 tool_result_content,
             );
 
-            tracing::debug!(
-                "tool turn {}: resolved {} intents, continuing",
+            let intent_names: Vec<&str> = parsed_resp
+                .intents
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect();
+            tracing::info!(
+                "tool turn {}: resolved {} intent(s) [{}], continuing",
                 tool_turn,
-                parsed_resp.intents.len()
+                parsed_resp.intents.len(),
+                intent_names.join(", ")
             );
             continue;
         }

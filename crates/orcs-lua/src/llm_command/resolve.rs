@@ -701,4 +701,440 @@ mod tests {
             other => panic!("expected Blocks, got: {other:?}"),
         }
     }
+
+    // ── dispatch_intents_to_results Component resolver tests ─────────
+
+    /// Helper: set up a Lua VM with base orcs functions, dispatch functions,
+    /// and a mock `orcs.request` that returns pre-configured responses.
+    ///
+    /// The mock intercepts `orcs.request(target, op, payload)` calls from
+    /// `dispatch_component` and returns a Lua table matching the RPC contract.
+    fn setup_lua_with_component_mock(
+        mock_success: bool,
+        mock_data: serde_json::Value,
+        mock_error: &str,
+    ) -> Lua {
+        use mlua::LuaSerdeExt;
+        use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use std::sync::Arc;
+
+        let sandbox = ProjectSandbox::new(".").expect("test sandbox");
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
+
+        let lua = Lua::new();
+        crate::orcs_helpers::register_base_orcs_functions(&lua, sandbox)
+            .expect("register base functions");
+        crate::tool_registry::register_dispatch_functions(&lua)
+            .expect("register dispatch functions");
+
+        // Override orcs.request with mock
+        let mock_data = Arc::new(mock_data);
+        let mock_error = Arc::new(mock_error.to_string());
+        let mock_fn = lua
+            .create_function(
+                move |lua, (_target, _op, _payload): (String, String, mlua::Value)| {
+                    let result = lua.create_table()?;
+                    result.set("success", mock_success)?;
+                    if mock_success {
+                        let lua_val = lua.to_value(mock_data.as_ref())?;
+                        result.set("data", lua_val)?;
+                    } else {
+                        result.set("error", mock_error.as_str())?;
+                    }
+                    Ok(result)
+                },
+            )
+            .expect("create mock request function");
+
+        let orcs: Table = lua.globals().get("orcs").expect("orcs table");
+        orcs.set("request", mock_fn).expect("set mock orcs.request");
+
+        lua
+    }
+
+    /// Helper: extract a single ToolResult from dispatch result.
+    fn expect_single_tool_result(result: MessageContent) -> (String, String, Option<bool>) {
+        match result {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1, "expected exactly 1 block");
+                match blocks.into_iter().next().expect("block exists") {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => (tool_use_id, content, is_error),
+                    other => panic!("expected ToolResult, got: {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_intents_routes_component_to_tool_result() {
+        // Mock skill_manager returning skill body data
+        let mock_response = serde_json::json!({
+            "name": "hello-world",
+            "body": "Say hello to the user warmly.",
+            "description": "A greeting skill"
+        });
+        let lua = setup_lua_with_component_mock(true, mock_response, "");
+
+        // Register a Component intent via Lua
+        let orcs: Table = lua.globals().get("orcs").expect("orcs table");
+        let register_fn: mlua::Function = orcs.get("register_intent").expect("register_intent fn");
+        let def = lua.create_table().expect("create def table");
+        def.set("name", "hello-world").expect("set name");
+        def.set(
+            "description",
+            "A greeting skill [Skill: invoke to retrieve full instructions]",
+        )
+        .expect("set description");
+        def.set("component", "skill::skill_manager")
+            .expect("set component");
+        def.set("operation", "execute").expect("set operation");
+        let reg_result: Table = register_fn.call(def).expect("register_intent call");
+        assert!(
+            reg_result.get::<bool>("ok").expect("get ok"),
+            "register_intent should succeed"
+        );
+
+        // Dispatch intent
+        let intents = vec![ActionIntent {
+            id: "tool_call_1".to_string(),
+            name: "hello-world".to_string(),
+            params: serde_json::json!({"name": "hello-world"}),
+            meta: Default::default(),
+        }];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "tool_call_1");
+        assert_eq!(is_error, Some(false), "should not be an error");
+
+        // Content should be JSON containing the skill body
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("content should be valid JSON");
+        assert_eq!(parsed["name"], "hello-world");
+        assert_eq!(parsed["body"], "Say hello to the user warmly.");
+        assert_eq!(parsed["description"], "A greeting skill");
+    }
+
+    #[test]
+    fn dispatch_intents_component_error_returns_is_error() {
+        let lua = setup_lua_with_component_mock(
+            false,
+            serde_json::Value::Null,
+            "skill not found: nonexistent",
+        );
+
+        // Register a Component intent
+        let orcs: Table = lua.globals().get("orcs").expect("orcs table");
+        let register_fn: mlua::Function = orcs.get("register_intent").expect("register_intent fn");
+        let def = lua.create_table().expect("create def table");
+        def.set("name", "nonexistent-skill").expect("set name");
+        def.set("description", "A missing skill")
+            .expect("set description");
+        def.set("component", "skill::skill_manager")
+            .expect("set component");
+        def.set("operation", "execute").expect("set operation");
+        let reg_result: Table = register_fn.call(def).expect("register_intent call");
+        assert!(
+            reg_result.get::<bool>("ok").expect("get ok"),
+            "register_intent should succeed"
+        );
+
+        let intents = vec![ActionIntent {
+            id: "tool_err_1".to_string(),
+            name: "nonexistent-skill".to_string(),
+            params: serde_json::json!({"name": "nonexistent-skill"}),
+            meta: Default::default(),
+        }];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "tool_err_1");
+        assert_eq!(is_error, Some(true), "should be an error");
+        assert!(
+            content.contains("skill not found"),
+            "error content should contain error message, got: {content}"
+        );
+    }
+
+    #[test]
+    fn register_intent_then_dispatch_roundtrip() {
+        // Tests the full chain: register_intent → IntentRegistry → dispatch → Component resolver → ToolResult
+        let mock_response = serde_json::json!({
+            "name": "code-review",
+            "body": "Review the code for correctness and style.\n1. Check error handling\n2. Verify tests",
+            "description": "Code review skill"
+        });
+        let lua = setup_lua_with_component_mock(true, mock_response, "");
+
+        // Register with params schema (like agent_mgr.lua does)
+        let orcs: Table = lua.globals().get("orcs").expect("orcs table");
+        let register_fn: mlua::Function = orcs.get("register_intent").expect("register_intent fn");
+
+        let params = lua.create_table().expect("create params table");
+        let name_param = lua.create_table().expect("create name_param");
+        name_param.set("type", "string").expect("set type");
+        name_param
+            .set("description", "Name of the skill to execute")
+            .expect("set description");
+        name_param.set("required", true).expect("set required");
+        params.set("name", name_param).expect("set name param");
+
+        let def = lua.create_table().expect("create def table");
+        def.set("name", "code-review").expect("set name");
+        def.set("description", "Code review skill [Skill]")
+            .expect("set description");
+        def.set("component", "skill::skill_manager")
+            .expect("set component");
+        def.set("operation", "execute").expect("set operation");
+        def.set("params", params).expect("set params");
+
+        let reg_result: Table = register_fn.call(def).expect("register_intent call");
+        assert!(
+            reg_result.get::<bool>("ok").expect("get ok"),
+            "register_intent should succeed"
+        );
+
+        // Verify intent is in registry via orcs.intent_defs()
+        let intent_defs_fn: mlua::Function = orcs.get("intent_defs").expect("intent_defs fn");
+        let defs: Table = intent_defs_fn.call(()).expect("intent_defs call");
+        let mut found = false;
+        for pair in defs.pairs::<i64, Table>() {
+            let (_, entry) = pair.expect("iterate intent defs");
+            let name: String = entry.get("name").expect("get name");
+            if name == "code-review" {
+                found = true;
+                let desc: String = entry.get("description").expect("get description");
+                assert!(
+                    desc.contains("Code review"),
+                    "description should match, got: {desc}"
+                );
+                break;
+            }
+        }
+        assert!(found, "code-review should appear in intent_defs()");
+
+        // Dispatch via dispatch_intents_to_results (the actual resolve path)
+        let intents = vec![ActionIntent {
+            id: "call_review".to_string(),
+            name: "code-review".to_string(),
+            params: serde_json::json!({"name": "code-review"}),
+            meta: Default::default(),
+        }];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "call_review");
+        assert_eq!(is_error, Some(false));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("content should be valid JSON");
+        assert_eq!(parsed["name"], "code-review");
+        assert!(
+            parsed["body"]
+                .as_str()
+                .expect("body should be string")
+                .contains("Review the code"),
+            "body should contain skill instructions"
+        );
+    }
+
+    #[test]
+    fn dispatch_intents_multiple_intents_returns_multiple_tool_results() {
+        use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use std::sync::Arc;
+
+        // Create sandbox with a test file for Internal tool (read)
+        let dir = std::env::temp_dir().join(format!(
+            "orcs-multi-intent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = dir.canonicalize().expect("canonicalize");
+        let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
+
+        std::fs::write(dir.join("a.txt"), "file_a_content").expect("write a.txt");
+
+        let lua = Lua::new();
+        crate::orcs_helpers::register_base_orcs_functions(&lua, sandbox)
+            .expect("register base functions");
+        crate::tool_registry::register_dispatch_functions(&lua)
+            .expect("register dispatch functions");
+
+        // Mock orcs.request for Component resolver
+        lua.load(
+            r#"
+            orcs.request = function(target, op, payload)
+                return { success = true, data = { name = "mock-skill", body = "mock body" } }
+            end
+            "#,
+        )
+        .exec()
+        .expect("mock orcs.request");
+
+        // Register a Component intent
+        lua.load(
+            r#"
+            orcs.register_intent({
+                name = "my-skill",
+                description = "test skill",
+                component = "skill::skill_manager",
+                operation = "execute",
+            })
+            "#,
+        )
+        .exec()
+        .expect("register intent");
+
+        // Dispatch 3 intents: Internal(read) + Component(my-skill) + Internal(read)
+        let intents = vec![
+            ActionIntent {
+                id: "call_1".to_string(),
+                name: "read".to_string(),
+                params: serde_json::json!({"path": dir.join("a.txt").to_string_lossy().to_string()}),
+                meta: Default::default(),
+            },
+            ActionIntent {
+                id: "call_2".to_string(),
+                name: "my-skill".to_string(),
+                params: serde_json::json!({"name": "my-skill"}),
+                meta: Default::default(),
+            },
+            ActionIntent {
+                id: "call_3".to_string(),
+                name: "read".to_string(),
+                params: serde_json::json!({"path": dir.join("a.txt").to_string_lossy().to_string()}),
+                meta: Default::default(),
+            },
+        ];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        match result {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 3, "should have 3 ToolResult blocks");
+
+                // Block 0: Internal read
+                match &blocks[0] {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        assert_eq!(tool_use_id, "call_1");
+                        assert_eq!(*is_error, Some(false));
+                        assert!(
+                            content.contains("file_a_content"),
+                            "read result should contain file content, got: {content}"
+                        );
+                    }
+                    other => panic!("block 0: expected ToolResult, got: {other:?}"),
+                }
+
+                // Block 1: Component skill
+                match &blocks[1] {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        assert_eq!(tool_use_id, "call_2");
+                        assert_eq!(*is_error, Some(false));
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(content).expect("should be valid JSON");
+                        assert_eq!(parsed["name"], "mock-skill");
+                        assert_eq!(parsed["body"], "mock body");
+                    }
+                    other => panic!("block 1: expected ToolResult, got: {other:?}"),
+                }
+
+                // Block 2: Internal read (same file)
+                match &blocks[2] {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        ..
+                    } => {
+                        assert_eq!(tool_use_id, "call_3");
+                        assert_eq!(*is_error, Some(false));
+                    }
+                    other => panic!("block 2: expected ToolResult, got: {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_intents_unknown_intent_returns_is_error() {
+        use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use std::sync::Arc;
+
+        let sandbox = ProjectSandbox::new(".").expect("test sandbox");
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
+
+        let lua = Lua::new();
+        crate::orcs_helpers::register_base_orcs_functions(&lua, sandbox)
+            .expect("register base functions");
+        crate::tool_registry::register_dispatch_functions(&lua)
+            .expect("register dispatch functions");
+
+        // Dispatch an intent whose name is NOT in the registry
+        let intents = vec![ActionIntent {
+            id: "call_unknown".to_string(),
+            name: "totally-unknown-tool".to_string(),
+            params: serde_json::json!({"arg": "value"}),
+            meta: Default::default(),
+        }];
+
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "call_unknown");
+        assert_eq!(is_error, Some(true), "unknown intent should be an error");
+        assert!(
+            content.contains("unknown intent"),
+            "error should mention unknown intent, got: {content}"
+        );
+    }
+
+    #[test]
+    fn dispatch_intents_empty_returns_empty_blocks() {
+        use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use std::sync::Arc;
+
+        let sandbox = ProjectSandbox::new(".").expect("test sandbox");
+        let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
+
+        let lua = Lua::new();
+        crate::orcs_helpers::register_base_orcs_functions(&lua, sandbox)
+            .expect("register base functions");
+        crate::tool_registry::register_dispatch_functions(&lua)
+            .expect("register dispatch functions");
+
+        let intents: Vec<ActionIntent> = vec![];
+        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+
+        match result {
+            MessageContent::Blocks(blocks) => {
+                assert!(
+                    blocks.is_empty(),
+                    "empty intents should produce empty blocks"
+                );
+            }
+            other => panic!("expected Blocks, got: {other:?}"),
+        }
+    }
 }

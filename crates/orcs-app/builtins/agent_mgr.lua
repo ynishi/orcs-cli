@@ -6,9 +6,15 @@
 --     └── llm-worker (Independent Component, spawned via orcs.spawn_runner())
 --         — communicates via orcs.request() RPC
 --         — has own Lua VM, event loop, and ChannelRunner
---         — calls Claude Code CLI via orcs.llm()
+--         — calls orcs.llm(resolve=true) for tool-use auto-dispatch
 --
--- @command routing:
+-- Tool execution:
+--   LLM uses tool_use (function calling) to invoke:
+--     - 8 builtin Internal tools (read, write, grep, glob, mkdir, remove, mv, exec)
+--     - Dynamically registered skill IntentDefs (from skill_manager.recommend)
+--   All tool calls are auto-dispatched via IntentRegistry resolve loop.
+--
+-- User @command routing (direct user input, not LLM-generated):
 --   @shell <cmd>           → builtin::shell (passthrough)
 --   @tool <subcmd> ...     → builtin::tool (passthrough)
 --   @skill <op> ...        → skill::skill_manager (operation dispatch)
@@ -107,6 +113,7 @@ return {
             orcs.log("debug", "llm-worker: resuming session " .. input.session_id:sub(1, 20))
             local opts = build_llm_opts(input)
             opts.session_id = input.session_id
+            opts.resolve = true
             local llm_resp = orcs.llm(message, opts)
             if llm_resp and llm_resp.ok then
                 return {
@@ -161,10 +168,13 @@ return {
         })
         if rec_resp and rec_resp.success and rec_resp.data then
             local skills = rec_resp.data
-            if type(skills) == "table" and #skills > 0 then
-                skill_count = #skills
+            -- Note: lua.to_value() (mlua serde) may place array elements in
+            -- the hash part of the table, causing # to return 0.
+            -- Use skills[1] existence check instead of #skills > 0.
+            if type(skills) == "table" and skills[1] ~= nil then
                 local lines = {}
                 for _, s in ipairs(skills) do
+                    skill_count = skill_count + 1
                     local line = "- **" .. (s.name or "?") .. "**"
                     if s.description and s.description ~= "" then
                         line = line .. ": " .. s.description
@@ -175,6 +185,43 @@ return {
                     .. "The following skills are relevant to this task. "
                     .. "Consider using them to assist the user:\n"
                     .. table.concat(lines, "\n")
+
+                -- Register recommended skills as IntentDefs for tool-use resolution
+                local registered_names = {}
+                for _, s in ipairs(skills) do
+                    local reg = orcs.register_intent({
+                        name = s.name,
+                        description = (s.description or "") .. " [Skill: invoke to retrieve full instructions]",
+                        component = "skill::skill_manager",
+                        operation = "execute",
+                        params = {
+                            name = {
+                                type = "string",
+                                description = "Name of the skill to execute",
+                                required = true,
+                            },
+                        },
+                    })
+                    if reg and reg.ok then
+                        registered_names[#registered_names + 1] = s.name
+                        orcs.log("debug", "llm-worker: registered skill intent: " .. s.name)
+                    else
+                        local err_msg = (reg and reg.error) or (reg and tostring(reg)) or "nil returned"
+                        orcs.log("warn", "llm-worker: skill intent registration failed: " .. s.name
+                            .. " (" .. err_msg .. ")")
+                    end
+                end
+                if #registered_names > 0 then
+                    orcs.log("info", string.format(
+                        "llm-worker: registered %d skill intent(s): [%s]",
+                        #registered_names, table.concat(registered_names, ", ")
+                    ))
+                elseif skill_count > 0 then
+                    orcs.log("warn", string.format(
+                        "llm-worker: all %d skill intent registration(s) failed",
+                        skill_count
+                    ))
+                end
             end
         end
 
@@ -186,18 +233,13 @@ return {
             end
         end
 
-        -- 2. Compose system block (full)
+        -- 2. Compose system block (skills + tool descriptions)
         local system_parts = {}
         if recommendation ~= "" then
             system_parts[#system_parts + 1] = recommendation
         end
         if tool_desc ~= "" then
             system_parts[#system_parts + 1] = tool_desc
-        end
-        -- @command reference (passed from parent via RPC payload)
-        local cmd_ref = input.command_reference or ""
-        if cmd_ref ~= "" then
-            system_parts[#system_parts + 1] = cmd_ref
         end
         local system_full = table.concat(system_parts, "\n\n")
 
@@ -254,8 +296,8 @@ return {
         local prompt = table.concat(sections, "\n\n")
 
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, cmds=%d, foundation=%d+%d+%d, metrics=%d chars)",
-            placement, skill_count, #history_context, #tool_desc, #cmd_ref,
+            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
+            placement, skill_count, #history_context, #tool_desc,
             #f_system, #f_task, #f_guard, #console_block
         ))
 
@@ -263,6 +305,9 @@ return {
         -- Note: session_id is handled by the early-return path above;
         -- this path is always a fresh first call.
         local llm_opts = build_llm_opts(input)
+        -- Enable tool-use auto-resolution: LLM tool_use calls (skills, builtins)
+        -- are dispatched via IntentRegistry and results fed back automatically.
+        llm_opts.resolve = true
         local llm_resp = orcs.llm(prompt, llm_opts)
         if llm_resp and llm_resp.ok then
             return {
@@ -296,7 +341,6 @@ return {
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
-local MAX_REACT_ITERATIONS = 5  -- Max tool-use loop iterations before returning
 
 -- Component settings (populated from config in init())
 local component_settings = {}
@@ -334,31 +378,6 @@ local function parse_route(message)
         return bare:lower(), ""
     end
     return nil, message
-end
-
---- Build @command reference text for LLM instructions.
-local function build_command_reference()
-    local descriptions = {
-        shell      = "Execute shell command (ls, git, cargo, etc.)",
-        tool       = "File operations: read, write, grep, glob, mkdir, remove, mv, pwd",
-        skill      = "Skill management: list, get <name>, activate <name>, deactivate <name>, status",
-        profile    = "Profile switching: list, current, use <name>",
-        foundation = "Foundation segments: get_all, status",
-    }
-    local lines = {
-        "## @Command Reference",
-        "To execute actions, write a line starting with `@<prefix>`:",
-        "",
-    }
-    for _, prefix in ipairs({"shell", "tool", "skill", "profile", "foundation"}) do
-        if routes[prefix] then
-            lines[#lines + 1] = string.format("  @%-12s — %s", prefix, descriptions[prefix] or "(available)")
-        end
-    end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "Each @command MUST be on its own line, NOT inside ``` code blocks."
-    lines[#lines + 1] = "When your task is complete, respond normally without @commands."
-    return table.concat(lines, "\n")
 end
 
 --- Execute a routed @command via RPC to the target component.
@@ -405,50 +424,6 @@ local function dispatch_route(route, body)
         orcs.output("[AgentMgr] @" .. route.target .. " error: " .. err, "error")
         return { success = false, error = err }
     end
-end
-
---- Extract @commands from LLM response text.
---- Only matches lines starting with a registered route prefix to avoid false positives.
---- Lines inside fenced code blocks (```) are skipped to prevent accidental execution
---- of example commands in LLM output.
---- Returns a list of {prefix=..., body=...} tables.
-local function extract_commands(text)
-    local commands = {}
-    local in_code_block = false
-    for line in text:gmatch("[^\n]+") do
-        local trimmed = line:match("^%s*(.-)%s*$")
-        -- Toggle code block state on fence lines (``` with optional language tag)
-        if trimmed:match("^```") then
-            in_code_block = not in_code_block
-        elseif not in_code_block then
-            local prefix, body = trimmed:match("^@(%w+)%s+(.+)$")
-            if not prefix then
-                prefix = trimmed:match("^@(%w+)%s*$")
-                body = ""
-            end
-            if prefix then
-                local p = prefix:lower()
-                if routes[p] then
-                    commands[#commands + 1] = { prefix = p, body = body or "" }
-                end
-            end
-        end
-    end
-    return commands
-end
-
---- Format command execution results into text for LLM continuation.
-local function format_command_results(results)
-    local parts = {}
-    for _, r in ipairs(results) do
-        local status = r.success and "OK" or "ERROR"
-        local content = r.response or r.error or "(no output)"
-        if type(content) == "table" then
-            content = orcs.json_encode(content)
-        end
-        parts[#parts + 1] = string.format("[@%s result: %s]\n%s", r.prefix, status, tostring(content))
-    end
-    return table.concat(parts, "\n\n")
 end
 
 --- Truncate a string to at most max_bytes bytes without splitting multi-byte
@@ -513,11 +488,10 @@ local function fetch_history_context()
     return ""
 end
 
---- Default route: send to llm-worker via RPC with ReAct loop.
---- On each iteration, the LLM response is scanned for @-prefixed commands
---- directed at registered routes. Commands are executed and results fed back
---- via --resume (session continuity) until the LLM produces a final answer
---- (no more commands) or the iteration limit is reached.
+--- Default route: send to llm-worker via single RPC.
+--- Tool execution (builtins, skills) is handled inside the llm-worker
+--- via orcs.llm(resolve=true), which auto-dispatches tool_use calls
+--- through IntentRegistry and feeds results back to the LLM.
 local function dispatch_llm(message)
     -- Guard: llm-worker must be initialized
     if not llm_worker_fqn then
@@ -534,9 +508,6 @@ local function dispatch_llm(message)
         orcs.log("warn", "Invalid prompt_placement '" .. placement .. "', falling back to both")
         placement = "both"
     end
-
-    -- Build @command reference for LLM instructions
-    local command_reference = build_command_reference()
 
     -- Extract LLM-specific config (llm_* keys → config table without prefix)
     local llm_config = {}
@@ -555,112 +526,44 @@ local function dispatch_llm(message)
         end
     end
 
-    local session_id = nil
-    local last_response = nil
-    local last_response_shown = false
-    local total_cost = 0
-    local current_message = message
+    -- Single RPC to llm-worker (resolve=true handles tool loops internally)
+    local payload = {
+        message = message,
+        prompt_placement = placement,
+        llm_config = llm_config,
+        history_context = history_context,
+    }
 
-    for iteration = 1, MAX_REACT_ITERATIONS do
-        -- Build RPC payload for llm-worker
-        local payload = {
-            message = current_message,
-            prompt_placement = placement,
-            llm_config = llm_config,
-        }
-        if session_id then
-            -- Continuation: llm-worker will skip prompt assembly and just --resume
-            payload.session_id = session_id
-        else
-            -- First call: include history and @command reference for full prompt assembly
-            payload.history_context = history_context
-            payload.command_reference = command_reference
-        end
-
-        -- RPC to llm-worker Component (independent ChannelRunner)
-        local result = orcs.request(llm_worker_fqn, "process", payload)
-        if not result or not result.success then
-            local err = (result and result.error) or "unknown"
-            orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
-            return { success = false, error = err }
-        end
-
-        local data = result.data or {}
-        local response = data.response or "no response"
-        session_id = data.session_id
-        total_cost = total_cost + (data.cost or 0)
-        last_response = response
-        last_response_shown = false
-
-        -- Scan for @commands targeting registered routes
-        local commands = extract_commands(response)
-        if #commands == 0 then
-            -- Final answer: no more commands to execute
-            break
-        end
-
-        -- Show intermediate LLM response (user sees the reasoning)
-        orcs.output(response)
-        last_response_shown = true
-
-        -- Guard: cannot continue without session_id
-        if not session_id then
-            orcs.log("warn", "ReAct: no session_id returned, cannot resume — stopping loop")
-            break
-        end
-
-        -- Guard: reached iteration limit
-        if iteration == MAX_REACT_ITERATIONS then
-            orcs.log("warn", "ReAct: reached max iterations (" .. MAX_REACT_ITERATIONS .. "), stopping")
-            break
-        end
-
-        orcs.log("info", string.format(
-            "ReAct iteration %d/%d: executing %d command(s)",
-            iteration, MAX_REACT_ITERATIONS, #commands
-        ))
-
-        -- Execute all extracted commands
-        local cmd_results = {}
-        for _, cmd in ipairs(commands) do
-            orcs.log("info", string.format("ReAct: @%s %s", cmd.prefix, utf8_truncate(cmd.body, 80)))
-            local route = routes[cmd.prefix]
-            local cmd_result = dispatch_route(route, cmd.body)
-            cmd_results[#cmd_results + 1] = {
-                prefix = cmd.prefix,
-                success = cmd_result.success,
-                response = cmd_result.data and cmd_result.data.response,
-                error = cmd_result.error,
-            }
-        end
-
-        -- Prepare continuation message with command results
-        current_message = format_command_results(cmd_results)
+    local result = orcs.request(llm_worker_fqn, "process", payload)
+    if not result or not result.success then
+        local err = (result and result.error) or "unknown"
+        orcs.output_with_level("[AgentMgr] Error: " .. err, "error")
+        return { success = false, error = err }
     end
 
-    -- Output final LLM response (skip if already shown as intermediate)
-    if not last_response_shown then
-        orcs.output(last_response)
-    end
+    local data = result.data or {}
+    local response = data.response or "no response"
+
+    orcs.output(response)
     orcs.emit_event("Extension", "llm_response", {
         message = message,
-        response = last_response,
+        response = response,
         source = "llm-worker",
-        cost = total_cost,
-        session_id = session_id,
+        cost = data.cost,
+        session_id = data.session_id,
     })
     orcs.log("debug", string.format(
         "dispatch_llm: completed (cost=%.4f, session=%s)",
-        total_cost or 0, session_id or "none"
+        data.cost or 0, data.session_id or "none"
     ))
     return {
         success = true,
         data = {
             message = message,
-            response = last_response,
+            response = response,
             source = "llm-worker",
-            cost = total_cost,
-            session_id = session_id,
+            cost = data.cost or 0,
+            session_id = data.session_id,
         },
     }
 end

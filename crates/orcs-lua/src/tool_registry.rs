@@ -204,13 +204,24 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
         }
     };
 
-    match resolver {
+    let start = std::time::Instant::now();
+    let result = match resolver {
         IntentResolver::Internal => dispatch_internal(lua, name, args),
         IntentResolver::Component {
             component_fqn,
             operation,
         } => dispatch_component(lua, name, &component_fqn, &operation, args),
-    }
+    };
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let ok = result
+        .as_ref()
+        .map(|t| t.get::<bool>("ok").unwrap_or(false))
+        .unwrap_or(false);
+    tracing::info!(
+        "intent dispatch: {name} → {ok} ({duration_ms}ms)",
+        ok = if ok { "ok" } else { "err" }
+    );
+    result
 }
 
 /// Dispatches an Internal intent to the corresponding `orcs.*` Lua function.
@@ -1225,5 +1236,135 @@ mod tests {
         assert_eq!(data.get::<String>("a").expect("arg a"), "1");
         assert_eq!(data.get::<String>("b").expect("arg b"), "2");
         assert_eq!(data.get::<String>("c").expect("arg c"), "3");
+    }
+
+    // --- register_intent validation tests ---
+
+    #[test]
+    fn register_intent_missing_name_errors() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result = lua
+            .load(
+                r#"
+                return orcs.register_intent({
+                    description = "no name",
+                    component = "lua::x",
+                })
+                "#,
+            )
+            .eval::<Table>();
+
+        assert!(result.is_err(), "missing 'name' should cause a Lua error");
+        let err = result.expect_err("should error").to_string();
+        assert!(
+            err.contains("name"),
+            "error should mention 'name', got: {err}"
+        );
+    }
+
+    #[test]
+    fn register_intent_missing_description_errors() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result = lua
+            .load(
+                r#"
+                return orcs.register_intent({
+                    name = "no_desc",
+                    component = "lua::x",
+                })
+                "#,
+            )
+            .eval::<Table>();
+
+        assert!(
+            result.is_err(),
+            "missing 'description' should cause a Lua error"
+        );
+        let err = result.expect_err("should error").to_string();
+        assert!(
+            err.contains("description"),
+            "error should mention 'description', got: {err}"
+        );
+    }
+
+    #[test]
+    fn register_intent_missing_component_errors() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result = lua
+            .load(
+                r#"
+                return orcs.register_intent({
+                    name = "no_comp",
+                    description = "missing component",
+                })
+                "#,
+            )
+            .eval::<Table>();
+
+        assert!(
+            result.is_err(),
+            "missing 'component' should cause a Lua error"
+        );
+        let err = result.expect_err("should error").to_string();
+        assert!(
+            err.contains("component"),
+            "error should mention 'component', got: {err}"
+        );
+    }
+
+    #[test]
+    fn register_intent_defaults_operation_to_execute() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Register without specifying operation
+        let result: Table = lua
+            .load(
+                r#"
+                return orcs.register_intent({
+                    name = "default_op",
+                    description = "test default operation",
+                    component = "lua::test_comp",
+                })
+                "#,
+            )
+            .eval()
+            .expect("register_intent should return table");
+
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "registration should succeed"
+        );
+
+        // Dispatch it to verify operation defaults to "execute"
+        // Mock orcs.request to capture the operation argument
+        lua.load(
+            r#"
+            orcs.request = function(target, operation, payload)
+                return { success = true, data = { captured_op = operation } }
+            end
+            "#,
+        )
+        .exec()
+        .expect("mock should succeed");
+
+        let dispatch_result: Table = lua
+            .load(r#"return orcs.dispatch("default_op", {})"#)
+            .eval()
+            .expect("dispatch should return table");
+
+        assert!(dispatch_result.get::<bool>("ok").expect("should have ok"));
+        let data: Table = dispatch_result.get("data").expect("should have data");
+        assert_eq!(
+            data.get::<String>("captured_op").expect("captured_op"),
+            "execute",
+            "operation should default to 'execute'"
+        );
     }
 }

@@ -124,6 +124,33 @@ local function handle_activate(payload)
     }
 end
 
+-- Execute a skill (activate if needed, return body content for tool-use dispatch)
+local function handle_execute(payload)
+    if not payload or not payload.name then
+        return { success = false, error = "payload.name is required" }
+    end
+    local skill = registry:get(payload.name)
+    if not skill then
+        return { success = false, error = "skill not found: " .. payload.name }
+    end
+    -- Activate if not yet activated (idempotent)
+    if skill.state ~= "activated" then
+        local activated, err = catalog:activate(payload.name)
+        if not activated then
+            return { success = false, error = "failed to activate: " .. (err or "unknown") }
+        end
+        skill = activated
+    end
+    return {
+        success = true,
+        data = {
+            name = skill.name,
+            body = skill.body or "",
+            description = skill.description or "",
+        },
+    }
+end
+
 -- Deactivate a skill (L2: release body)
 local function handle_deactivate(payload)
     if not payload or not payload.name then
@@ -451,9 +478,10 @@ local handlers = {
     -- Selection
     select     = handle_select,
     recommend  = handle_recommend,
-    -- Activation / Disclosure
+    -- Activation / Disclosure / Execution
     activate   = handle_activate,
     deactivate = handle_deactivate,
+    execute    = handle_execute,
     resources  = handle_resources,
     active     = handle_active,
     -- Catalog
