@@ -29,30 +29,13 @@ pub const TIMEOUT_BASIC: Duration = Duration::from_secs(10);
 /// Extended timeout for snapshot/resume tests (heavier I/O).
 pub const TIMEOUT_SNAPSHOT: Duration = Duration::from_secs(15);
 
-/// Environment variables that prevent the claude CLI from launching
-/// inside another Claude Code session (nested session guard).
-/// Removed so that `orcs` → `claude` calls work when tests run
-/// inside a Claude Code terminal.
-const CLAUDE_GUARD_VARS: &[&str] = &[
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SSE_PORT",
-];
-
-/// Remove Claude Code nested-session guard variables from a command.
-fn strip_claude_guard(cmd: &mut assert_cmd::Command) {
-    for var in CLAUDE_GUARD_VARS {
-        cmd.env_remove(var);
-    }
-}
-
 /// Build a bare Command without `--builtins-dir` pre-set.
 ///
 /// Use this only for tests that explicitly provide their own `--builtins-dir`.
 pub fn orcs_cmd_raw() -> assert_cmd::Command {
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
-    strip_claude_guard(&mut cmd);
+
     cmd
 }
 
@@ -64,7 +47,7 @@ pub fn orcs_cmd() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
-    strip_claude_guard(&mut cmd);
+
     cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
     (cmd, tmp)
 }
@@ -74,7 +57,7 @@ pub fn orcs_cmd_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir for builtins");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_SNAPSHOT);
-    strip_claude_guard(&mut cmd);
+
     cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
     (cmd, tmp)
 }
@@ -83,7 +66,7 @@ pub fn orcs_cmd_snapshot() -> (assert_cmd::Command, tempfile::TempDir) {
 pub fn orcs_cmd_with_builtins(dir: &str) -> assert_cmd::Command {
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_SNAPSHOT);
-    strip_claude_guard(&mut cmd);
+
     cmd.args(["--builtins-dir", dir]);
     cmd
 }
@@ -135,7 +118,6 @@ pub fn spawn_and_wait_for(
 
     let mut cmd = Command::new(&bin);
     cmd.arg("--builtins-dir").arg(builtins_dir).args(extra_args);
-    strip_claude_guard_std(&mut cmd);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -191,11 +173,4 @@ pub fn spawn_and_wait_for(
     );
 
     (stdout, stderr)
-}
-
-/// Remove Claude Code guard env vars from a `std::process::Command`.
-fn strip_claude_guard_std(cmd: &mut std::process::Command) {
-    for var in CLAUDE_GUARD_VARS {
-        cmd.env_remove(var);
-    }
 }
