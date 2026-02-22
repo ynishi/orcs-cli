@@ -68,9 +68,6 @@
 //! # Hot Reload
 //!
 //! `LuaComponent::reload()` allows reloading the script from file.
-//! Automatic file watching is not implemented yet.
-//!
-//! TODO: Integrate `notify` crate for automatic hot reload on file change.
 //!
 //! # Script Loading
 //!
