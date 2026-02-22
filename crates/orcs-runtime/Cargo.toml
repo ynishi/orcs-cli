@@ -29,6 +29,7 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = { workspace = true }
 orcs-hook = { workspace = true, features = ["test-utils"] }
 
 [lints]

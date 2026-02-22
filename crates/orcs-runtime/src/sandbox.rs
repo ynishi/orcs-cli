@@ -405,6 +405,84 @@ mod tests {
         assert!(clone.validate_write("new.txt").is_ok());
     }
 
+    // ─── Property-Based Tests ─────────────────────────────────────
+
+    mod proptest_sandbox {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Strategy: arbitrary path-like strings (printable, slashes, dots)
+        fn path_strategy() -> impl Strategy<Value = String> {
+            prop::string::string_regex("[a-zA-Z0-9_./ -]{0,128}")
+                .expect("regex should be valid for path strategy")
+        }
+
+        /// Strategy: paths containing traversal patterns
+        fn traversal_strategy() -> impl Strategy<Value = String> {
+            prop::string::string_regex("([a-z]{0,8}/)*\\.\\./([a-z]{0,8}/)*[a-z]{1,8}\\.txt")
+                .expect("regex should be valid for traversal strategy")
+        }
+
+        proptest! {
+            /// validate_read never panics on arbitrary input
+            #[test]
+            fn read_never_panics(path in path_strategy()) {
+                let (tmp, sandbox) = test_sandbox();
+                let _ = fs::write(tmp.path().join("exists.txt"), "x");
+                let _ = sandbox.validate_read(&path);
+            }
+
+            /// validate_write never panics on arbitrary input
+            #[test]
+            fn write_never_panics(path in path_strategy()) {
+                let (_tmp, sandbox) = test_sandbox();
+                let _ = sandbox.validate_write(&path);
+            }
+
+            /// Any path containing ../ in a scoped sandbox is rejected
+            #[test]
+            fn scoped_rejects_all_traversal(path in traversal_strategy()) {
+                let (tmp, sandbox) = test_sandbox();
+                let sub = tmp.path().join("sub");
+                let _ = fs::create_dir_all(&sub);
+                if let Ok(scoped) = sandbox.scoped("sub") {
+                    let result = scoped.validate_read(&path);
+                    prop_assert!(
+                        result.is_err(),
+                        "traversal path '{}' should be rejected in scoped sandbox",
+                        path
+                    );
+                }
+            }
+
+            /// Files created inside root are always readable
+            #[test]
+            fn internal_files_always_readable(name in "[a-z]{1,16}\\.txt") {
+                let (tmp, sandbox) = test_sandbox();
+                let _ = fs::write(tmp.path().join(&name), "data");
+                let result = sandbox.validate_read(&name);
+                prop_assert!(result.is_ok(), "file '{}' inside sandbox should be readable", name);
+            }
+
+            /// Files created inside root are always writable
+            #[test]
+            fn internal_paths_always_writable(name in "[a-z]{1,16}\\.txt") {
+                let (_tmp, sandbox) = test_sandbox();
+                let result = sandbox.validate_write(&name);
+                prop_assert!(result.is_ok(), "path '{}' inside sandbox should be writable", name);
+            }
+
+            /// Absolute paths outside root are always rejected for write
+            #[test]
+            fn absolute_outside_rejected(name in "[a-z]{1,16}\\.txt") {
+                let (_tmp, sandbox) = test_sandbox();
+                let path = format!("/tmp/orcs-proptest-outside/{}", name);
+                let result = sandbox.validate_write(&path);
+                prop_assert!(result.is_err(), "absolute path '{}' outside root should be rejected", path);
+            }
+        }
+    }
+
     // ─── Symlink Attack Tests ───────────────────────────────────────
 
     #[cfg(unix)]
