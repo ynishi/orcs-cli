@@ -65,10 +65,31 @@ function orcs.exec_argv(program, args, opts) end
 ---@field resolve? boolean Auto-dispatch tool_call intents in Rust (default: false)
 ---@field max_tool_turns? integer Max tool-loop iterations (default: 10, requires resolve=true)
 
+---@alias IntentSource "lua"|"llm_tool_call"|"system"
+
+---@alias Priority "low"|"normal"|"high"|"critical"
+
+---@alias Confidence number Confidence score in [0.0, 1.0]
+
+---@class IntentMeta
+---@field source? IntentSource Who issued the intent (default: "lua")
+---@field priority? Priority Scheduling priority
+---@field expected_latency_ms? integer Estimated execution time in ms (UX feedback)
+---@field confidence? Confidence Issuer's confidence (below threshold → Human-in-the-Loop)
+
 ---@class ActionIntent
----@field id string Unique tool call ID from the LLM
----@field name string Intent/tool name
----@field params table Parameters as key-value table
+---@field id string Correlation ID (from LLM tool_call id, or auto-generated)
+---@field name string Intent/tool name (e.g. "read", "exec", "run_skill")
+---@field params table Parameters as key-value table (JSON object)
+---@field meta? IntentMeta Execution metadata (priority, confidence, latency hint)
+
+---@class IntentResult
+---@field intent_id string Correlation ID (matches ActionIntent.id)
+---@field name string Intent name (for diagnostics)
+---@field ok boolean Whether execution succeeded
+---@field content any Result payload (tool output on success, error detail on failure)
+---@field error? string Error message (when ok=false)
+---@field duration_ms integer Execution duration in milliseconds
 
 ---@class LlmResult
 ---@field ok boolean
