@@ -645,7 +645,7 @@ impl Component for LuaComponent {
 
         // Convert JSON config to Lua value; pass nil if null or empty object
         let lua_config = if config.is_null()
-            || (config.is_object() && config.as_object().is_none_or(serde_json::Map::is_empty))
+            || (config.is_object() && config.as_object().map_or(true, serde_json::Map::is_empty))
         {
             mlua::Value::Nil
         } else {

@@ -82,7 +82,7 @@ impl Analyzer {
                 .config
                 .rules
                 .get(rules::no_panic::NAME)
-                .is_none_or(|c| c.get_bool("allow_in_tests", true)),
+                .map_or(true, |c| c.get_bool("allow_in_tests", true)),
             severity: self
                 .config
                 .rule_severity(rules::no_panic::NAME)

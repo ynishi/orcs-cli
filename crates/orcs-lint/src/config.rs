@@ -31,7 +31,7 @@ impl Config {
     pub fn is_rule_enabled(&self, rule_name: &str) -> bool {
         self.rules
             .get(rule_name)
-            .is_none_or(|c| c.enabled.unwrap_or(true))
+            .map_or(true, |c| c.enabled.unwrap_or(true))
     }
 
     #[must_use]
