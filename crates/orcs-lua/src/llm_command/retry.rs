@@ -67,8 +67,11 @@ pub(super) fn send_with_retry(
             }
         }
     }
-    // Unreachable: loop always returns
-    unreachable!("retry loop exhausted without returning")
+    // The loop above always returns on the final iteration (attempt == max_retries),
+    // but the compiler cannot prove this statically. Provide a safe fallback.
+    Err(SendError::Transport(ureq::Error::Other(
+        "retry loop exhausted without returning".into(),
+    )))
 }
 
 // ── Error Helpers ──────────────────────────────────────────────────────

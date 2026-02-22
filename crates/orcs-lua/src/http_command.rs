@@ -123,7 +123,11 @@ pub fn http_request_impl(lua: &Lua, args: (String, String, Option<Table>)) -> ml
                     "GET" => agent.get(&url),
                     "DELETE" => agent.delete(&url),
                     "HEAD" => agent.head(&url),
-                    _ => unreachable!(),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "internal error: unexpected method {other} in no-body branch"
+                        )));
+                    }
                 };
                 for (name, value) in &extra_headers {
                     req = req.header(name.as_str(), value.as_str());
@@ -135,7 +139,11 @@ pub fn http_request_impl(lua: &Lua, args: (String, String, Option<Table>)) -> ml
                     "POST" => agent.post(&url),
                     "PUT" => agent.put(&url),
                     "PATCH" => agent.patch(&url),
-                    _ => unreachable!(),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "internal error: unexpected method {other} in with-body branch"
+                        )));
+                    }
                 };
                 for (name, value) in &extra_headers {
                     req = req.header(name.as_str(), value.as_str());
