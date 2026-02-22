@@ -104,7 +104,7 @@ struct CliConfigResolver {
     profile: Option<String>,
     /// Sandbox root directory. When set, all `~/.orcs/` paths are redirected
     /// here and global config is skipped (clean-install simulation).
-    sandbox_dir: Option<PathBuf>,
+    pub(crate) sandbox_dir: Option<PathBuf>,
 }
 
 impl CliConfigResolver {
@@ -197,14 +197,9 @@ async fn main() -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
-    // Resolve sandbox directory (before config load — needed for log path)
-    let sandbox_dir: Option<PathBuf> = args.sandbox.as_ref().map(|opt_path| {
-        opt_path.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("orcs-sandbox-{}", std::process::id()))
-        })
-    });
+    let resolver = CliConfigResolver::from_args(&args);
 
-    if let Some(ref dir) = sandbox_dir {
+    if let Some(ref dir) = resolver.sandbox_dir {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!(
                 "Error: cannot create sandbox directory {}: {e}",
@@ -216,7 +211,7 @@ async fn main() -> Result<()> {
     }
 
     // Open persistent log file (sandbox overrides to <sandbox>/logs/)
-    let log_file = open_log_file(sandbox_dir.as_deref());
+    let log_file = open_log_file(resolver.sandbox_dir.as_deref());
 
     // Single writer that tees to both:
     //   1. ExternalPrinter (interactive) or stderr (fallback) — terminal display
@@ -231,7 +226,6 @@ async fn main() -> Result<()> {
 
     println!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
 
-    let resolver = CliConfigResolver::from_args(&args);
     info!(
         path = %resolver.project_root.display(),
         "Project root"
