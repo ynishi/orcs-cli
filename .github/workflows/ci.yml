@@ -41,6 +41,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  lint:
+    name: Architecture Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p orcs-lint -- check .
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
