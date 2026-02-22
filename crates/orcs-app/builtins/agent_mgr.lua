@@ -550,6 +550,33 @@ local delegation_counter = 0
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 
+-- Mapping from component_settings keys (llm_*) to LLM config keys (without prefix).
+-- Single source of truth: used by dispatch_llm(), delegate operation, and init() ping.
+local LLM_KEY_MAP = {
+    llm_provider    = "provider",
+    llm_model       = "model",
+    llm_base_url    = "base_url",
+    llm_api_key     = "api_key",
+    llm_temperature = "temperature",
+    llm_max_tokens  = "max_tokens",
+    llm_timeout     = "timeout",
+}
+
+--- Extract LLM config from component_settings using LLM_KEY_MAP.
+--- @param keys table|nil  Optional subset of LLM_KEY_MAP keys to extract.
+---                        If nil, all keys are extracted.
+--- @return table  LLM config table with mapped keys.
+local function extract_llm_config(keys)
+    local config = {}
+    local map = keys or LLM_KEY_MAP
+    for src_key, dst_key in pairs(map) do
+        if component_settings[src_key] ~= nil then
+            config[dst_key] = component_settings[src_key]
+        end
+    end
+    return config
+end
+
 -- === Routing ===
 
 --- Route table: prefix → { target, dispatch }
@@ -735,21 +762,7 @@ local function dispatch_llm(message)
     end
 
     -- Extract LLM-specific config (llm_* keys → config table without prefix)
-    local llm_config = {}
-    local llm_key_map = {
-        llm_provider    = "provider",
-        llm_model       = "model",
-        llm_base_url    = "base_url",
-        llm_api_key     = "api_key",
-        llm_temperature = "temperature",
-        llm_max_tokens  = "max_tokens",
-        llm_timeout     = "timeout",
-    }
-    for src_key, dst_key in pairs(llm_key_map) do
-        if component_settings[src_key] ~= nil then
-            llm_config[dst_key] = component_settings[src_key]
-        end
-    end
+    local llm_config = extract_llm_config()
 
     -- Emit AgentTask event (fire-and-forget, non-blocking).
     -- Subscribers (llm-worker or concierge) receive this and process asynchronously.
@@ -848,21 +861,7 @@ return {
             local request_id = string.format("d%03d", delegation_counter)
 
             -- Extract LLM config for the delegate
-            local llm_config = {}
-            local llm_key_map = {
-                llm_provider    = "provider",
-                llm_model       = "model",
-                llm_base_url    = "base_url",
-                llm_api_key     = "api_key",
-                llm_temperature = "temperature",
-                llm_max_tokens  = "max_tokens",
-                llm_timeout     = "timeout",
-            }
-            for src_key, dst_key in pairs(llm_key_map) do
-                if component_settings[src_key] ~= nil then
-                    llm_config[dst_key] = component_settings[src_key]
-                end
-            end
+            local llm_config = extract_llm_config()
 
             -- Emit DelegateTask event (fire-and-forget)
             local delivered = orcs.emit_event("DelegateTask", "process", {
@@ -965,18 +964,12 @@ return {
 
                 -- Startup health check: verify LLM provider connectivity (targeted RPC)
                 local ping_ok, ping_err = pcall(function()
-                    local ping_config = {}
-                    local ping_key_map = {
+                    local ping_config = extract_llm_config({
                         llm_provider = "provider",
                         llm_model    = "model",
                         llm_base_url = "base_url",
                         llm_api_key  = "api_key",
-                    }
-                    for src_key, dst_key in pairs(ping_key_map) do
-                        if component_settings[src_key] ~= nil then
-                            ping_config[dst_key] = component_settings[src_key]
-                        end
-                    end
+                    })
 
                     local ping_result = orcs.request(llm_worker_fqn, "ping", {
                         llm_config = ping_config,
