@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Architecture lint rules for ORCS (OL002: unwrap ban)"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [[bin]]
 name = "orcs-lint"

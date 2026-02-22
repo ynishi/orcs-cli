@@ -25,21 +25,23 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/orcs-cli"
+readme = "README.md"
+authors = ["Yutaka Nishimura"]
 
 [workspace.dependencies]
 # Plugin SDK Layer
-orcs-types = { path = "crates/orcs-types" }
-orcs-event = { path = "crates/orcs-event" }
-orcs-auth = { path = "crates/orcs-auth" }
-orcs-component = { path = "crates/orcs-component" }
+orcs-types = { path = "crates/orcs-types", version = "0.1.0" }
+orcs-event = { path = "crates/orcs-event", version = "0.1.0" }
+orcs-auth = { path = "crates/orcs-auth", version = "0.1.0" }
+orcs-component = { path = "crates/orcs-component", version = "0.1.0" }
 # Hook Layer
-orcs-hook = { path = "crates/orcs-hook" }
+orcs-hook = { path = "crates/orcs-hook", version = "0.1.0" }
 # Runtime Layer
-orcs-runtime = { path = "crates/orcs-runtime" }
+orcs-runtime = { path = "crates/orcs-runtime", version = "0.1.0" }
 # Plugin Layer
-orcs-lua = { path = "crates/orcs-lua" }
+orcs-lua = { path = "crates/orcs-lua", version = "0.1.0" }
 # Application Layer
-orcs-app = { path = "crates/orcs-app" }
+orcs-app = { path = "crates/orcs-app", version = "0.1.0" }
 
 # External dependencies
 bitflags = { version = "2", features = ["serde"] }

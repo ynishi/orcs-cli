@@ -5,17 +5,18 @@ edition.workspace = true
 description = "Lua scripting support for ORCS components"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 # Lua bindings
 mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async", "serialize"] }
 
 # Internal crates
-orcs-component = { path = "../orcs-component" }
-orcs-event = { path = "../orcs-event" }
-orcs-hook = { path = "../orcs-hook" }
-orcs-runtime = { path = "../orcs-runtime" }
-orcs-types = { path = "../orcs-types" }
+orcs-component = { workspace = true }
+orcs-event = { workspace = true }
+orcs-hook = { workspace = true }
+orcs-runtime = { workspace = true }
+orcs-types = { workspace = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -58,8 +59,8 @@ tokio = { version = "1", features = ["process", "rt"] }
 test-utils = []
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
-orcs-hook = { path = "../orcs-hook", features = ["test-utils"] }
+tokio = { workspace = true }
+orcs-hook = { workspace = true, features = ["test-utils"] }
 orcs-lua = { path = ".", features = ["test-utils"] }
 
 [lints.rust]

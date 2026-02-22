@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Lifecycle hook definitions and configuration for ORCS"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [features]
 test-utils = []

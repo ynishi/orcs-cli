@@ -4,6 +4,8 @@ description = "ORCS Runtime - Internal implementation (auth, channel, engine)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 orcs-types = { workspace = true }

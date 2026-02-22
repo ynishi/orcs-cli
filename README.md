@@ -4,6 +4,8 @@ Lua-extensible Agentic Shell for building AI-powered development tools.
 
 ORCS (Orchestrated Runtime Component System) provides a component-based architecture where every behavior is implemented as a Lua script, capability-gated, and sandboxed.
 
+Part of the [ORCS](https://github.com/ynishi/orcs) family — a suite of multi-agent AI tools built around orchestrated reasoning and collaboration. See also [ORCS Desktop](https://github.com/ynishi/orcs) for the GUI workspace application.
+
 ## Features
 
 - **Lua-first extensibility** -- All components (agents, skills, tools) are Lua scripts
