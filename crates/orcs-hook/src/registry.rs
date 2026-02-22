@@ -337,19 +337,28 @@ mod tests {
 
         // Register in reverse priority order
         let h100 = MockHook::modifier("h100", "*::*", HookPoint::RequestPreDispatch, |ctx| {
-            let arr = ctx.payload.as_array_mut().unwrap();
+            let arr = ctx
+                .payload
+                .as_array_mut()
+                .expect("payload should be a JSON array for priority ordering test");
             arr.push(json!("h100"));
         })
         .with_priority(100);
 
         let h10 = MockHook::modifier("h10", "*::*", HookPoint::RequestPreDispatch, |ctx| {
-            let arr = ctx.payload.as_array_mut().unwrap();
+            let arr = ctx
+                .payload
+                .as_array_mut()
+                .expect("payload should be a JSON array for h10 priority test");
             arr.push(json!("h10"));
         })
         .with_priority(10);
 
         let h50 = MockHook::modifier("h50", "*::*", HookPoint::RequestPreDispatch, |ctx| {
-            let arr = ctx.payload.as_array_mut().unwrap();
+            let arr = ctx
+                .payload
+                .as_array_mut()
+                .expect("payload should be a JSON array for h50 priority test");
             arr.push(json!("h50"));
         })
         .with_priority(50);

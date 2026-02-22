@@ -264,7 +264,7 @@ mod tests {
         let result = "foo.bar".parse::<HookPoint>();
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.expect_err("unknown hook point 'foo.bar' should return error"),
             HookError::UnknownHookPoint(_)
         ));
     }
@@ -343,8 +343,9 @@ mod tests {
     #[test]
     fn serde_roundtrip() {
         for &point in ALL_POINTS {
-            let json = serde_json::to_string(&point).unwrap();
-            let restored: HookPoint = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&point).expect("HookPoint should serialize to JSON");
+            let restored: HookPoint =
+                serde_json::from_str(&json).expect("HookPoint should deserialize from JSON");
             assert_eq!(restored, point);
         }
     }

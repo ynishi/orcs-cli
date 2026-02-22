@@ -181,7 +181,9 @@ mod tests {
     #[test]
     fn shared_registry_creation() {
         let reg = shared_hook_registry();
-        let guard = reg.read().unwrap();
+        let guard = reg
+            .read()
+            .expect("shared registry read lock should not be poisoned");
         assert!(guard.is_empty());
     }
 
@@ -191,7 +193,9 @@ mod tests {
 
         // Write lock: register a hook
         {
-            let mut guard = reg.write().unwrap();
+            let mut guard = reg
+                .write()
+                .expect("shared registry write lock should not be poisoned");
             let hook =
                 testing::MockHook::pass_through("test", "*::*", HookPoint::RequestPreDispatch);
             guard.register(Box::new(hook));
@@ -200,7 +204,9 @@ mod tests {
 
         // Read lock: dispatch
         {
-            let guard = reg.read().unwrap();
+            let guard = reg
+                .read()
+                .expect("shared registry read lock should not be poisoned for dispatch");
             let ctx = HookContext::new(
                 HookPoint::RequestPreDispatch,
                 ComponentId::builtin("llm"),
@@ -225,7 +231,9 @@ mod tests {
         let reg2 = Arc::clone(&reg);
 
         {
-            let mut guard = reg.write().unwrap();
+            let mut guard = reg
+                .write()
+                .expect("shared registry write lock should not be poisoned for clone test");
             guard.register(Box::new(testing::MockHook::pass_through(
                 "shared",
                 "*::*",
@@ -233,7 +241,9 @@ mod tests {
             )));
         }
 
-        let guard = reg2.read().unwrap();
+        let guard = reg2
+            .read()
+            .expect("cloned registry read lock should reflect shared state");
         assert_eq!(guard.len(), 1);
     }
 }

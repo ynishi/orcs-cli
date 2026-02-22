@@ -170,8 +170,9 @@ mod tests {
     #[test]
     fn serde_roundtrip() {
         let ctx = test_ctx().with_metadata("key", json!(42)).with_max_depth(8);
-        let json = serde_json::to_string(&ctx).unwrap();
-        let restored: HookContext = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ctx).expect("HookContext should serialize to JSON");
+        let restored: HookContext =
+            serde_json::from_str(&json).expect("HookContext should deserialize from JSON");
         assert_eq!(restored.hook_point, ctx.hook_point);
         assert_eq!(restored.depth, ctx.depth);
         assert_eq!(restored.max_depth, ctx.max_depth);

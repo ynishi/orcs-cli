@@ -234,7 +234,9 @@ mod tests {
             priority: 100,
             enabled: true,
         };
-        let err = hook.validate().unwrap_err();
+        let err = hook
+            .validate()
+            .expect_err("hook with no handler should fail validation");
         assert!(matches!(err, HookDefValidationError::NoHandler { .. }));
         assert!(err.to_string().contains("neither"));
     }
@@ -250,7 +252,9 @@ mod tests {
             priority: 100,
             enabled: true,
         };
-        let err = hook.validate().unwrap_err();
+        let err = hook
+            .validate()
+            .expect_err("hook with both handlers should fail validation");
         assert!(matches!(err, HookDefValidationError::BothHandlers { .. }));
         assert!(err.to_string().contains("both"));
     }
@@ -266,7 +270,9 @@ mod tests {
             priority: 100,
             enabled: true,
         };
-        let err = hook.validate().unwrap_err();
+        let err = hook
+            .validate()
+            .expect_err("hook with invalid FQL should fail validation");
         assert!(matches!(err, HookDefValidationError::InvalidFql { .. }));
     }
 
@@ -281,7 +287,9 @@ mod tests {
             priority: 100,
             enabled: true,
         };
-        let err = hook.validate().unwrap_err();
+        let err = hook
+            .validate()
+            .expect_err("hook with invalid point should fail validation");
         assert!(matches!(err, HookDefValidationError::InvalidPoint { .. }));
     }
 
@@ -310,7 +318,9 @@ mod tests {
             priority: 100,
             enabled: true,
         };
-        let err = hook.validate().unwrap_err();
+        let err = hook
+            .validate()
+            .expect_err("anonymous hook with no handler should fail validation");
         assert!(err.to_string().contains("<anonymous>"));
     }
 
@@ -476,8 +486,10 @@ mod tests {
             ],
         };
 
-        let json = serde_json::to_string_pretty(&cfg).unwrap();
-        let restored: HooksConfig = serde_json::from_str(&json).unwrap();
+        let json =
+            serde_json::to_string_pretty(&cfg).expect("HooksConfig should serialize to JSON");
+        let restored: HooksConfig =
+            serde_json::from_str(&json).expect("HooksConfig should deserialize from JSON");
         assert_eq!(cfg, restored);
     }
 
@@ -492,7 +504,8 @@ mod tests {
             }]
         }"#;
 
-        let cfg: HooksConfig = serde_json::from_str(json).unwrap();
+        let cfg: HooksConfig =
+            serde_json::from_str(json).expect("minimal JSON with defaults should deserialize");
         assert_eq!(cfg.hooks.len(), 1);
         assert_eq!(cfg.hooks[0].priority, 100);
         assert!(cfg.hooks[0].enabled);
@@ -521,7 +534,8 @@ priority = 200
 enabled = true
 "#;
 
-        let cfg: HooksConfig = toml::from_str(toml_str).unwrap();
+        let cfg: HooksConfig =
+            toml::from_str(toml_str).expect("TOML with two hooks should deserialize");
         assert_eq!(cfg.hooks.len(), 2);
         assert_eq!(cfg.hooks[0].id.as_deref(), Some("audit-requests"));
         assert_eq!(cfg.hooks[0].priority, 50);
@@ -529,8 +543,10 @@ enabled = true
         assert!(cfg.hooks[1].handler_inline.is_some());
 
         // Serialize back and re-parse
-        let serialized = toml::to_string_pretty(&cfg).unwrap();
-        let restored: HooksConfig = toml::from_str(&serialized).unwrap();
+        let serialized =
+            toml::to_string_pretty(&cfg).expect("HooksConfig should serialize to TOML");
+        let restored: HooksConfig = toml::from_str(&serialized)
+            .expect("HooksConfig should deserialize from re-serialized TOML");
         assert_eq!(cfg, restored);
     }
 
@@ -543,7 +559,8 @@ point = "request.pre_dispatch"
 script = "test.lua"
 "#;
 
-        let cfg: HooksConfig = toml::from_str(toml_str).unwrap();
+        let cfg: HooksConfig =
+            toml::from_str(toml_str).expect("minimal TOML with defaults should deserialize");
         assert_eq!(cfg.hooks.len(), 1);
         assert_eq!(cfg.hooks[0].priority, 100);
         assert!(cfg.hooks[0].enabled);
@@ -552,7 +569,8 @@ script = "test.lua"
     #[test]
     fn toml_empty_hooks() {
         let toml_str = "";
-        let cfg: HooksConfig = toml::from_str(toml_str).unwrap();
+        let cfg: HooksConfig =
+            toml::from_str(toml_str).expect("empty TOML should deserialize to empty HooksConfig");
         assert!(cfg.hooks.is_empty());
     }
 }

@@ -184,7 +184,8 @@ mod tests {
 
     #[test]
     fn parse_exact_match() {
-        let p = FqlPattern::parse("builtin::llm").unwrap();
+        let p = FqlPattern::parse("builtin::llm")
+            .expect("exact FQL 'builtin::llm' should parse successfully");
         assert_eq!(p.scope, PatternSegment::Exact("builtin".into()));
         assert_eq!(p.target, PatternSegment::Exact("llm".into()));
         assert_eq!(p.child_path, None);
@@ -193,47 +194,53 @@ mod tests {
 
     #[test]
     fn parse_full_wildcard() {
-        let p = FqlPattern::parse("*::*").unwrap();
+        let p = FqlPattern::parse("*::*").expect("wildcard FQL '*::*' should parse successfully");
         assert_eq!(p.scope, PatternSegment::Wildcard);
         assert_eq!(p.target, PatternSegment::Wildcard);
     }
 
     #[test]
     fn parse_scope_wildcard() {
-        let p = FqlPattern::parse("*::llm").unwrap();
+        let p = FqlPattern::parse("*::llm")
+            .expect("scope-wildcard FQL '*::llm' should parse successfully");
         assert_eq!(p.scope, PatternSegment::Wildcard);
         assert_eq!(p.target, PatternSegment::Exact("llm".into()));
     }
 
     #[test]
     fn parse_target_wildcard() {
-        let p = FqlPattern::parse("builtin::*").unwrap();
+        let p = FqlPattern::parse("builtin::*")
+            .expect("target-wildcard FQL 'builtin::*' should parse successfully");
         assert_eq!(p.scope, PatternSegment::Exact("builtin".into()));
         assert_eq!(p.target, PatternSegment::Wildcard);
     }
 
     #[test]
     fn parse_with_child_path() {
-        let p = FqlPattern::parse("builtin::llm/agent-1").unwrap();
+        let p = FqlPattern::parse("builtin::llm/agent-1")
+            .expect("FQL with child path should parse successfully");
         assert_eq!(p.target, PatternSegment::Exact("llm".into()));
         assert_eq!(p.child_path, Some(PatternSegment::Exact("agent-1".into())));
     }
 
     #[test]
     fn parse_with_child_wildcard() {
-        let p = FqlPattern::parse("builtin::llm/*").unwrap();
+        let p = FqlPattern::parse("builtin::llm/*")
+            .expect("FQL with child wildcard should parse successfully");
         assert_eq!(p.child_path, Some(PatternSegment::Wildcard));
     }
 
     #[test]
     fn parse_with_instance() {
-        let p = FqlPattern::parse("lua::custom#primary").unwrap();
+        let p = FqlPattern::parse("lua::custom#primary")
+            .expect("FQL with instance qualifier should parse successfully");
         assert_eq!(p.instance, Some(PatternSegment::Exact("primary".into())));
     }
 
     #[test]
     fn parse_full_pattern() {
-        let p = FqlPattern::parse("builtin::llm/agent-1#0").unwrap();
+        let p = FqlPattern::parse("builtin::llm/agent-1#0")
+            .expect("full FQL pattern with child and instance should parse successfully");
         assert_eq!(p.scope, PatternSegment::Exact("builtin".into()));
         assert_eq!(p.target, PatternSegment::Exact("llm".into()));
         assert_eq!(p.child_path, Some(PatternSegment::Exact("agent-1".into())));
@@ -276,28 +283,32 @@ mod tests {
 
     #[test]
     fn match_exact() {
-        let p = FqlPattern::parse("builtin::llm").unwrap();
+        let p = FqlPattern::parse("builtin::llm")
+            .expect("FQL 'builtin::llm' should parse for matching test");
         let id = ComponentId::builtin("llm");
         assert!(p.matches(&id, None));
     }
 
     #[test]
     fn match_exact_no_match() {
-        let p = FqlPattern::parse("builtin::hil").unwrap();
+        let p = FqlPattern::parse("builtin::hil")
+            .expect("FQL 'builtin::hil' should parse for non-match test");
         let id = ComponentId::builtin("llm");
         assert!(!p.matches(&id, None));
     }
 
     #[test]
     fn match_wildcard_scope() {
-        let p = FqlPattern::parse("*::llm").unwrap();
+        let p =
+            FqlPattern::parse("*::llm").expect("scope-wildcard FQL should parse for matching test");
         let id = ComponentId::builtin("llm");
         assert!(p.matches(&id, None));
     }
 
     #[test]
     fn match_wildcard_target() {
-        let p = FqlPattern::parse("builtin::*").unwrap();
+        let p = FqlPattern::parse("builtin::*")
+            .expect("target-wildcard FQL should parse for matching test");
         let id_llm = ComponentId::builtin("llm");
         let id_hil = ComponentId::builtin("hil");
         assert!(p.matches(&id_llm, None));
@@ -306,14 +317,16 @@ mod tests {
 
     #[test]
     fn match_full_wildcard() {
-        let p = FqlPattern::parse("*::*").unwrap();
+        let p =
+            FqlPattern::parse("*::*").expect("full wildcard FQL should parse for matching test");
         let id = ComponentId::builtin("anything");
         assert!(p.matches(&id, None));
     }
 
     #[test]
     fn match_child_exact() {
-        let p = FqlPattern::parse("builtin::llm/agent-1").unwrap();
+        let p = FqlPattern::parse("builtin::llm/agent-1")
+            .expect("FQL with exact child path should parse for matching test");
         let id = ComponentId::builtin("llm");
         assert!(p.matches(&id, Some("agent-1")));
         assert!(!p.matches(&id, Some("agent-2")));
@@ -322,7 +335,8 @@ mod tests {
 
     #[test]
     fn match_child_wildcard() {
-        let p = FqlPattern::parse("builtin::llm/*").unwrap();
+        let p = FqlPattern::parse("builtin::llm/*")
+            .expect("FQL with child wildcard should parse for matching test");
         let id = ComponentId::builtin("llm");
         assert!(p.matches(&id, Some("agent-1")));
         assert!(p.matches(&id, Some("any-child")));
@@ -331,7 +345,8 @@ mod tests {
 
     #[test]
     fn match_no_child_pattern_accepts_any_child() {
-        let p = FqlPattern::parse("builtin::llm").unwrap();
+        let p = FqlPattern::parse("builtin::llm")
+            .expect("FQL without child path should parse for any-child matching test");
         let id = ComponentId::builtin("llm");
         assert!(p.matches(&id, None));
         assert!(p.matches(&id, Some("agent-1")));
@@ -339,7 +354,8 @@ mod tests {
 
     #[test]
     fn match_plugin_namespace() {
-        let p = FqlPattern::parse("plugin::my-tool").unwrap();
+        let p = FqlPattern::parse("plugin::my-tool")
+            .expect("FQL with plugin namespace should parse for matching test");
         let id = ComponentId::new("plugin", "my-tool");
         assert!(p.matches(&id, None));
         assert!(!p.matches(&ComponentId::builtin("my-tool"), None));
@@ -360,7 +376,8 @@ mod tests {
             "builtin::llm/agent-1#0",
         ];
         for &s in &patterns {
-            let p = FqlPattern::parse(s).unwrap();
+            let p =
+                FqlPattern::parse(s).expect("FQL pattern should parse for display roundtrip test");
             assert_eq!(p.to_string(), s, "display roundtrip failed for {s}");
         }
     }
@@ -369,9 +386,11 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let p = FqlPattern::parse("builtin::llm/agent-1#0").unwrap();
-        let json = serde_json::to_string(&p).unwrap();
-        let restored: FqlPattern = serde_json::from_str(&json).unwrap();
+        let p = FqlPattern::parse("builtin::llm/agent-1#0")
+            .expect("full FQL pattern should parse for serde roundtrip");
+        let json = serde_json::to_string(&p).expect("FqlPattern should serialize to JSON");
+        let restored: FqlPattern =
+            serde_json::from_str(&json).expect("FqlPattern should deserialize from JSON");
         assert_eq!(p, restored);
     }
 }
