@@ -1,6 +1,8 @@
 # ORCS CLI
 
 [![CI](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ynishi/orcs-cli/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/orcs-cli.svg)](https://crates.io/crates/orcs-cli)
+[![docs.rs](https://docs.rs/orcs-cli/badge.svg)](https://docs.rs/orcs-cli)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![MSRV: 1.80.0](https://img.shields.io/badge/MSRV-1.80.0-brightgreen.svg)](https://releases.rs/docs/1.80.0/)
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
