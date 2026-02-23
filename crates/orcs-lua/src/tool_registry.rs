@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use crate::error::LuaError;
 use crate::types::serde_json_to_lua;
 use mlua::{Lua, Table};
+use orcs_component::ComponentError;
 use orcs_types::intent::{IntentDef, IntentResolver};
 
 // ── IntentRegistry ───────────────────────────────────────────────────
@@ -224,12 +225,115 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
     result
 }
 
+/// Checks if a mutating intent requires HIL approval before execution.
+///
+/// Uses the parent Channel's permission model via [`ChildContext::check_command_permission`]
+/// with a synthetic `"intent:<name>"` command. This leverages the existing permission
+/// infrastructure:
+///
+/// - **Elevated sessions** → auto-allowed (all intents pass)
+/// - **Previously granted** → auto-allowed (`GrantPolicy` stores `"intent:<name>"`)
+/// - **Standard + not granted** → `Suspended` (triggers HIL approval flow)
+///
+/// After the user approves, `GrantPolicy::grant("intent:<name>")` is persisted by
+/// the ChannelRunner, so subsequent calls for the same intent are auto-allowed.
+///
+/// # Exempt intents
+///
+/// - `read`, `grep`, `glob` — read-only, no approval needed
+/// - `exec` — has its own per-command approval flow in `ctx_fns.rs`
+fn check_intent_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()> {
+    // Read-only intents and exec (own approval) skip this check
+    if matches!(name, "read" | "grep" | "glob" | "exec") {
+        return Ok(());
+    }
+
+    // Access ChildContext from app_data. If not set (e.g., tests without
+    // Component context), fall through to permissive mode.
+    let wrapper = match lua.app_data_ref::<crate::cap_tools::ContextWrapper>() {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+    let ctx = wrapper.0.lock();
+
+    // Synthetic command for the permission system
+    let intent_cmd = format!("intent:{name}");
+    let permission = ctx.check_command_permission(&intent_cmd);
+
+    match permission {
+        orcs_component::CommandPermission::Allowed => Ok(()),
+        orcs_component::CommandPermission::Denied(reason) => Err(mlua::Error::RuntimeError(
+            format!("intent '{name}' denied: {reason}"),
+        )),
+        orcs_component::CommandPermission::RequiresApproval {
+            grant_pattern,
+            description: _,
+        } => {
+            let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+
+            // Build human-readable description from intent args
+            let detail = build_intent_description(name, args);
+
+            tracing::info!(
+                approval_id = %approval_id,
+                intent = %name,
+                grant_pattern = %grant_pattern,
+                "intent requires approval, suspending"
+            );
+
+            Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                ComponentError::Suspended {
+                    approval_id,
+                    grant_pattern,
+                    pending_request: serde_json::json!({
+                        "command": intent_cmd,
+                        "description": detail,
+                    }),
+                },
+            )))
+        }
+    }
+}
+
+/// Builds a human-readable description for an intent approval request.
+fn build_intent_description(name: &str, args: &Table) -> String {
+    match name {
+        "write" => {
+            let path: String = args.get("path").unwrap_or_default();
+            format!("Write to file: {path}")
+        }
+        "remove" => {
+            let path: String = args.get("path").unwrap_or_default();
+            format!("Remove: {path}")
+        }
+        "mv" => {
+            let src: String = args.get("src").unwrap_or_default();
+            let dst: String = args.get("dst").unwrap_or_default();
+            format!("Move: {src} -> {dst}")
+        }
+        "mkdir" => {
+            let path: String = args.get("path").unwrap_or_default();
+            format!("Create directory: {path}")
+        }
+        _ => format!("Execute intent: {name}"),
+    }
+}
+
 /// Dispatches an Internal intent to the corresponding `orcs.*` Lua function.
 ///
 /// Each builtin tool has a different Lua function signature, so tool-specific
 /// argument extraction is necessary. This is an implementation detail of
 /// the Internal resolver — hidden behind the unified dispatch_tool().
+///
+/// Mutating intents (write, remove, mv, mkdir) are subject to HIL approval
+/// via [`check_intent_approval`]. Read-only intents and `exec` (which has
+/// its own per-command approval flow) skip this check.
 fn dispatch_internal(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
+    // HIL approval for mutating intents (write, remove, mv, mkdir).
+    // exec is excluded — it has its own per-command approval in ctx_fns.
+    // read, grep, glob are read-only and exempt.
+    check_intent_approval(lua, name, args)?;
+
     let orcs: Table = lua.globals().get("orcs")?;
 
     match name {
