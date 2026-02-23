@@ -913,8 +913,6 @@ mod tests {
 
     // --- OrcsHelper (IME refresh fix) ---
 
-    use rustyline::highlight::Highlighter as _;
-
     #[test]
     fn orcs_helper_forces_refresh_on_char_insert() {
         let helper = OrcsHelper;
