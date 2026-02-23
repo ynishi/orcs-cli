@@ -228,13 +228,12 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
 
 /// Checks if a mutating intent requires HIL approval before execution.
 ///
-/// Uses the parent Channel's permission model via [`ChildContext::check_command_permission`]
-/// with a synthetic `"intent:<name>"` command. This leverages the existing permission
-/// infrastructure:
+/// Uses [`ChildContext::is_command_granted`] with a synthetic `"intent:<name>"`
+/// command. This intentionally bypasses session elevation so that mutating
+/// intents always require explicit approval on first use:
 ///
-/// - **Elevated sessions** → auto-allowed (all intents pass)
 /// - **Previously granted** → auto-allowed (`GrantPolicy` stores `"intent:<name>"`)
-/// - **Standard + not granted** → `Suspended` (triggers HIL approval flow)
+/// - **Not yet granted** → `Suspended` (triggers HIL approval flow)
 ///
 /// After the user approves, `GrantPolicy::grant("intent:<name>")` is persisted by
 /// the ChannelRunner, so subsequent calls for the same intent are auto-allowed.
@@ -290,24 +289,18 @@ fn check_intent_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()
 
 /// Builds a human-readable description for an intent approval request.
 fn build_intent_description(name: &str, args: &Table) -> String {
+    let path_or = |key: &str| -> String {
+        args.get::<String>(key)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "<unknown>".to_string())
+    };
+
     match name {
-        "write" => {
-            let path: String = args.get("path").unwrap_or_default();
-            format!("Write to file: {path}")
-        }
-        "remove" => {
-            let path: String = args.get("path").unwrap_or_default();
-            format!("Remove: {path}")
-        }
-        "mv" => {
-            let src: String = args.get("src").unwrap_or_default();
-            let dst: String = args.get("dst").unwrap_or_default();
-            format!("Move: {src} -> {dst}")
-        }
-        "mkdir" => {
-            let path: String = args.get("path").unwrap_or_default();
-            format!("Create directory: {path}")
-        }
+        "write" => format!("Write to file: {}", path_or("path")),
+        "remove" => format!("Remove: {}", path_or("path")),
+        "mv" => format!("Move: {} -> {}", path_or("src"), path_or("dst")),
+        "mkdir" => format!("Create directory: {}", path_or("path")),
         _ => format!("Execute intent: {name}"),
     }
 }
