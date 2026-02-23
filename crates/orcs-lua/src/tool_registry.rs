@@ -211,7 +211,8 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
         IntentResolver::Component {
             component_fqn,
             operation,
-        } => dispatch_component(lua, name, &component_fqn, &operation, args),
+            timeout_ms,
+        } => dispatch_component(lua, name, &component_fqn, &operation, args, timeout_ms),
     };
     let duration_ms = start.elapsed().as_millis() as u64;
     let ok = result
@@ -400,6 +401,7 @@ fn dispatch_component(
     component_fqn: &str,
     operation: &str,
     args: &Table,
+    timeout_ms: Option<u64>,
 ) -> mlua::Result<Table> {
     let orcs: Table = lua.globals().get("orcs")?;
 
@@ -422,9 +424,19 @@ fn dispatch_component(
         payload.set(k, v)?;
     }
 
+    // Build optional opts table (timeout override for long-running RPCs)
+    let opts = match timeout_ms {
+        Some(ms) => {
+            let t = lua.create_table()?;
+            t.set("timeout_ms", ms)?;
+            mlua::Value::Table(t)
+        }
+        None => mlua::Value::Nil,
+    };
+
     // Execute with timing
     let start = std::time::Instant::now();
-    let rpc_result: Table = request_fn.call((component_fqn, operation, payload))?;
+    let rpc_result: Table = request_fn.call((component_fqn, operation, payload, opts))?;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     tracing::debug!(
@@ -672,6 +684,9 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
             Err(_) => serde_json::json!({"type": "object", "properties": {}}),
         };
 
+        // Optional RPC timeout override (ms)
+        let timeout_ms: Option<u64> = def_table.get("timeout_ms").ok();
+
         let intent_def = IntentDef {
             name: name.clone(),
             description,
@@ -679,6 +694,7 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
             resolver: IntentResolver::Component {
                 component_fqn,
                 operation,
+                timeout_ms,
             },
         };
 
@@ -780,6 +796,7 @@ mod tests {
             resolver: IntentResolver::Component {
                 component_fqn: "lua::my_comp".into(),
                 operation: "execute".into(),
+                timeout_ms: None,
             },
         };
         registry

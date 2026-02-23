@@ -340,6 +340,7 @@ return {
                 .. "results appear in your context on the next turn.",
             component = "builtin::agent_mgr",
             operation = "delegate",
+            timeout_ms = 600000,
             params = {
                 description = {
                     type = "string",
