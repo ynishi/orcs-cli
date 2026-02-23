@@ -1502,7 +1502,7 @@ dependencies = [
 [[package]]
 name = "rustyline"
 version = "15.0.0"
-source = "git+https://github.com/ynishi/rustyline.git?branch=fix%2Fime-select-buffer-drain#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
+source = "git+https://github.com/ynishi/rustyline.git?rev=5e11edf#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1524,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "rustyline-derive"
 version = "0.11.0"
-source = "git+https://github.com/ynishi/rustyline.git?branch=fix%2Fime-select-buffer-drain#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
+source = "git+https://github.com/ynishi/rustyline.git?rev=5e11edf#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
 dependencies = [
  "proc-macro2",
  "quote",

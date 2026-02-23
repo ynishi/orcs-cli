@@ -71,7 +71,7 @@ assert_cmd = "2"
 predicates = "3"
 
 [patch.crates-io]
-rustyline = { git = "https://github.com/ynishi/rustyline.git", branch = "fix/ime-select-buffer-drain" }
+rustyline = { git = "https://github.com/ynishi/rustyline.git", rev = "5e11edf" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

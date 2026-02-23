@@ -913,9 +913,10 @@ mod tests {
 
     // --- OrcsHelper (IME refresh fix) ---
 
+    use rustyline::highlight::Highlighter as _;
+
     #[test]
     fn orcs_helper_forces_refresh_on_char_insert() {
-        use rustyline::highlight::{CmdKind, Highlighter};
         let helper = OrcsHelper;
         assert!(
             helper.highlight_char("", 0, CmdKind::Other),
@@ -925,7 +926,6 @@ mod tests {
 
     #[test]
     fn orcs_helper_skips_refresh_on_cursor_move() {
-        use rustyline::highlight::{CmdKind, Highlighter};
         let helper = OrcsHelper;
         assert!(
             !helper.highlight_char("abc", 1, CmdKind::MoveCursor),
@@ -935,7 +935,6 @@ mod tests {
 
     #[test]
     fn orcs_helper_skips_refresh_on_forced_refresh() {
-        use rustyline::highlight::{CmdKind, Highlighter};
         let helper = OrcsHelper;
         assert!(
             !helper.highlight_char("abc", 0, CmdKind::ForcedRefresh),
