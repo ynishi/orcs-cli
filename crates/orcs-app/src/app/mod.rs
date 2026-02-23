@@ -83,7 +83,6 @@ use rustyline::history::DefaultHistory;
 use rustyline::{
     Completer, Editor, ExternalPrinter as RustylineExternalPrinter, Helper, Hinter, Validator,
 };
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,22 +136,6 @@ impl Highlighter for OrcsHelper {
         // This fixes IME composition display on macOS where the fast-path
         // write_and_flush doesn't trigger terminal repaint after IME commit.
         kind == CmdKind::Other
-    }
-
-    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
-        &'s self,
-        prompt: &'p str,
-        _default: bool,
-    ) -> Cow<'b, str> {
-        Cow::Borrowed(prompt)
-    }
-
-    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        Cow::Borrowed(line)
-    }
-
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Borrowed(hint)
     }
 }
 
@@ -925,6 +908,38 @@ mod tests {
 
     fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
+
+    // --- OrcsHelper (IME refresh fix) ---
+
+    #[test]
+    fn orcs_helper_forces_refresh_on_char_insert() {
+        use rustyline::highlight::{CmdKind, Highlighter};
+        let helper = OrcsHelper;
+        assert!(
+            helper.highlight_char("", 0, CmdKind::Other),
+            "CmdKind::Other (edit_insert) should force full line refresh"
+        );
+    }
+
+    #[test]
+    fn orcs_helper_skips_refresh_on_cursor_move() {
+        use rustyline::highlight::{CmdKind, Highlighter};
+        let helper = OrcsHelper;
+        assert!(
+            !helper.highlight_char("abc", 1, CmdKind::MoveCursor),
+            "CmdKind::MoveCursor should not trigger refresh"
+        );
+    }
+
+    #[test]
+    fn orcs_helper_skips_refresh_on_forced_refresh() {
+        use rustyline::highlight::{CmdKind, Highlighter};
+        let helper = OrcsHelper;
+        assert!(
+            !helper.highlight_char("abc", 0, CmdKind::ForcedRefresh),
+            "CmdKind::ForcedRefresh should not trigger extra refresh from helper"
+        );
     }
 
     #[tokio::test]
