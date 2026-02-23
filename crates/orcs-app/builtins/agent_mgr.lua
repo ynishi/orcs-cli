@@ -536,7 +536,7 @@ return {
             -- Sends RPC to the backend's on_request(operation="process") handler.
             local result = orcs.request(delegate_backend, "process", {
                 message = prompt,
-            })
+            }, { timeout_ms = 600000 })
             if result and result.success then
                 summary = (result.data and result.data.response) or ""
             else
