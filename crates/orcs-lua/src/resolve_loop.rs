@@ -14,6 +14,7 @@ use crate::llm_command::resolve::dispatch_intents_to_results;
 use crate::tool_registry::IntentRegistry;
 use crate::types::serde_json_to_lua;
 use mlua::{Function, Lua, Table, Value};
+use orcs_component::ComponentError;
 use orcs_types::intent::{ActionIntent, ContentBlock, IntentMeta, MessageContent};
 
 /// Default maximum number of tool resolution turns.
@@ -82,6 +83,11 @@ fn resolve_loop_impl(lua: &Lua, backend_fn: &Function, opts: &Table) -> mlua::Re
         let response = match backend_fn.call::<Table>(turn) {
             Ok(resp) => resp,
             Err(e) => {
+                // Propagate suspension errors so ChannelRunner can drive the
+                // HIL approval flow (exec_argv permission grants, etc.).
+                if is_suspended(&e) {
+                    return Err(e);
+                }
                 return build_result(
                     lua,
                     false,
@@ -143,6 +149,21 @@ fn parse_response_intents(lua: &Lua, response: &Table) -> mlua::Result<Vec<Actio
     match tool_calls_value {
         Value::Table(ref tc_table) => parse_tool_calls_from_lua(lua, tc_table),
         _ => Ok(vec![]),
+    }
+}
+
+/// Check if an `mlua::Error` wraps a `ComponentError::Suspended`.
+///
+/// Suspension errors must be propagated (not caught) so the ChannelRunner
+/// can drive the HIL approval flow. This recurses through `CallbackError`
+/// wrappers since mlua nests callback errors.
+fn is_suspended(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::ExternalError(ext) => ext
+            .downcast_ref::<ComponentError>()
+            .is_some_and(|ce| matches!(ce, ComponentError::Suspended { .. })),
+        mlua::Error::CallbackError { cause, .. } => is_suspended(cause),
+        _ => false,
     }
 }
 
