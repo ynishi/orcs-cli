@@ -97,6 +97,7 @@ pub mod llm_command;
 mod loader;
 mod lua_env;
 pub mod orcs_helpers;
+pub(crate) mod resolve_loop;
 pub mod sanitize;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod scenario;
@@ -119,3 +120,18 @@ pub use lua_env::LuaEnv;
 pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};
 pub use tools::register_tool_functions;
 pub use types::{LuaRequest, LuaResponse, LuaSignal};
+
+/// Checks if an `mlua::Error` wraps a `ComponentError::Suspended`.
+///
+/// Recurses through `CallbackError` wrappers since mlua nests callback errors.
+/// Used by resolve_loop, dispatch_intents_to_results, and LuaComponent to
+/// propagate suspension errors to the ChannelRunner.
+pub(crate) fn is_suspended_error(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::ExternalError(ext) => ext
+            .downcast_ref::<orcs_component::ComponentError>()
+            .is_some_and(|ce| matches!(ce, orcs_component::ComponentError::Suspended { .. })),
+        mlua::Error::CallbackError { cause, .. } => is_suspended_error(cause),
+        _ => false,
+    }
+}

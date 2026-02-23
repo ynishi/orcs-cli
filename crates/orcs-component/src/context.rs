@@ -554,6 +554,19 @@ pub trait ChildContext: Send + Sync + Debug {
         CommandPermission::Allowed
     }
 
+    /// Checks if a command pattern has been granted (without elevation bypass).
+    ///
+    /// Returns `true` if the command matches a previously granted pattern.
+    /// Unlike [`check_command_permission`](Self::check_command_permission),
+    /// this does NOT consider session elevation — only explicit grants.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `false` (no grants in permissive mode).
+    fn is_command_granted(&self, _cmd: &str) -> bool {
+        false
+    }
+
     /// Grants a command pattern for future execution.
     ///
     /// After HIL approval, call this to allow matching commands

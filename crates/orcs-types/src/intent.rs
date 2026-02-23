@@ -217,6 +217,9 @@ pub enum IntentResolver {
         component_fqn: String,
         /// Operation name passed to the component's `on_request`.
         operation: String,
+        /// Optional RPC timeout override (milliseconds).
+        /// Defaults to `DEFAULT_TIMEOUT_MS` (30s) when `None`.
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -512,10 +515,12 @@ mod tests {
         let a = IntentResolver::Component {
             component_fqn: "lua::skill_manager".into(),
             operation: "execute".into(),
+            timeout_ms: None,
         };
         let b = IntentResolver::Component {
             component_fqn: "lua::skill_manager".into(),
             operation: "execute".into(),
+            timeout_ms: None,
         };
         assert_eq!(a, b);
     }
@@ -526,6 +531,7 @@ mod tests {
         let component = IntentResolver::Component {
             component_fqn: "lua::x".into(),
             operation: "op".into(),
+            timeout_ms: None,
         };
         assert_ne!(internal, component);
     }

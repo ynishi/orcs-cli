@@ -67,22 +67,22 @@ fn profile_manager_initializes() {
         .stdout(contains("ProfileManager initialized"));
 }
 
-/// Verifies AgentMgr emits Ready message with worker info.
+/// Verifies AgentMgr emits Ready message with backend and delegate info.
 ///
 /// Uses [`spawn_and_wait_for`] instead of `write_stdin("q\n")` to avoid
 /// the stdin-vs-init race condition. See `common/mod.rs` module doc for
 /// the full explanation of why `write_stdin` is racy for async output.
 #[test]
 fn agent_mgr_ready_with_workers() {
-    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
+    let tmp = tempfile::tempdir().expect("create temp dir for sandbox");
     let (stdout, _stderr) = spawn_and_wait_for(
-        "[AgentMgr] Ready (worker: builtin::llm-worker)",
+        "[AgentMgr] Ready (backend: builtin::llm-worker, delegate: ok)",
         &["-d"],
         tmp.path(),
     );
     assert!(
-        stdout.contains("[AgentMgr] Ready (worker: builtin::llm-worker)"),
-        "Expected Ready message in stdout.\nstdout:\n{stdout}"
+        stdout.contains("[AgentMgr] Ready (backend: builtin::llm-worker, delegate: ok)"),
+        "Expected Ready message with delegate status in stdout.\nstdout:\n{stdout}"
     );
 }
 
@@ -220,17 +220,18 @@ fn blank_lines_are_ignored() {
 
 // ─── User Message → dispatch_llm → orcs.output ──────────────────────
 
-/// Sends a plain message (no @prefix) so agent_mgr routes to dispatch_llm.
-/// dispatch_llm runs the llm-worker → orcs.llm() → HTTP LLM API.
+/// Sends a plain message (no @prefix) so agent_mgr emits an AgentTask event.
+/// The llm-worker (subscribed to AgentTask) processes the event asynchronously,
+/// calling orcs.llm() → HTTP LLM API.
 ///
 /// Uses a **mock HTTP server** that returns an Ollama-format response instantly,
 /// eliminating external dependency on a real LLM and making the test fast
 /// (~3 seconds instead of minutes).
 ///
-/// Verifies the full success pipeline:
-///   user input → agent_mgr → dispatch_llm → llm-worker → orcs.llm()
-///   → mock HTTP server → orcs.output(response) → Emitter → output_tx
-///   → ConsoleRenderer → stdout
+/// Verifies the full event-driven pipeline:
+///   user input → agent_mgr → emit_event(AgentTask) → llm-worker (subscriber)
+///   → orcs.llm() → mock HTTP server → orcs.output(response) → Emitter
+///   → output_tx → ConsoleRenderer → stdout
 #[test]
 fn dispatch_llm_output_reaches_stdout() {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -303,7 +304,7 @@ fn dispatch_llm_output_reaches_stdout() {
 
     let mut child = Command::new(&bin)
         .arg("-d")
-        .arg("--builtins-dir")
+        .arg("--sandbox")
         .arg(tmp.path())
         .env("ORCS_LLM_BASE_URL", &mock_base_url)
         .stdin(Stdio::piped())
@@ -316,7 +317,14 @@ fn dispatch_llm_output_reaches_stdout() {
     let child_stdout = child.stdout.take().expect("open stdout pipe");
     let child_stderr = child.stderr.take().expect("open stderr pipe");
 
-    // Read stdout in a background thread, signalling when dispatch completes.
+    // Read stdout in a background thread, signalling when the LLM worker completes.
+    //
+    // With event-driven dispatch, agent_mgr returns immediately after emitting
+    // the AgentTask event. The llm-worker processes asynchronously and outputs
+    // the response via orcs.output(). We detect completion by observing:
+    //   - The mock LLM response text (success path)
+    //   - "llm-worker: completed" debug log (success path, if response is empty)
+    //   - "[llm-worker] Error:" prefix (failure path)
     let (done_tx, done_rx) = std_mpsc::channel::<()>();
     let stdout_thread = thread::spawn(move || {
         let mut lines = Vec::new();
@@ -324,14 +332,12 @@ fn dispatch_llm_output_reaches_stdout() {
         let mut notified = false;
         for line in reader.lines() {
             let line = line.expect("read stdout line");
-            // Detect dispatch_llm completion:
-            //   "component returned success" (base.rs DEBUG log)
-            //   "component returned error"   (base.rs WARN log)
             if !notified
-                && (line.contains("component returned success")
-                    || line.contains("component returned error"))
+                && (line.contains("MOCK_LLM_RESPONSE_42")
+                    || line.contains("llm-worker: completed")
+                    || line.contains("[llm-worker] Error:"))
             {
-                // Small delay to let ConsoleRenderer flush.
+                // Small delay to let ConsoleRenderer flush remaining output.
                 thread::sleep(Duration::from_millis(200));
                 let _ = done_tx.send(());
                 notified = true;
@@ -353,16 +359,16 @@ fn dispatch_llm_output_reaches_stdout() {
         buf
     });
 
-    // Send user message — agent_mgr will dispatch to llm-worker → mock HTTP server.
+    // Send user message — agent_mgr emits AgentTask event → llm-worker → mock HTTP server.
     writeln!(stdin, "test_msg_e2e").expect("write user message");
     stdin.flush().expect("flush message to stdin");
 
-    // Wait for dispatch_llm to complete. Mock server returns instantly,
+    // Wait for llm-worker to complete. Mock server returns instantly,
     // so this should complete in a few seconds.
     let max_wait = Duration::from_secs(30);
-    let dispatch_completed = done_rx.recv_timeout(max_wait).is_ok();
+    let worker_completed = done_rx.recv_timeout(max_wait).is_ok();
 
-    // Send quit AFTER dispatch completes — IOPort channel is still open.
+    // Send quit AFTER worker completes — IOPort channel is still open.
     writeln!(stdin, "q").expect("write quit command");
     drop(stdin);
 
@@ -377,7 +383,7 @@ fn dispatch_llm_output_reaches_stdout() {
     std::fs::write(dump_dir.join("stderr.txt"), stderr.as_bytes()).expect("write stderr dump");
 
     eprintln!("=== DISPATCH_LLM DEBUG ===");
-    eprintln!("dispatch_completed={dispatch_completed}");
+    eprintln!("worker_completed={worker_completed}");
     eprintln!("dump_dir={}", dump_dir.display());
     eprintln!("stdout_len={} stderr_len={}", stdout.len(), stderr.len());
     eprintln!("=== END DEBUG ===");
@@ -388,15 +394,15 @@ fn dispatch_llm_output_reaches_stdout() {
         "agent_mgr should log receipt of message.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    // 2. Verify dispatch_llm completed (not timed out).
+    // 2. Verify llm-worker completed (not timed out).
     assert!(
-        dispatch_completed,
-        "dispatch_llm should have completed within {max_wait:?}.\n\
+        worker_completed,
+        "llm-worker should have completed within {max_wait:?}.\n\
          stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
     // 3. Verify the mock LLM response reached stdout via IOPort.
-    //    orcs.output(response) → Emitter → output_tx → ConsoleRenderer → stdout.
+    //    llm-worker → orcs.output(response) → Emitter → output_tx → ConsoleRenderer → stdout.
     let has_mock_response = stdout.contains("MOCK_LLM_RESPONSE_42");
     let has_error_on_stderr = stderr.contains("[AgentMgr] Error:");
     let output_channel_closed = stdout.contains("output_tx send failed");

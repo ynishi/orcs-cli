@@ -39,16 +39,17 @@ pub fn orcs_cmd_raw() -> assert_cmd::Command {
     cmd
 }
 
-/// Build a Command for the `orcs` binary with fresh builtins in a tempdir.
+/// Build a Command for the `orcs` binary in sandbox mode.
 ///
-/// Always uses a fresh temp directory to avoid stale builtin cache issues.
+/// Uses `--sandbox` to skip global config (`~/.orcs/config.toml`) and isolate
+/// all state (sessions, builtins, history) inside a fresh temp directory.
 /// Returns (command, _guard) — keep the guard alive for the test's duration.
 pub fn orcs_cmd() -> (assert_cmd::Command, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("create temp dir for builtins");
+    let tmp = tempfile::tempdir().expect("create temp dir for test isolation");
     let mut cmd: assert_cmd::Command = cargo_bin_cmd!("orcs");
     cmd.timeout(TIMEOUT_BASIC);
 
-    cmd.args(["--builtins-dir", tmp.path().to_str().expect("valid utf8")]);
+    cmd.args(["--sandbox", tmp.path().to_str().expect("valid utf8")]);
     (cmd, tmp)
 }
 
@@ -97,7 +98,7 @@ pub fn extract_session_id(stdout: &str) -> Option<String> {
 /// # Arguments
 /// * `gate` - Substring to wait for in stdout before sending quit.
 /// * `extra_args` - Additional CLI arguments (e.g. `&["-d"]`).
-/// * `builtins_dir` - Path to builtins directory.
+/// * `sandbox_dir` - Path to sandbox directory (isolates state and skips global config).
 ///
 /// # Returns
 /// `(stdout, stderr)` collected from the process.
@@ -107,7 +108,7 @@ pub fn extract_session_id(stdout: &str) -> Option<String> {
 pub fn spawn_and_wait_for(
     gate: &str,
     extra_args: &[&str],
-    builtins_dir: &std::path::Path,
+    sandbox_dir: &std::path::Path,
 ) -> (String, String) {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::process::{Command, Stdio};
@@ -117,7 +118,7 @@ pub fn spawn_and_wait_for(
     let bin = assert_cmd::cargo::cargo_bin!("orcs");
 
     let mut cmd = Command::new(&bin);
-    cmd.arg("--builtins-dir").arg(builtins_dir).args(extra_args);
+    cmd.arg("--sandbox").arg(sandbox_dir).args(extra_args);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

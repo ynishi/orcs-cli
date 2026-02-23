@@ -182,6 +182,12 @@ impl OrcsAppBuilder {
             }
         }
 
+        // Auth context: principal + non-elevated session + checker.
+        // Created before user script loading so user scripts get proper HIL.
+        let principal = Principal::User(PrincipalId::new());
+        let non_elevated_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
+        let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
+
         // Load user scripts from configured directories (auto_load)
         if config.scripts.auto_load {
             let script_dirs = config.scripts.resolve_dirs(Some(sandbox.root()));
@@ -207,7 +213,17 @@ impl OrcsAppBuilder {
                         w.create_channel(ChannelConfig::default())
                     };
                     let component_id = component.id().clone();
-                    engine.spawn_runner_with_emitter(channel_id, Box::new(component), None);
+                    let user_grants: Arc<dyn GrantPolicy> = Arc::new(DefaultGrantStore::new());
+                    engine.spawn_runner_full_auth(
+                        channel_id,
+                        Box::new(component),
+                        None,
+                        None,
+                        None,
+                        Arc::clone(&non_elevated_session),
+                        Arc::clone(&auth_checker),
+                        user_grants,
+                    );
                     tracing::info!(
                         name = %name,
                         channel = %channel_id,
@@ -228,17 +244,13 @@ impl OrcsAppBuilder {
 
         // Create IO port for ClientRunner
         let (io_port, io_input, io_output) = IOPort::with_defaults(io);
-        let principal = Principal::User(PrincipalId::new());
-
         // Spawn ClientRunner for IO channel (no component - bridge only)
         let (_io_handle, io_event_tx) = engine.spawn_client_runner(io, io_port, principal.clone());
         tracing::info!("ClientRunner spawned: channel={} (IO bridge)", io);
 
-        // Shared auth context
+        // Elevated session + shared grants for builtin components.
         let elevated_session: Arc<Session> =
             Arc::new(Session::new(principal.clone()).elevate(std::time::Duration::from_secs(3600)));
-        let non_elevated_session: Arc<Session> = Arc::new(Session::new(principal.clone()));
-        let auth_checker: Arc<dyn PermissionChecker> = Arc::new(DefaultPolicy);
         // Elevated components share grants; non-elevated get their own store.
         // Concrete type so save_session/resume can call restore_grants directly.
         let shared_grants = Arc::new(DefaultGrantStore::new());

@@ -186,7 +186,7 @@ pub(super) fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> Mess
 /// Each intent is dispatched through the Lua `orcs.dispatch(name, params)` function.
 /// The result (or error) is wrapped into a `ContentBlock::ToolResult` for the next
 /// LLM turn.
-pub(super) fn dispatch_intents_to_results(
+pub(crate) fn dispatch_intents_to_results(
     lua: &Lua,
     intents: &[ActionIntent],
 ) -> mlua::Result<MessageContent> {
@@ -243,7 +243,13 @@ pub(super) fn dispatch_intents_to_results(
                     (err, true)
                 }
             }
-            Err(e) => (format!("dispatch error: {e}"), true),
+            Err(e) => {
+                // Propagate Suspended so ChannelRunner can drive HIL approval.
+                if crate::is_suspended_error(&e) {
+                    return Err(e);
+                }
+                (format!("dispatch error: {e}"), true)
+            }
         };
 
         blocks.push(ContentBlock::ToolResult {
