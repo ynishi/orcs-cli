@@ -78,7 +78,11 @@ use orcs_runtime::{
     LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
 };
 use orcs_types::{ChannelId, Principal, PrincipalId};
-use rustyline::ExternalPrinter as RustylineExternalPrinter;
+use rustyline::highlight::{CmdKind, Highlighter};
+use rustyline::history::DefaultHistory;
+use rustyline::{
+    Completer, Editor, ExternalPrinter as RustylineExternalPrinter, Helper, Hinter, Validator,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,6 +114,30 @@ enum ReadlineEvent {
     Line(String),
     /// EOF (Ctrl+D on empty line).
     Eof,
+}
+
+/// Rustyline helper that forces full line refresh on every character insert.
+///
+/// The primary IME fix is in the patched rustyline (`[patch.crates-io]`),
+/// which drains BufReader before the raw `select()` syscall so that
+/// multi-character IME bursts are processed without stalling.
+///
+/// This helper provides an additional safeguard: by returning `true` from
+/// [`Highlighter::highlight_char`] for [`CmdKind::Other`], we bypass
+/// rustyline's fast-path optimization (raw UTF-8 byte write) and force a
+/// full `refresh()` after every character insertion.  This ensures the
+/// terminal repaints the line even if the fast-path write doesn't trigger
+/// a visible update for IME-composed text on macOS.
+#[derive(Completer, Helper, Hinter, Validator)]
+struct OrcsHelper;
+
+impl Highlighter for OrcsHelper {
+    fn highlight_char(&self, _line: &str, _pos: usize, kind: CmdKind) -> bool {
+        // Force full line refresh on character insertion (CmdKind::Other).
+        // This fixes IME composition display on macOS where the fast-path
+        // write_and_flush doesn't trigger terminal repaint after IME commit.
+        kind == CmdKind::Other
+    }
 }
 
 /// ORCS Application.
@@ -303,7 +331,7 @@ impl OrcsApp {
             .spawn(move || {
                 let config = rustyline::Config::builder().auto_add_history(true).build();
 
-                let mut rl = match rustyline::DefaultEditor::with_config(config) {
+                let mut rl: Editor<OrcsHelper, DefaultHistory> = match Editor::with_config(config) {
                     Ok(editor) => editor,
                     Err(e) => {
                         tracing::error!("Failed to create readline editor: {e}");
@@ -311,6 +339,7 @@ impl OrcsApp {
                         return;
                     }
                 };
+                rl.set_helper(Some(OrcsHelper));
 
                 // Load history (ignore errors for first run)
                 if let Err(e) = rl.load_history(&history_path) {
@@ -880,6 +909,35 @@ mod tests {
 
     fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
+    }
+
+    // --- OrcsHelper (IME refresh fix) ---
+
+    #[test]
+    fn orcs_helper_forces_refresh_on_char_insert() {
+        let helper = OrcsHelper;
+        assert!(
+            helper.highlight_char("", 0, CmdKind::Other),
+            "CmdKind::Other (edit_insert) should force full line refresh"
+        );
+    }
+
+    #[test]
+    fn orcs_helper_skips_refresh_on_cursor_move() {
+        let helper = OrcsHelper;
+        assert!(
+            !helper.highlight_char("abc", 1, CmdKind::MoveCursor),
+            "CmdKind::MoveCursor should not trigger refresh"
+        );
+    }
+
+    #[test]
+    fn orcs_helper_skips_refresh_on_forced_refresh() {
+        let helper = OrcsHelper;
+        assert!(
+            !helper.highlight_char("abc", 0, CmdKind::ForcedRefresh),
+            "CmdKind::ForcedRefresh should not trigger extra refresh from helper"
+        );
     }
 
     #[tokio::test]

@@ -1502,8 +1502,7 @@ dependencies = [
 [[package]]
 name = "rustyline"
 version = "15.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee1e066dc922e513bda599c6ccb5f3bb2b0ea5870a579448f2622993f0a9a2f"
+source = "git+https://github.com/ynishi/rustyline.git?rev=5e11edf#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1515,10 +1514,21 @@ dependencies = [
  "memchr",
  "nix",
  "radix_trie",
+ "rustyline-derive",
  "unicode-segmentation",
  "unicode-width",
  "utf8parse",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustyline-derive"
+version = "0.11.0"
+source = "git+https://github.com/ynishi/rustyline.git?rev=5e11edf#5e11edf1d6ccc69d1a0f4ee76f861b56a702cc44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
