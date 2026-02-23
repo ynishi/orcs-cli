@@ -118,15 +118,16 @@ enum ReadlineEvent {
 
 /// Rustyline helper that forces full line refresh on every character insert.
 ///
-/// Without this, rustyline's fast-path optimization writes raw UTF-8 bytes
-/// without redrawing the line.  On macOS, this causes IME-confirmed text
-/// (e.g. Japanese kanji after conversion) to not appear on screen until
-/// the next keystroke triggers a full refresh.
+/// The primary IME fix is in the patched rustyline (`[patch.crates-io]`),
+/// which drains BufReader before the raw `select()` syscall so that
+/// multi-character IME bursts are processed without stalling.
 ///
-/// By returning `true` from [`Highlighter::highlight_char`] for
-/// [`CmdKind::Other`] (the kind passed by `edit_insert`), we force
-/// rustyline to call `refresh()` after every character insertion,
-/// ensuring immediate display of IME-composed text.
+/// This helper provides an additional safeguard: by returning `true` from
+/// [`Highlighter::highlight_char`] for [`CmdKind::Other`], we bypass
+/// rustyline's fast-path optimization (raw UTF-8 byte write) and force a
+/// full `refresh()` after every character insertion.  This ensures the
+/// terminal repaints the line even if the fast-path write doesn't trigger
+/// a visible update for IME-composed text on macOS.
 #[derive(Completer, Helper, Hinter, Validator)]
 struct OrcsHelper;
 
