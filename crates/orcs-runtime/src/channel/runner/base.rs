@@ -1538,8 +1538,8 @@ impl ChannelRunnerBuilder {
                 component_id
             );
         }
-        if let Some(grants) = self.grants.take() {
-            ctx = ctx.with_grants(grants);
+        if let Some(grants) = &self.grants {
+            ctx = ctx.with_grants(Arc::clone(grants));
             info!(
                 "ChannelRunnerBuilder: enabled grant store for {}",
                 component_id
