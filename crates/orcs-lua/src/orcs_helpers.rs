@@ -261,6 +261,9 @@ pub fn register_base_orcs_functions(
     // Register dispatch and tool_schemas
     crate::tool_registry::register_dispatch_functions(lua)?;
 
+    // Register orcs.resolve_loop (provider-agnostic tool resolution loop)
+    crate::resolve_loop::register_resolve_loop(lua, &orcs_table)?;
+
     // Disable dangerous Lua stdlib functions
     sandbox_lua_globals(lua)?;
 

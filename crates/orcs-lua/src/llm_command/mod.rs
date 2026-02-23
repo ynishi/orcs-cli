@@ -39,7 +39,7 @@
 //! - Multi-turn tool loops not supported (Phase 6: resolve flow)
 
 mod provider;
-mod resolve;
+pub(crate) mod resolve;
 mod retry;
 mod session;
 

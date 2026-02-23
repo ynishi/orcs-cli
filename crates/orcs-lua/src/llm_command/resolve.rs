@@ -186,7 +186,7 @@ pub(super) fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> Mess
 /// Each intent is dispatched through the Lua `orcs.dispatch(name, params)` function.
 /// The result (or error) is wrapped into a `ContentBlock::ToolResult` for the next
 /// LLM turn.
-pub(super) fn dispatch_intents_to_results(
+pub(crate) fn dispatch_intents_to_results(
     lua: &Lua,
     intents: &[ActionIntent],
 ) -> mlua::Result<MessageContent> {
