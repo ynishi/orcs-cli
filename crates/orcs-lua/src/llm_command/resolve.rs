@@ -243,7 +243,13 @@ pub(crate) fn dispatch_intents_to_results(
                     (err, true)
                 }
             }
-            Err(e) => (format!("dispatch error: {e}"), true),
+            Err(e) => {
+                // Propagate Suspended so ChannelRunner can drive HIL approval.
+                if crate::is_suspended_error(&e) {
+                    return Err(e);
+                }
+                (format!("dispatch error: {e}"), true)
+            }
         };
 
         blocks.push(ContentBlock::ToolResult {
