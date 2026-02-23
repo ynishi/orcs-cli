@@ -264,21 +264,20 @@ fn check_intent_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()
     }
 
     // Not yet granted → suspend for HIL approval
-    let grant_pattern = intent_cmd.clone();
     let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
     let detail = build_intent_description(name, args);
 
     tracing::info!(
         approval_id = %approval_id,
         intent = %name,
-        grant_pattern = %grant_pattern,
+        grant_pattern = %intent_cmd,
         "intent requires approval, suspending"
     );
 
     Err(mlua::Error::ExternalError(std::sync::Arc::new(
         ComponentError::Suspended {
             approval_id,
-            grant_pattern,
+            grant_pattern: intent_cmd.clone(),
             pending_request: serde_json::json!({
                 "command": intent_cmd,
                 "description": detail,
