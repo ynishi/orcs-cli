@@ -78,7 +78,12 @@ use orcs_runtime::{
     LocalFileStore, OrcsConfig, OrcsEngine, SessionAsset,
 };
 use orcs_types::{ChannelId, Principal, PrincipalId};
-use rustyline::ExternalPrinter as RustylineExternalPrinter;
+use rustyline::highlight::{CmdKind, Highlighter};
+use rustyline::history::DefaultHistory;
+use rustyline::{
+    Completer, Editor, ExternalPrinter as RustylineExternalPrinter, Helper, Hinter, Validator,
+};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,6 +115,45 @@ enum ReadlineEvent {
     Line(String),
     /// EOF (Ctrl+D on empty line).
     Eof,
+}
+
+/// Rustyline helper that forces full line refresh on every character insert.
+///
+/// Without this, rustyline's fast-path optimization writes raw UTF-8 bytes
+/// without redrawing the line.  On macOS, this causes IME-confirmed text
+/// (e.g. Japanese kanji after conversion) to not appear on screen until
+/// the next keystroke triggers a full refresh.
+///
+/// By returning `true` from [`Highlighter::highlight_char`] for
+/// [`CmdKind::Other`] (the kind passed by `edit_insert`), we force
+/// rustyline to call `refresh()` after every character insertion,
+/// ensuring immediate display of IME-composed text.
+#[derive(Completer, Helper, Hinter, Validator)]
+struct OrcsHelper;
+
+impl Highlighter for OrcsHelper {
+    fn highlight_char(&self, _line: &str, _pos: usize, kind: CmdKind) -> bool {
+        // Force full line refresh on character insertion (CmdKind::Other).
+        // This fixes IME composition display on macOS where the fast-path
+        // write_and_flush doesn't trigger terminal repaint after IME commit.
+        kind == CmdKind::Other
+    }
+
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        Cow::Borrowed(prompt)
+    }
+
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        Cow::Borrowed(line)
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Borrowed(hint)
+    }
 }
 
 /// ORCS Application.
@@ -303,7 +347,7 @@ impl OrcsApp {
             .spawn(move || {
                 let config = rustyline::Config::builder().auto_add_history(true).build();
 
-                let mut rl = match rustyline::DefaultEditor::with_config(config) {
+                let mut rl: Editor<OrcsHelper, DefaultHistory> = match Editor::with_config(config) {
                     Ok(editor) => editor,
                     Err(e) => {
                         tracing::error!("Failed to create readline editor: {e}");
@@ -311,6 +355,7 @@ impl OrcsApp {
                         return;
                     }
                 };
+                rl.set_helper(Some(OrcsHelper));
 
                 // Load history (ignore errors for first run)
                 if let Err(e) = rl.load_history(&history_path) {
