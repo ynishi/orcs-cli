@@ -256,43 +256,35 @@ fn check_intent_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()
     };
     let ctx = wrapper.0.lock();
 
-    // Synthetic command for the permission system
+    // Check grants directly — elevation is intentionally ignored so that
+    // mutating intents always require explicit approval on first use.
     let intent_cmd = format!("intent:{name}");
-    let permission = ctx.check_command_permission(&intent_cmd);
-
-    match permission {
-        orcs_component::CommandPermission::Allowed => Ok(()),
-        orcs_component::CommandPermission::Denied(reason) => Err(mlua::Error::RuntimeError(
-            format!("intent '{name}' denied: {reason}"),
-        )),
-        orcs_component::CommandPermission::RequiresApproval {
-            grant_pattern,
-            description: _,
-        } => {
-            let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
-
-            // Build human-readable description from intent args
-            let detail = build_intent_description(name, args);
-
-            tracing::info!(
-                approval_id = %approval_id,
-                intent = %name,
-                grant_pattern = %grant_pattern,
-                "intent requires approval, suspending"
-            );
-
-            Err(mlua::Error::ExternalError(std::sync::Arc::new(
-                ComponentError::Suspended {
-                    approval_id,
-                    grant_pattern,
-                    pending_request: serde_json::json!({
-                        "command": intent_cmd,
-                        "description": detail,
-                    }),
-                },
-            )))
-        }
+    if ctx.is_command_granted(&intent_cmd) {
+        return Ok(());
     }
+
+    // Not yet granted → suspend for HIL approval
+    let grant_pattern = intent_cmd.clone();
+    let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+    let detail = build_intent_description(name, args);
+
+    tracing::info!(
+        approval_id = %approval_id,
+        intent = %name,
+        grant_pattern = %grant_pattern,
+        "intent requires approval, suspending"
+    );
+
+    Err(mlua::Error::ExternalError(std::sync::Arc::new(
+        ComponentError::Suspended {
+            approval_id,
+            grant_pattern,
+            pending_request: serde_json::json!({
+                "command": intent_cmd,
+                "description": detail,
+            }),
+        },
+    )))
 }
 
 /// Builds a human-readable description for an intent approval request.

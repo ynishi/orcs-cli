@@ -1022,6 +1022,13 @@ impl ChildContext for ChildContextImpl {
         self.capabilities
     }
 
+    fn is_command_granted(&self, cmd: &str) -> bool {
+        match &self.grants {
+            Some(grants) => grants.is_granted(cmd).unwrap_or(false),
+            None => false,
+        }
+    }
+
     fn grant_command(&self, pattern: &str) {
         self.grant_command_inner(pattern);
     }
