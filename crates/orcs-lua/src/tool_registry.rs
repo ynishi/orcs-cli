@@ -20,10 +20,12 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::error::LuaError;
 use crate::types::serde_json_to_lua;
 use mlua::{Lua, Table};
+use orcs_component::tool::RustTool;
 use orcs_component::ComponentError;
 use orcs_types::intent::{IntentDef, IntentResolver};
 
@@ -36,10 +38,17 @@ use orcs_types::intent::{IntentDef, IntentResolver};
 ///
 /// Uses `Vec` for ordered iteration and `HashMap<String, usize>` index
 /// for O(1) name lookup.
+///
+/// For `IntentResolver::Internal` tools, the registry also stores
+/// `Arc<dyn RustTool>` instances for direct Rust dispatch (no Lua roundtrip).
 pub struct IntentRegistry {
     defs: Vec<IntentDef>,
     /// Maps intent name → index in `defs` for O(1) lookup.
     index: HashMap<String, usize>,
+    /// Maps intent name → RustTool for Internal dispatch.
+    /// Not all Internal intents have a RustTool (e.g., `exec`
+    /// retains its Lua dispatch path for per-command HIL approval).
+    tools: HashMap<String, Arc<dyn RustTool>>,
 }
 
 impl Default for IntentRegistry {
@@ -51,18 +60,35 @@ impl Default for IntentRegistry {
 impl IntentRegistry {
     /// Create a new registry pre-populated with the 8 builtin tools.
     pub fn new() -> Self {
-        let defs = builtin_intent_defs();
+        let builtin_tools = crate::builtin_tools::builtin_rust_tools();
+
+        // Collect IntentDefs from RustTool instances (7 file tools)
+        let mut defs: Vec<IntentDef> = builtin_tools.iter().map(|t| t.intent_def()).collect();
+        let tools: HashMap<String, Arc<dyn RustTool>> = builtin_tools
+            .into_iter()
+            .map(|t| (t.name().to_string(), t))
+            .collect();
+
+        // Add exec IntentDef (no RustTool — retains Lua dispatch for HIL)
+        defs.push(exec_intent_def());
+
         let index = defs
             .iter()
             .enumerate()
             .map(|(i, d)| (d.name.clone(), i))
             .collect();
-        Self { defs, index }
+
+        Self { defs, index, tools }
     }
 
     /// Look up an intent definition by name. O(1).
     pub fn get(&self, name: &str) -> Option<&IntentDef> {
         self.index.get(name).map(|&i| &self.defs[i])
+    }
+
+    /// Look up a RustTool by name. O(1).
+    pub fn get_tool(&self, name: &str) -> Option<&Arc<dyn RustTool>> {
+        self.tools.get(name)
     }
 
     /// Register a new intent definition. Returns error if name is already taken.
@@ -73,6 +99,16 @@ impl IntentRegistry {
         let idx = self.defs.len();
         self.index.insert(def.name.clone(), idx);
         self.defs.push(def);
+        Ok(())
+    }
+
+    /// Register a RustTool (creates IntentDef automatically).
+    /// Returns error if name is already taken.
+    pub fn register_tool(&mut self, tool: Arc<dyn RustTool>) -> Result<(), String> {
+        let def = tool.intent_def();
+        let name = def.name.clone();
+        self.register(def)?;
+        self.tools.insert(name, tool);
         Ok(())
     }
 
@@ -92,97 +128,29 @@ impl IntentRegistry {
     }
 }
 
-// ── Builtin IntentDefs (8 tools) ─────────────────────────────────────
+// ── Exec IntentDef (not a RustTool — per-command HIL) ────────────────
 
-/// Helper: create a JSON Schema for a tool with the given properties.
-fn json_schema(properties: &[(&str, &str, bool)]) -> serde_json::Value {
-    let mut props = serde_json::Map::new();
-    let mut required = Vec::new();
-
-    for &(name, description, is_required) in properties {
-        props.insert(
-            name.to_string(),
-            serde_json::json!({
-                "type": "string",
-                "description": description,
-            }),
-        );
-        if is_required {
-            required.push(serde_json::Value::String(name.to_string()));
-        }
+/// The `exec` tool IntentDef.
+///
+/// `exec` is NOT a RustTool because its per-command approval flow
+/// requires `ChildContext` / `ComponentError::Suspended`, which is
+/// tightly coupled to the Lua runtime. It retains the Lua dispatch path.
+fn exec_intent_def() -> IntentDef {
+    IntentDef {
+        name: "exec".into(),
+        description: "Execute shell command. cwd = project root.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "string",
+                    "description": "Shell command to execute",
+                }
+            },
+            "required": ["cmd"],
+        }),
+        resolver: IntentResolver::Internal,
     }
-
-    serde_json::json!({
-        "type": "object",
-        "properties": props,
-        "required": required,
-    })
-}
-
-/// The 8 builtin tool definitions as IntentDefs.
-fn builtin_intent_defs() -> Vec<IntentDef> {
-    vec![
-        IntentDef {
-            name: "read".into(),
-            description: "Read file contents. Path relative to project root.".into(),
-            parameters: json_schema(&[("path", "File path to read", true)]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "write".into(),
-            description: "Write file contents (atomic). Creates parent dirs.".into(),
-            parameters: json_schema(&[
-                ("path", "File path to write", true),
-                ("content", "Content to write", true),
-            ]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "grep".into(),
-            description: "Search with regex. Path can be file or directory (recursive).".into(),
-            parameters: json_schema(&[
-                ("pattern", "Regex pattern to search for", true),
-                ("path", "File or directory to search in", true),
-            ]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "glob".into(),
-            description: "Find files by glob pattern. Dir defaults to project root.".into(),
-            parameters: json_schema(&[
-                ("pattern", "Glob pattern (e.g. '**/*.rs')", true),
-                ("dir", "Base directory (defaults to project root)", false),
-            ]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "mkdir".into(),
-            description: "Create directory (with parents).".into(),
-            parameters: json_schema(&[("path", "Directory path to create", true)]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "remove".into(),
-            description: "Remove file or directory.".into(),
-            parameters: json_schema(&[("path", "Path to remove", true)]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "mv".into(),
-            description: "Move / rename file or directory.".into(),
-            parameters: json_schema(&[
-                ("src", "Source path", true),
-                ("dst", "Destination path", true),
-            ]),
-            resolver: IntentResolver::Internal,
-        },
-        IntentDef {
-            name: "exec".into(),
-            description: "Execute shell command. cwd = project root.".into(),
-            parameters: json_schema(&[("cmd", "Shell command to execute", true)]),
-            resolver: IntentResolver::Internal,
-        },
-    ]
 }
 
 // ── Dispatch ─────────────────────────────────────────────────────────
@@ -238,19 +206,15 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
 /// After the user approves, `GrantPolicy::grant("intent:<name>")` is persisted by
 /// the ChannelRunner, so subsequent calls for the same intent are auto-allowed.
 ///
-/// # Exempt intents
+/// # Caller responsibility
 ///
-/// - `read`, `grep`, `glob` — read-only, no approval needed
-/// - `exec` — has its own per-command approval flow in `ctx_fns.rs`
-fn check_intent_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()> {
-    // Read-only intents and exec (own approval) skip this check
-    if matches!(name, "read" | "grep" | "glob" | "exec") {
-        return Ok(());
-    }
-
+/// The caller (`dispatch_internal`) must filter out exempt intents (exec,
+/// read-only tools) BEFORE calling this function. This avoids a redundant
+/// registry lookup — the caller already holds the tool reference.
+fn check_mutation_approval(lua: &Lua, name: &str, args: &Table) -> mlua::Result<()> {
     // Access ChildContext from app_data. If not set (e.g., tests without
     // Component context), fall through to permissive mode.
-    let wrapper = match lua.app_data_ref::<crate::cap_tools::ContextWrapper>() {
+    let wrapper = match lua.app_data_ref::<crate::context_wrapper::ContextWrapper>() {
         Some(w) => w,
         None => return Ok(()),
     };
@@ -304,63 +268,126 @@ fn build_intent_description(name: &str, args: &Table) -> String {
     }
 }
 
-/// Dispatches an Internal intent to the corresponding `orcs.*` Lua function.
+/// Dispatches an Internal intent.
 ///
-/// Each builtin tool has a different Lua function signature, so tool-specific
-/// argument extraction is necessary. This is an implementation detail of
-/// the Internal resolver — hidden behind the unified dispatch_tool().
+/// For tools with a [`RustTool`] implementation (7 file tools), dispatches
+/// directly in Rust — no Lua roundtrip. Falls back to Lua dispatch for
+/// `exec` (per-command HIL approval) and any future Internal-only intents.
 ///
 /// Mutating intents (write, remove, mv, mkdir) are subject to HIL approval
-/// via [`check_intent_approval`]. Read-only intents and `exec` (which has
+/// via [`check_mutation_approval`]. Read-only intents and `exec` (which has
 /// its own per-command approval flow) skip this check.
 fn dispatch_internal(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
-    // HIL approval for mutating intents (write, remove, mv, mkdir).
-    // exec is excluded — it has its own per-command approval in ctx_fns.
-    // read, grep, glob are read-only and exempt.
-    check_intent_approval(lua, name, args)?;
+    // Single registry lookup — used for both approval check and dispatch.
+    let tool = {
+        let registry = ensure_registry(lua)?;
+        registry.get_tool(name).cloned()
+    };
 
+    // HIL approval for mutating intents (write, remove, mv, mkdir).
+    // Exempt: exec (own per-command approval), read-only tools.
+    if name != "exec" {
+        let is_read_only = tool.as_ref().is_some_and(|t| t.is_read_only());
+        if !is_read_only {
+            check_mutation_approval(lua, name, args)?;
+        }
+    }
+
+    if let Some(tool) = tool {
+        return dispatch_rust_tool(lua, &*tool, args);
+    }
+
+    // Fallback to Lua dispatch (exec, future Internal-only intents).
+    dispatch_internal_lua(lua, name, args)
+}
+
+/// Dispatches a RustTool: capability check → execute → convert to Lua table.
+///
+/// Used by `dispatch_internal` (for `orcs.dispatch` calls) and by
+/// positional wrapper functions (`orcs.read(path)` etc.) in `tools.rs`.
+///
+/// # Lock scope
+///
+/// When a [`ContextWrapper`] is present in `app_data`, the inner
+/// `Mutex<Box<dyn ChildContext>>` is held for the entire duration of
+/// `tool.execute()`. This means:
+///
+/// - **Tool authors must NOT access `ContextWrapper` from within
+///   `execute()`** — doing so would deadlock (`parking_lot::Mutex`
+///   is non-reentrant).
+/// - The `ToolContext` passed to `execute()` already provides
+///   `child_ctx()` for any runtime interaction the tool may need.
+/// - For the 7 builtin file tools (synchronous I/O), this lock
+///   duration is negligible. Custom tools with long-running I/O
+///   should consider whether holding the lock is acceptable.
+pub(crate) fn dispatch_rust_tool(
+    lua: &Lua,
+    tool: &dyn RustTool,
+    args: &Table,
+) -> mlua::Result<Table> {
+    use crate::context_wrapper::ContextWrapper;
+    use orcs_component::tool::{ToolContext, ToolError};
+
+    // Prepare sandbox and args before locking ContextWrapper.
+    let sandbox: Arc<dyn orcs_runtime::sandbox::SandboxPolicy> = Arc::clone(
+        &*lua
+            .app_data_ref::<Arc<dyn orcs_runtime::sandbox::SandboxPolicy>>()
+            .ok_or_else(|| mlua::Error::RuntimeError("sandbox not available".into()))?,
+    );
+    let json_args = crate::types::lua_to_json(mlua::Value::Table(args.clone()), lua)?;
+
+    let cap = tool.required_capability();
+
+    // Single lock scope: capability check + execute.
+    // When ContextWrapper is absent (tests without Component context),
+    // runs in permissive mode — no lock needed.
+    let exec_result: Result<serde_json::Value, ToolError> =
+        match lua.app_data_ref::<ContextWrapper>() {
+            Some(wrapper) => {
+                let guard = wrapper.0.lock();
+                let child_ctx: &dyn orcs_component::ChildContext = &**guard;
+
+                if !child_ctx.capabilities().contains(cap) {
+                    Err(ToolError::new(format!(
+                        "permission denied: {cap} not granted"
+                    )))
+                } else {
+                    let ctx = ToolContext::new(&*sandbox).with_child_ctx(child_ctx);
+                    tool.execute(json_args, &ctx)
+                }
+            }
+            None => {
+                let ctx = ToolContext::new(&*sandbox);
+                tool.execute(json_args, &ctx)
+            }
+        };
+
+    let result_table = lua.create_table()?;
+    match exec_result {
+        Ok(value) => {
+            result_table.set("ok", true)?;
+            // Merge result fields into the table.
+            if let Some(obj) = value.as_object() {
+                for (k, v) in obj {
+                    let lua_val = crate::types::serde_json_to_lua(v, lua)?;
+                    result_table.set(k.as_str(), lua_val)?;
+                }
+            }
+        }
+        Err(e) => {
+            result_table.set("ok", false)?;
+            result_table.set("error", e.message().to_string())?;
+        }
+    }
+
+    Ok(result_table)
+}
+
+/// Lua-based dispatch fallback (exec and future Internal-only intents).
+fn dispatch_internal_lua(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
     let orcs: Table = lua.globals().get("orcs")?;
 
     match name {
-        "read" => {
-            let path: String = get_required_arg(args, "path")?;
-            let f: mlua::Function = orcs.get("read")?;
-            f.call(path)
-        }
-        "write" => {
-            let path: String = get_required_arg(args, "path")?;
-            let content: String = get_required_arg(args, "content")?;
-            let f: mlua::Function = orcs.get("write")?;
-            f.call((path, content))
-        }
-        "grep" => {
-            let pattern: String = get_required_arg(args, "pattern")?;
-            let path: String = get_required_arg(args, "path")?;
-            let f: mlua::Function = orcs.get("grep")?;
-            f.call((pattern, path))
-        }
-        "glob" => {
-            let pattern: String = get_required_arg(args, "pattern")?;
-            let dir: Option<String> = args.get("dir").ok();
-            let f: mlua::Function = orcs.get("glob")?;
-            f.call((pattern, dir))
-        }
-        "mkdir" => {
-            let path: String = get_required_arg(args, "path")?;
-            let f: mlua::Function = orcs.get("mkdir")?;
-            f.call(path)
-        }
-        "remove" => {
-            let path: String = get_required_arg(args, "path")?;
-            let f: mlua::Function = orcs.get("remove")?;
-            f.call(path)
-        }
-        "mv" => {
-            let src: String = get_required_arg(args, "src")?;
-            let dst: String = get_required_arg(args, "dst")?;
-            let f: mlua::Function = orcs.get("mv")?;
-            f.call((src, dst))
-        }
         "exec" => {
             let cmd: String = get_required_arg(args, "cmd")?;
             let f: mlua::Function = orcs.get("exec")?;
@@ -460,7 +487,7 @@ fn dispatch_component(
 // ── Registry Helpers ─────────────────────────────────────────────────
 
 /// Ensure IntentRegistry exists in app_data. Returns a reference.
-fn ensure_registry(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, IntentRegistry>> {
+pub(crate) fn ensure_registry(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, IntentRegistry>> {
     if lua.app_data_ref::<IntentRegistry>().is_none() {
         lua.set_app_data(IntentRegistry::new());
     }
@@ -1001,13 +1028,21 @@ mod tests {
         let (_, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
-        let result = lua
+        // Missing required arg returns {ok: false, error: "..."} (not a Lua error).
+        // Validation is handled by RustTool::execute, which returns ToolError
+        // translated to a result table — consistent with other tool errors.
+        let result: Table = lua
             .load(r#"return orcs.dispatch("read", {})"#)
-            .eval::<Table>();
+            .eval()
+            .expect("dispatch should return result table, not throw");
 
-        assert!(result.is_err());
-        let err = result.expect_err("should error on missing arg").to_string();
-        assert!(err.contains("missing required argument"), "got: {err}");
+        let ok: bool = result.get("ok").expect("should have 'ok' field");
+        assert!(!ok, "dispatch with missing arg should return ok=false");
+        let err: String = result.get("error").expect("should have 'error' field");
+        assert!(
+            err.contains("missing required argument"),
+            "error should mention missing arg, got: {err}"
+        );
     }
 
     // --- tool_schemas tests (backward compat) ---
@@ -1470,6 +1505,325 @@ mod tests {
             data.get::<String>("captured_op").expect("captured_op"),
             "execute",
             "operation should default to 'execute'"
+        );
+    }
+
+    // --- register_tool tests ---
+
+    #[test]
+    fn register_tool_adds_intent_and_tool() {
+        use orcs_component::tool::{RustTool, ToolContext, ToolError};
+        use orcs_component::Capability;
+
+        struct PingTool;
+
+        impl RustTool for PingTool {
+            fn name(&self) -> &str {
+                "ping"
+            }
+            fn description(&self) -> &str {
+                "Returns pong"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            fn required_capability(&self) -> Capability {
+                Capability::READ
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &ToolContext<'_>,
+            ) -> Result<serde_json::Value, ToolError> {
+                Ok(serde_json::json!({"reply": "pong"}))
+            }
+        }
+
+        let mut registry = IntentRegistry::new();
+        assert_eq!(registry.len(), 8, "starts with 8 builtins");
+
+        registry
+            .register_tool(Arc::new(PingTool))
+            .expect("should register ping tool");
+
+        assert_eq!(registry.len(), 9, "should now have 9");
+        assert!(registry.get("ping").is_some(), "IntentDef should exist");
+        assert!(registry.get_tool("ping").is_some(), "RustTool should exist");
+        assert_eq!(
+            registry.get("ping").expect("ping def").resolver,
+            IntentResolver::Internal,
+            "resolver should be Internal"
+        );
+    }
+
+    #[test]
+    fn register_tool_duplicate_fails() {
+        use orcs_component::tool::{RustTool, ToolContext, ToolError};
+        use orcs_component::Capability;
+
+        struct DupTool;
+
+        impl RustTool for DupTool {
+            fn name(&self) -> &str {
+                "read"
+            }
+            fn description(&self) -> &str {
+                "duplicate of builtin"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            fn required_capability(&self) -> Capability {
+                Capability::READ
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &ToolContext<'_>,
+            ) -> Result<serde_json::Value, ToolError> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let mut registry = IntentRegistry::new();
+        let err = registry
+            .register_tool(Arc::new(DupTool))
+            .expect_err("should reject duplicate");
+        assert!(
+            err.contains("already registered"),
+            "error should mention duplicate, got: {err}"
+        );
+    }
+
+    // --- dispatch_rust_tool: integer type preservation ---
+
+    #[test]
+    fn grep_dispatch_preserves_integer_line_number() {
+        let (root, sandbox) = test_sandbox();
+        fs::write(root.join("nums.txt"), "alpha\nbeta\nalpha again\n")
+            .expect("should write test file");
+
+        let lua = setup_lua(sandbox);
+        let result: Table = lua
+            .load(format!(
+                r#"return orcs.dispatch("grep", {{pattern="alpha", path="{}"}})"#,
+                root.join("nums.txt").display()
+            ))
+            .eval()
+            .expect("dispatch grep should succeed");
+
+        assert!(result.get::<bool>("ok").expect("should have ok"));
+
+        let matches: Table = result.get("matches").expect("should have matches");
+        let first: Table = matches.get(1).expect("should have first match");
+
+        // Verify line_number is Lua integer (not float).
+        // mlua's get::<i64> succeeds only for Lua integers.
+        let line_num: i64 = first
+            .get("line_number")
+            .expect("line_number should be accessible as i64");
+        assert_eq!(line_num, 1, "first match should be line 1");
+
+        // Also verify count is integer.
+        let count: i64 = result
+            .get("count")
+            .expect("count should be accessible as i64");
+        assert_eq!(count, 2, "should find 2 matches");
+    }
+
+    // --- dispatch_rust_tool: capability check ---
+
+    /// Minimal mock ChildContext for testing capability gating.
+    #[derive(Debug, Clone)]
+    struct CapTestContext {
+        caps: orcs_component::Capability,
+    }
+
+    impl orcs_component::ChildContext for CapTestContext {
+        fn parent_id(&self) -> &str {
+            "cap-test"
+        }
+        fn emit_output(&self, _msg: &str) {}
+        fn emit_output_with_level(&self, _msg: &str, _level: &str) {}
+        fn child_count(&self) -> usize {
+            0
+        }
+        fn max_children(&self) -> usize {
+            0
+        }
+        fn spawn_child(
+            &self,
+            _config: orcs_component::ChildConfig,
+        ) -> Result<Box<dyn orcs_component::ChildHandle>, orcs_component::SpawnError> {
+            Err(orcs_component::SpawnError::Internal("stub".into()))
+        }
+        fn send_to_child(
+            &self,
+            _id: &str,
+            _input: serde_json::Value,
+        ) -> Result<orcs_component::ChildResult, orcs_component::RunError> {
+            Err(orcs_component::RunError::NotFound("stub".into()))
+        }
+        fn capabilities(&self) -> orcs_component::Capability {
+            self.caps
+        }
+        fn check_command_permission(&self, _cmd: &str) -> orcs_component::CommandPermission {
+            orcs_component::CommandPermission::Denied("stub".into())
+        }
+        fn can_execute_command(&self, _cmd: &str) -> bool {
+            false
+        }
+        fn can_spawn_child_auth(&self) -> bool {
+            false
+        }
+        fn can_spawn_runner_auth(&self) -> bool {
+            false
+        }
+        fn grant_command(&self, _pattern: &str) {}
+        fn spawn_runner_from_script(
+            &self,
+            _script: &str,
+            _id: Option<&str>,
+        ) -> Result<(orcs_types::ChannelId, String), orcs_component::SpawnError> {
+            Err(orcs_component::SpawnError::Internal("stub".into()))
+        }
+        fn clone_box(&self) -> Box<dyn orcs_component::ChildContext> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn dispatch_rust_tool_denies_without_capability() {
+        let (root, sandbox) = test_sandbox();
+        fs::write(root.join("secret.txt"), "classified").expect("should write test file");
+
+        let lua = setup_lua(sandbox);
+
+        // Set ContextWrapper with NO capabilities.
+        use crate::context_wrapper::ContextWrapper;
+        use parking_lot::Mutex;
+        let ctx: Box<dyn orcs_component::ChildContext> = Box::new(CapTestContext {
+            caps: orcs_component::Capability::empty(),
+        });
+        lua.set_app_data(ContextWrapper(Arc::new(Mutex::new(ctx))));
+
+        // read requires READ capability — should be denied.
+        let result: Table = lua
+            .load(format!(
+                r#"return orcs.dispatch("read", {{path="{}"}})"#,
+                root.join("secret.txt").display()
+            ))
+            .eval()
+            .expect("dispatch should return result table, not throw");
+
+        let ok: bool = result.get("ok").expect("should have ok");
+        assert!(!ok, "should be denied");
+        let err: String = result.get("error").expect("should have error");
+        assert!(
+            err.contains("permission denied"),
+            "error should mention permission denied, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dispatch_rust_tool_allows_with_capability() {
+        let (root, sandbox) = test_sandbox();
+        fs::write(root.join("allowed.txt"), "public data").expect("should write test file");
+
+        let lua = setup_lua(sandbox);
+
+        // Set ContextWrapper with READ capability.
+        use crate::context_wrapper::ContextWrapper;
+        use parking_lot::Mutex;
+        let ctx: Box<dyn orcs_component::ChildContext> = Box::new(CapTestContext {
+            caps: orcs_component::Capability::READ,
+        });
+        lua.set_app_data(ContextWrapper(Arc::new(Mutex::new(ctx))));
+
+        let result: Table = lua
+            .load(format!(
+                r#"return orcs.dispatch("read", {{path="{}"}})"#,
+                root.join("allowed.txt").display()
+            ))
+            .eval()
+            .expect("dispatch should return result table");
+
+        let ok: bool = result.get("ok").expect("should have ok");
+        assert!(ok, "should succeed with READ capability");
+        let content: String = result.get("content").expect("should have content");
+        assert_eq!(content, "public data");
+    }
+
+    #[test]
+    fn positional_write_denied_with_read_only_cap() {
+        let (root, sandbox) = test_sandbox();
+
+        let lua = setup_lua(sandbox);
+
+        // Set ContextWrapper with READ only — WRITE not granted.
+        // Uses positional orcs.write() which goes directly to dispatch_rust_tool
+        // (bypassing HIL approval in dispatch_internal).
+        use crate::context_wrapper::ContextWrapper;
+        use parking_lot::Mutex;
+        let ctx: Box<dyn orcs_component::ChildContext> = Box::new(CapTestContext {
+            caps: orcs_component::Capability::READ,
+        });
+        lua.set_app_data(ContextWrapper(Arc::new(Mutex::new(ctx))));
+
+        let result: Table = lua
+            .load(format!(
+                r#"return orcs.write("{}", "hacked")"#,
+                root.join("nope.txt").display()
+            ))
+            .eval()
+            .expect("positional write should return result table");
+
+        let ok: bool = result.get("ok").expect("should have ok");
+        assert!(!ok, "write should be denied with READ-only cap");
+        let err: String = result.get("error").expect("should have error");
+        assert!(
+            err.contains("permission denied"),
+            "error should mention permission denied, got: {err}"
+        );
+    }
+
+    // --- dispatch_rust_tool: positional wrapper with capability ---
+
+    #[test]
+    fn positional_read_denied_without_capability() {
+        let (root, sandbox) = test_sandbox();
+        fs::write(root.join("pos_secret.txt"), "restricted").expect("should write test file");
+
+        let lua = setup_lua(sandbox);
+
+        use crate::context_wrapper::ContextWrapper;
+        use parking_lot::Mutex;
+        let ctx: Box<dyn orcs_component::ChildContext> = Box::new(CapTestContext {
+            caps: orcs_component::Capability::empty(),
+        });
+        lua.set_app_data(ContextWrapper(Arc::new(Mutex::new(ctx))));
+
+        // orcs.read() positional wrapper should also check capability.
+        let result: Table = lua
+            .load(format!(
+                r#"return orcs.read("{}")"#,
+                root.join("pos_secret.txt").display()
+            ))
+            .eval()
+            .expect("positional read should return result table");
+
+        let ok: bool = result.get("ok").expect("should have ok");
+        assert!(!ok, "positional read should be denied");
+        let err: String = result.get("error").expect("should have error");
+        assert!(
+            err.contains("permission denied"),
+            "error should mention permission denied, got: {err}"
         );
     }
 }
