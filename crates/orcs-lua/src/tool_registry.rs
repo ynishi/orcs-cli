@@ -503,7 +503,7 @@ pub fn generate_descriptions(lua: &Lua) -> String {
         Err(_) => return "IntentRegistry not available.\n".to_string(),
     };
 
-    let mut out = String::from("Available tools (use via orcs.dispatch):\n\n");
+    let mut out = String::from("Available tools:\n\n");
 
     for def in registry.all() {
         // Extract argument names from JSON Schema
@@ -741,9 +741,8 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
     })?;
     orcs_table.set("register_intent", register_fn)?;
 
-    // orcs.tool_descriptions() -> formatted text
-    let desc = generate_descriptions(lua);
-    let tool_desc_fn = lua.create_function(move |_, ()| Ok(desc.clone()))?;
+    // orcs.tool_descriptions() -> formatted text (dynamic: re-reads registry each call)
+    let tool_desc_fn = lua.create_function(|lua, ()| Ok(generate_descriptions(lua)))?;
     orcs_table.set("tool_descriptions", tool_desc_fn)?;
 
     Ok(())

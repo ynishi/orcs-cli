@@ -285,6 +285,15 @@ impl OrcsAppBuilder {
                 (SessionAsset::new(), false, 0)
             };
 
+        // Build builtins map from embedded FILES for spawn_runner({ builtin = "..." })
+        // Wrapped in Arc to share across components without per-component HashMap clone.
+        let builtins_map: Arc<HashMap<String, String>> = Arc::new(
+            crate::builtins::FILES
+                .iter()
+                .map(|(path, content)| ((*path).to_string(), (*content).to_string()))
+                .collect(),
+        );
+
         // Spawn components driven by RuntimeHints
         let mut component_routes = HashMap::new();
 
@@ -320,9 +329,10 @@ impl OrcsAppBuilder {
             };
             let component_loader: Option<Arc<dyn orcs_component::ComponentLoader>> =
                 if hints.child_spawner {
-                    Some(Arc::new(orcs_lua::LuaComponentLoader::new(Arc::clone(
-                        &sandbox,
-                    ))))
+                    Some(Arc::new(
+                        orcs_lua::LuaComponentLoader::new(Arc::clone(&sandbox))
+                            .with_builtins(Arc::clone(&builtins_map)),
+                    ))
                 } else {
                     None
                 };

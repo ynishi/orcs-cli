@@ -146,12 +146,17 @@ impl LlmOpts {
             .and_then(|o| o.get::<u32>("max_retries").ok())
             .unwrap_or(DEFAULT_MAX_RETRIES);
 
+        // Note: get::<bool>(key) coerces Lua nil → false (Lua falsiness),
+        // so missing keys would return Ok(false) instead of Err.
+        // Use Option<bool> to distinguish nil (missing) from explicit false.
         let tools = opts
-            .and_then(|o| o.get::<bool>("tools").ok())
+            .and_then(|o| o.get::<Option<bool>>("tools").ok())
+            .flatten()
             .unwrap_or(true);
 
         let resolve = opts
-            .and_then(|o| o.get::<bool>("resolve").ok())
+            .and_then(|o| o.get::<Option<bool>>("resolve").ok())
+            .flatten()
             .unwrap_or(false);
 
         let max_tool_turns = opts
@@ -250,6 +255,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
     // Configure agent with short timeout
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout)))
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
@@ -281,6 +287,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
         Ok(resp) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
+            // Any HTTP response (including 4xx/5xx) confirms connectivity
             result.set("ok", true)?;
             result.set("status", status)?;
             result.set("latency_ms", latency.as_millis() as u64)?;
@@ -289,16 +296,10 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
             let latency = start.elapsed();
             result.set("latency_ms", latency.as_millis() as u64)?;
 
-            // If we got an HTTP response (non-2xx), connectivity is confirmed
-            if let ureq::Error::StatusCode(status) = &e {
-                result.set("ok", true)?;
-                result.set("status", *status)?;
-            } else {
-                let (error_kind, error_msg) = classify_ureq_error(&e);
-                result.set("ok", false)?;
-                result.set("error", error_msg)?;
-                result.set("error_kind", error_kind)?;
-            }
+            let (error_kind, error_msg) = classify_ureq_error(&e);
+            result.set("ok", false)?;
+            result.set("error", error_msg)?;
+            result.set("error_kind", error_kind)?;
         }
     }
 
@@ -434,6 +435,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     let session_id = resolve_session_id(lua, &llm_opts.session_id);
 
     // Build tools JSON from IntentRegistry (when opts.tools is true)
+    tracing::debug!(
+        "llm tools_enabled={}, resolve={}, provider={:?}",
+        llm_opts.tools,
+        llm_opts.resolve,
+        llm_opts.provider
+    );
     let tools_json = if llm_opts.tools {
         build_tools_for_provider(lua, llm_opts.provider)
     } else {
@@ -448,8 +455,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     );
 
     // Configure ureq agent (reused across retries and tool turns)
+    // http_status_as_error(false): receive 4xx/5xx as Ok(Response) so that
+    // parse_response_body can read the error body and should_retry_status
+    // can properly retry 429/5xx responses.
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(llm_opts.timeout)))
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
@@ -471,12 +482,17 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         };
 
         let body_str = request_body.to_string();
-        tracing::debug!(
-            "llm request turn={}: {} {} ({}B)",
+        let tool_count = tools_json
+            .as_ref()
+            .and_then(|t| t.as_array())
+            .map_or(0, |a| a.len());
+        tracing::info!(
+            "llm request turn={}: {} {} ({}B, tools={})",
             tool_turn,
             llm_opts.provider.chat_path(),
             llm_opts.model,
-            body_str.len()
+            body_str.len(),
+            tool_count
         );
 
         // Send with retry
@@ -493,6 +509,14 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
 
         let is_tool_use = parsed_resp.stop_reason == StopReason::ToolUse;
         let should_resolve = is_tool_use && llm_opts.resolve && !parsed_resp.intents.is_empty();
+        tracing::info!(
+            "llm response turn={}: stop_reason={:?}, intents={}, resolve={}, content_len={}",
+            tool_turn,
+            parsed_resp.stop_reason,
+            parsed_resp.intents.len(),
+            should_resolve,
+            parsed_resp.content.len()
+        );
 
         if should_resolve && tool_turn < llm_opts.max_tool_turns {
             // ── Auto-resolve: dispatch intents and continue loop ──
@@ -654,12 +678,58 @@ mod tests {
         assert_eq!(opts.max_retries, 0);
     }
 
+    // ── Boolean field nil-coercion tests ─────────────────────────────
+    //
+    // mlua coerces Lua nil → false for bool (Lua falsiness). Missing keys
+    // in a Lua table return nil, so get::<bool>("missing") → Ok(false).
+    // This makes unwrap_or(default) useless when default != false.
+    // We use Option<bool> + flatten to distinguish nil from explicit false.
+
     #[test]
-    fn llm_opts_resolve_defaults() {
+    fn llm_opts_tools_defaults_true_when_key_absent() {
         let lua = Lua::new();
-        let opts_tbl = lua.create_table().expect("create table");
-        let opts = LlmOpts::from_lua(Some(&opts_tbl)).expect("parse opts");
-        assert!(!opts.resolve, "resolve should default to false");
+        let tbl = lua.create_table().expect("create table");
+        // No "tools" key set — should default to true
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(
+            opts.tools,
+            "tools should default to true when key is absent"
+        );
+    }
+
+    #[test]
+    fn llm_opts_tools_defaults_true_when_opts_none() {
+        let opts = LlmOpts::from_lua(None).expect("parse None opts");
+        assert!(opts.tools, "tools should default to true when opts is None");
+    }
+
+    #[test]
+    fn llm_opts_tools_explicit_false() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("tools", false).expect("set tools");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(!opts.tools, "tools should be false when explicitly set");
+    }
+
+    #[test]
+    fn llm_opts_tools_explicit_true() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("tools", true).expect("set tools");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(opts.tools, "tools should be true when explicitly set");
+    }
+
+    #[test]
+    fn llm_opts_resolve_defaults_false_when_key_absent() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(
+            !opts.resolve,
+            "resolve should default to false when key is absent"
+        );
         assert_eq!(
             opts.max_tool_turns, DEFAULT_MAX_TOOL_TURNS,
             "max_tool_turns should default"
@@ -667,16 +737,23 @@ mod tests {
     }
 
     #[test]
-    fn llm_opts_resolve_custom() {
+    fn llm_opts_resolve_explicit_true() {
         let lua = Lua::new();
-        let opts_tbl = lua.create_table().expect("create table");
-        opts_tbl.set("resolve", true).expect("set resolve");
-        opts_tbl
-            .set("max_tool_turns", 3u32)
-            .expect("set max_tool_turns");
-        let opts = LlmOpts::from_lua(Some(&opts_tbl)).expect("parse opts");
-        assert!(opts.resolve, "resolve should be true");
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("resolve", true).expect("set resolve");
+        tbl.set("max_tool_turns", 3u32).expect("set max_tool_turns");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(opts.resolve, "resolve should be true when explicitly set");
         assert_eq!(opts.max_tool_turns, 3, "max_tool_turns should be 3");
+    }
+
+    #[test]
+    fn llm_opts_resolve_explicit_false() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("resolve", false).expect("set resolve");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert!(!opts.resolve, "resolve should be false when explicitly set");
     }
 
     // ── Deny stub test ─────────────────────────────────────────────────

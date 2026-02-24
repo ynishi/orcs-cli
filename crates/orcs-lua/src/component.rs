@@ -744,16 +744,35 @@ impl Component for LuaComponent {
 ///
 /// Allows creating LuaComponent instances from inline script content
 /// for use with ChildContext::spawn_runner_from_script().
+/// Optionally holds a builtin scripts map for name-based resolution.
 #[derive(Clone)]
 pub struct LuaComponentLoader {
     sandbox: Arc<dyn SandboxPolicy>,
+    builtins: Option<Arc<std::collections::HashMap<String, String>>>,
 }
 
 impl LuaComponentLoader {
     /// Creates a new LuaComponentLoader with the given sandbox policy.
     #[must_use]
     pub fn new(sandbox: Arc<dyn SandboxPolicy>) -> Self {
-        Self { sandbox }
+        Self {
+            sandbox,
+            builtins: None,
+        }
+    }
+
+    /// Attaches a builtin scripts map for name-based resolution.
+    ///
+    /// Keys are relative filenames (e.g. `"concierge.lua"`),
+    /// values are the full script content.
+    /// Wrapped in `Arc` to allow cheap cloning across components.
+    #[must_use]
+    pub fn with_builtins(
+        mut self,
+        builtins: Arc<std::collections::HashMap<String, String>>,
+    ) -> Self {
+        self.builtins = Some(builtins);
+        self
     }
 }
 
@@ -767,6 +786,12 @@ impl ComponentLoader for LuaComponentLoader {
         LuaComponent::from_script(script, Arc::clone(&self.sandbox))
             .map(|c| Box::new(c) as Box<dyn Component>)
             .map_err(|e| SpawnError::InvalidScript(e.to_string()))
+    }
+
+    fn resolve_builtin(&self, name: &str) -> Option<String> {
+        // Clones the script string on each resolve. Acceptable because this is
+        // called only once per spawn_runner_from_builtin invocation (not on a hot path).
+        self.builtins.as_ref()?.get(name).cloned()
     }
 }
 

@@ -646,6 +646,90 @@ mod emitter_tests {
     }
 }
 
+// --- LuaComponentLoader tests ---
+
+mod loader_tests {
+    use super::*;
+    use orcs_component::ComponentLoader;
+    use std::collections::HashMap;
+
+    #[test]
+    fn resolve_builtin_returns_script_when_present() {
+        let builtins = Arc::new(HashMap::from([
+            (
+                "test.lua".to_string(),
+                "return { id = 'test', subscriptions = {'Echo'}, on_request = function(r) return { success = true } end, on_signal = function(s) return 'Ignored' end }".to_string(),
+            ),
+        ]));
+        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+
+        let result = loader.resolve_builtin("test.lua");
+        assert!(result.is_some(), "should resolve existing builtin");
+        assert!(
+            result
+                .expect("already checked is_some")
+                .contains("id = 'test'"),
+            "resolved script should contain the component definition"
+        );
+    }
+
+    #[test]
+    fn resolve_builtin_returns_none_for_missing() {
+        let builtins = Arc::new(HashMap::from([(
+            "test.lua".to_string(),
+            "return {}".to_string(),
+        )]));
+        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+
+        assert!(
+            loader.resolve_builtin("nonexistent.lua").is_none(),
+            "should return None for missing builtin"
+        );
+    }
+
+    #[test]
+    fn resolve_builtin_returns_none_without_builtins() {
+        let loader = LuaComponentLoader::new(test_sandbox());
+
+        assert!(
+            loader.resolve_builtin("anything.lua").is_none(),
+            "should return None when no builtins configured"
+        );
+    }
+
+    #[test]
+    fn load_from_resolved_builtin_creates_component() {
+        let script = r#"
+            return {
+                id = "builtin-test",
+                subscriptions = {"Echo"},
+                on_request = function(req)
+                    return { success = true, data = { source = "builtin" } }
+                end,
+                on_signal = function(sig) return "Ignored" end,
+            }
+        "#;
+        let builtins = Arc::new(HashMap::from([(
+            "builtin_test.lua".to_string(),
+            script.to_string(),
+        )]));
+        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+
+        let resolved = loader
+            .resolve_builtin("builtin_test.lua")
+            .expect("should resolve builtin");
+        let component = loader
+            .load_from_script(&resolved, None)
+            .expect("should load component from resolved script");
+
+        assert!(
+            component.id().fqn().contains("builtin-test"),
+            "component FQN should contain 'builtin-test', got: {}",
+            component.id().fqn()
+        );
+    }
+}
+
 // --- JSON ↔ Lua conversion tests ---
 
 mod json_lua_conversion_tests {

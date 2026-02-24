@@ -572,6 +572,7 @@ pub(super) fn register(
 
     // orcs.spawn_runner(config) -> { ok, channel_id, fqn, error }
     // config = { script = "...", id = "optional-id" }
+    //        or { builtin = "concierge.lua", id = "optional-id" }
     // Spawns a Component as a separate ChannelRunner for parallel execution.
     // The returned `fqn` can be used immediately with orcs.request(fqn, ...).
     let ctx_clone = Arc::clone(&ctx);
@@ -597,16 +598,22 @@ pub(super) fn register(
             return Ok(result_table);
         }
 
-        // Parse config - script is required
-        let script: String = config
-            .get("script")
-            .map_err(|_| mlua::Error::RuntimeError("config.script required".into()))?;
-
         // ID is optional
         let id: Option<String> = config.get("id").ok();
 
+        // Resolve script: builtin name takes precedence over inline script
+        let spawn_result = if let Ok(builtin_name) = config.get::<String>("builtin") {
+            ctx_guard.spawn_runner_from_builtin(&builtin_name, id.as_deref())
+        } else if let Ok(script) = config.get::<String>("script") {
+            ctx_guard.spawn_runner_from_script(&script, id.as_deref())
+        } else {
+            return Err(mlua::Error::RuntimeError(
+                "config.builtin or config.script required".into(),
+            ));
+        };
+
         let result_table = lua.create_table()?;
-        match ctx_guard.spawn_runner_from_script(&script, id.as_deref()) {
+        match spawn_result {
             Ok((channel_id, fqn)) => {
                 result_table.set("ok", true)?;
                 result_table.set("channel_id", channel_id.to_string())?;

@@ -345,11 +345,23 @@ fn build_anthropic_body(
 ///
 /// Returns `None` if the registry is empty or not initialized.
 pub(super) fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<serde_json::Value> {
-    let registry = lua.app_data_ref::<IntentRegistry>()?;
+    let registry = match lua.app_data_ref::<IntentRegistry>() {
+        Some(r) => r,
+        None => {
+            tracing::warn!("build_tools_for_provider: IntentRegistry not found in app_data");
+            return None;
+        }
+    };
     if registry.is_empty() {
+        tracing::warn!("build_tools_for_provider: IntentRegistry is empty");
         return None;
     }
     let defs = registry.all();
+    tracing::debug!(
+        "build_tools_for_provider: {} intents for {:?}",
+        defs.len(),
+        provider
+    );
     let tools = match provider {
         Provider::Anthropic => build_tools_anthropic_format(defs),
         Provider::Ollama | Provider::OpenAI => build_tools_openai_format(defs),
