@@ -282,6 +282,8 @@ end
 --- Truncate a string to at most max_bytes bytes without splitting multi-byte
 --- UTF-8 characters.  Plain string.sub() can cut in the middle of a
 --- multi-byte sequence, producing invalid UTF-8 that Rust's String rejects.
+--- Note: equivalent logic exists in Rust (component.rs truncate_utf8).
+--- Duplicated here because Lua cannot call the Rust helper directly.
 local function utf8_truncate(s, max_bytes)
     if #s <= max_bytes then return s end
     local pos = max_bytes

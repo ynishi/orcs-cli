@@ -72,6 +72,8 @@ local function handle_process(payload)
             }, { timeout_ms = 600000 })
             if result and result.success then
                 summary = (result.data and result.data.response) or ""
+                cost = result.data and result.data.cost
+                sess_id = result.data and result.data.session_id
             else
                 err = (result and result.error) or "backend request failed"
             end

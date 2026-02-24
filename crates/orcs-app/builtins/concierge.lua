@@ -199,17 +199,6 @@ local function register_delegate_intent()
     end
 end
 
---- Get tool descriptions from IntentRegistry.
-local function fetch_tool_descriptions()
-    if orcs.tool_descriptions then
-        local td = orcs.tool_descriptions()
-        if td and td ~= "" then
-            return "## Available ORCS Tools\n" .. td
-        end
-    end
-    return ""
-end
-
 --- Assemble the full prompt with placement strategy.
 ---
 --- placement: "top" | "bottom" | "both" (default)
@@ -226,6 +215,13 @@ end
 ---   embedded context — focus here." Metrics (which include active agents,
 ---   provider state) are especially important to repeat since the model must
 ---   know its current operational state when generating the response.
+---
+---   NOTE: The duplication of system context is INTENTIONAL — it is the core
+---   mechanism that prevents LLM attention degradation over long contexts.
+---   The token cost increase (~2x system context) is a deliberate trade-off
+---   for maintaining instruction adherence.
+---   If future LLM architectures resolve the "lost in the middle" problem,
+---   revisit this strategy and consider switching to "top" as the default.
 ---
 --- Layout ("both"):
 ---   ┌── Top anchor ──────────────────────────────────────────────┐
