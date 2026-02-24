@@ -86,9 +86,10 @@
 //! let component = loader.load("echo")?;
 //! ```
 
-pub(crate) mod cap_tools;
+pub(crate) mod builtin_tools;
 mod child;
 mod component;
+pub(crate) mod context_wrapper;
 mod error;
 pub mod hook_helpers;
 pub mod http_command;

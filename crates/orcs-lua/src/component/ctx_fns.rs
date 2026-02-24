@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 /// Registers child-context functions into the `orcs` Lua table.
 ///
-/// Also overrides file tools with capability-gated versions via `cap_tools`.
+/// Also stores `ContextWrapper` for capability-gated dispatch via `dispatch_rust_tool`.
 pub(super) fn register(
     lua: &Lua,
     ctx: Arc<Mutex<Box<dyn ChildContext>>>,
@@ -34,10 +34,9 @@ pub(super) fn register(
     let orcs_table: Table = lua.globals().get("orcs")?;
     let sandbox_root = sandbox.root().to_path_buf();
 
-    // ── Override file tools with capability-gated versions ──────────
-    // Store context in app_data for shared cap_tools implementation.
-    lua.set_app_data(crate::cap_tools::ContextWrapper(Arc::clone(&ctx)));
-    crate::cap_tools::register_capability_gated_tools(lua, &orcs_table, &sandbox)?;
+    // ── Store ChildContext for capability-gated dispatch ────────────
+    // dispatch_rust_tool reads ContextWrapper from app_data for capability checks.
+    lua.set_app_data(crate::context_wrapper::ContextWrapper(Arc::clone(&ctx)));
 
     // Override orcs.exec with permission-checked version
     // This replaces the basic exec from register_orcs_functions
