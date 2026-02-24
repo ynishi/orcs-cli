@@ -1,7 +1,7 @@
 -- agent_mgr.lua
 -- Agent Manager component: routes UserInput to specialized workers.
 --
--- Architecture (Event-driven + RPC hybrid):
+-- Architecture (Event-driven + RPC hybrid, parent-child agent hierarchy):
 --   agent_mgr (Router Component, subscriptions=UserInput,DelegateResult)
 --     │
 --     ├─ @prefix commands → targeted RPC to specific components
@@ -9,29 +9,31 @@
 --     ├─ LLM tasks → emit "AgentTask" event (fire-and-forget, non-blocking)
 --     │       │
 --     │       ▼ (broadcast via EventBus)
---     │   llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
---     │     — receives AgentTask events via subscription
+--     │   concierge (spawned via orcs.spawn_runner({ builtin = "concierge.lua" }))
+--     │     — subscriptions=AgentTask
 --     │     — calls orcs.llm(resolve=true) for tool-use auto-dispatch
 --     │     — registers "delegate_task" IntentDef for LLM-initiated delegation
 --     │     — calls orcs.output() directly to display response (output_to_io inherited)
 --     │     — agent_mgr is NOT blocked during LLM processing
+--     │     — supports status RPC: busy, session_id, turn_count, last_cost, provider, model
 --     │
 --     ├─ Delegation → LLM tool_call("delegate_task") → agent_mgr.delegate()
 --     │       │          → emit "DelegateTask" event (fire-and-forget)
 --     │       ▼
---     │   delegate-worker (spawned via orcs.spawn_runner(), subscriptions=DelegateTask)
---     │     — receives DelegateTask events via subscription
+--     │   delegate-worker (spawned via orcs.spawn_runner({ builtin = "delegate_worker.lua" }))
+--     │     — subscriptions=DelegateTask
 --     │     — runs independent orcs.llm(resolve=true) session for the delegated task
 --     │     — calls orcs.output() directly to display results
 --     │     — emits "DelegateResult" event on completion
 --     │     — agent_mgr stores results for context injection in next turn
+--     │     — supports status RPC: busy, task_count, last_request_id, last_cost
 --     │
---     └─ init() → targeted RPC (ping) to llm-worker for health check
+--     └─ init() → targeted RPC (ping) to concierge for health check
 --
 -- Concierge mode:
 --   When concierge is set (e.g. concierge="custom::my_llm"), agent_mgr does NOT spawn
---   llm-worker. Instead, the external component (loaded via config.toml) subscribes
---   to "AgentTask" events and handles LLM processing independently.
+--   the builtin concierge. Instead, the external component (loaded via config.toml)
+--   subscribes to "AgentTask" events and handles LLM processing independently.
 --   delegate-worker IS always spawned (delegation is orthogonal to LLM backend).
 --
 -- Tool execution:
@@ -57,9 +59,15 @@
 --   git branch, working directory, timestamp
 --
 -- Prompt placement strategies (configurable via [components.settings.agent_mgr]):
---   top    — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [f:guard] [UserInput]
---   both   — [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Skills/Tools] [f:guard] [UserInput]  (default)
---   bottom — [f:system] [Metrics] [f:task] [History] [f:guard] [UserInput] [Skills/Tools]
+--   top    — [f:system][Metrics][Tools][f:task] [History][Delegation][f:guard][UserInput]
+--   bottom — [f:task][History] [f:system][Metrics][Tools][Delegation][f:guard][UserInput]
+--   both   — [f:system][Metrics][Tools][f:task] [History(100K)] [f:system][Metrics][Tools][f:task] [Delegation][f:guard][UserInput]  (default)
+--
+-- "both" literally places the full system context (f:system, Metrics, Skills/Tools)
+-- at BOTH top and bottom, sandwiching the long history. After ~100K tokens of history,
+-- the bottom anchor re-grounds the model on its identity, active agents, and tools.
+-- Metrics (active agents, provider state) are especially important to repeat.
+-- TODO: "auto" mode planned — auto(both_cond=N) switches "both"/"top" by context size.
 --
 -- ## Config: [components.settings.agent_mgr]
 --
@@ -82,10 +90,10 @@
 -- ## Concierge Mode (concierge setting)
 --
 -- When `concierge` is set to a component FQN (e.g. "custom::my_llm"), agent_mgr
--- replaces the built-in llm-worker with the specified external component:
+-- replaces the builtin concierge with the specified external component:
 --
---   1. llm-worker is NOT spawned (the concierge handles AgentTask events instead)
---   2. llm_* settings are UNUSED for main conversation (the concierge component
+--   1. Builtin concierge is NOT spawned (the external component handles AgentTask events)
+--   2. llm_* settings are UNUSED for main conversation (the external component
 --      manages its own LLM configuration independently)
 --
 -- The concierge component must:
@@ -105,7 +113,7 @@
 --
 -- ### Config Examples
 --
--- Built-in mode (default — uses llm-worker + orcs.llm for both):
+-- Built-in mode (default — uses builtin concierge + orcs.llm for both):
 --   [components.settings.agent_mgr]
 --   llm_provider = "ollama"
 --   llm_model    = "qwen2.5-coder:7b"
@@ -143,463 +151,6 @@
 --   cfg._global.ui.color         (bool)    — color output
 --   cfg._global.ui.emoji         (bool)    — emoji output
 
--- === Worker Scripts ===
-
--- LLM Worker: spawned as an independent Component via orcs.spawn_runner().
--- Has its own Lua VM, event loop, and ChannelRunner.
---
--- Communication: subscribes to "AgentTask" Extension events (broadcast).
--- agent_mgr emits AgentTask events; this worker receives them asynchronously.
--- Output: calls orcs.output() directly (IO output channel inherited from parent).
--- RPC: "ping" operation is still handled via targeted orcs.request() from init().
-local llm_worker_script = [[
-return {
-    id = "llm-worker",
-    namespace = "builtin",
-    subscriptions = {"AgentTask"},
-
-    -- Receives AgentTask events via subscription and targeted RPCs (ping).
-    -- operation="process" — main LLM processing (from AgentTask event)
-    --   NOTE: When invoked via event (fire-and-forget), the return value of
-    --   on_request is discarded by the runtime. Output and observability are
-    --   handled inside emit_success() / orcs.output_with_level().
-    -- operation="ping"    — lightweight connectivity check (from init RPC)
-    on_request = function(request)
-        local input = request.payload or {}
-        local operation = request.operation or "process"
-
-        -- Build LLM opts from config passed via event payload or RPC payload
-        local function build_llm_opts(input)
-            local opts = {}
-            local llm_cfg = input.llm_config or {}
-            if llm_cfg.provider   then opts.provider    = llm_cfg.provider end
-            if llm_cfg.model      then opts.model       = llm_cfg.model end
-            if llm_cfg.base_url   then opts.base_url    = llm_cfg.base_url end
-            if llm_cfg.api_key    then opts.api_key     = llm_cfg.api_key end
-            if llm_cfg.temperature then opts.temperature = llm_cfg.temperature end
-            if llm_cfg.max_tokens then opts.max_tokens  = llm_cfg.max_tokens end
-            if llm_cfg.timeout    then opts.timeout     = llm_cfg.timeout end
-            return opts
-        end
-
-        -- Output LLM response to IO and emit observability event
-        local function emit_success(message, llm_resp)
-            orcs.output(llm_resp.content or "")
-            orcs.emit_event("Extension", "llm_response", {
-                message = message,
-                response = llm_resp.content,
-                session_id = llm_resp.session_id,
-                cost = llm_resp.cost,
-                source = "llm-worker",
-            })
-            orcs.log("debug", string.format(
-                "llm-worker: completed (cost=%.4f, session=%s)",
-                llm_resp.cost or 0, llm_resp.session_id or "none"
-            ))
-        end
-
-        -- Ping: lightweight connectivity check (no tokens consumed)
-        if operation == "ping" then
-            local ping_opts = build_llm_opts(input)
-            local ping_resp = orcs.llm_ping(ping_opts)
-            return {
-                success = ping_resp.ok,
-                data = ping_resp,
-            }
-        end
-
-        local message = input.message or ""
-
-        -- Session resumption: skip full prompt assembly, send message directly
-        if input.session_id and input.session_id ~= "" then
-            orcs.log("debug", "llm-worker: resuming session " .. input.session_id:sub(1, 20))
-            local opts = build_llm_opts(input)
-            opts.session_id = input.session_id
-            opts.resolve = true
-            local llm_resp = orcs.llm(message, opts)
-            if llm_resp and llm_resp.ok then
-                emit_success(message, llm_resp)
-                return {
-                    success = true,
-                    data = {
-                        response = llm_resp.content,
-                        session_id = llm_resp.session_id,
-                        num_turns = llm_resp.num_turns,
-                        cost = llm_resp.cost,
-                        source = "llm-worker",
-                    },
-                }
-            else
-                local err = (llm_resp and llm_resp.error) or "llm resume failed"
-                orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
-                return { success = false, error = err }
-            end
-        end
-
-        -- First call: full prompt assembly
-        local history_context = input.history_context or ""
-        local delegation_context = input.delegation_context or ""
-        local placement = input.prompt_placement or "both"
-
-        -- 0a. Fetch foundation segments (system/task/guard from agent.md)
-        local f_system = ""
-        local f_task = ""
-        local f_guard = ""
-        local f_resp = orcs.request("foundation::foundation_manager", "get_all", {})
-        if f_resp and f_resp.success and f_resp.data then
-            f_system = f_resp.data.system or ""
-            f_task = f_resp.data.task or ""
-            f_guard = f_resp.data.guard or ""
-        else
-            orcs.log("debug", "llm-worker: foundation segments unavailable, proceeding without")
-        end
-
-        -- 0b. Fetch console metrics (git, cwd, timestamp)
-        local console_block = ""
-        local m_resp = orcs.request("metrics::console_metrics", "get_all", {})
-        if m_resp and m_resp.success and m_resp.formatted then
-            console_block = m_resp.formatted
-        else
-            orcs.log("debug", "llm-worker: console metrics unavailable, proceeding without")
-        end
-
-        -- 1. Gather system parts: skill recommendations + tool descriptions
-        local recommendation = ""
-        local skill_count = 0
-        local rec_resp = orcs.request("skill::skill_manager", "recommend", {
-            intent = message,
-            context = history_context,
-            limit = 5,
-        })
-        if rec_resp and rec_resp.success and rec_resp.data then
-            local skills = rec_resp.data
-            -- Note: lua.to_value() (mlua serde) may place array elements in
-            -- the hash part of the table, causing # to return 0.
-            -- Use skills[1] existence check instead of #skills > 0.
-            if type(skills) == "table" and skills[1] ~= nil then
-                local lines = {}
-                for _, s in ipairs(skills) do
-                    skill_count = skill_count + 1
-                    local line = "- **" .. (s.name or "?") .. "**"
-                    if s.description and s.description ~= "" then
-                        line = line .. ": " .. s.description
-                    end
-                    lines[#lines + 1] = line
-                end
-                recommendation = "[System Recommendation]\n"
-                    .. "The following skills are relevant to this task. "
-                    .. "Consider using them to assist the user:\n"
-                    .. table.concat(lines, "\n")
-
-                -- Register recommended skills as IntentDefs for tool-use resolution
-                local registered_names = {}
-                for _, s in ipairs(skills) do
-                    local reg = orcs.register_intent({
-                        name = s.name,
-                        description = (s.description or "") .. " [Skill: invoke to retrieve full instructions]",
-                        component = "skill::skill_manager",
-                        operation = "execute",
-                        params = {
-                            name = {
-                                type = "string",
-                                description = "Name of the skill to execute",
-                                required = true,
-                            },
-                        },
-                    })
-                    if reg and reg.ok then
-                        registered_names[#registered_names + 1] = s.name
-                        orcs.log("debug", "llm-worker: registered skill intent: " .. s.name)
-                    else
-                        local err_msg = (reg and reg.error) or (reg and tostring(reg)) or "nil returned"
-                        orcs.log("warn", "llm-worker: skill intent registration failed: " .. s.name
-                            .. " (" .. err_msg .. ")")
-                    end
-                end
-                if #registered_names > 0 then
-                    orcs.log("info", string.format(
-                        "llm-worker: registered %d skill intent(s): [%s]",
-                        #registered_names, table.concat(registered_names, ", ")
-                    ))
-                elseif skill_count > 0 then
-                    orcs.log("warn", string.format(
-                        "llm-worker: all %d skill intent registration(s) failed",
-                        skill_count
-                    ))
-                end
-            end
-        end
-
-        -- Register delegate_task intent: allows LLM to delegate work to a sub-agent.
-        -- The IntentDef routes to agent_mgr, which spawns/dispatches to delegate-worker.
-        local delegate_reg = orcs.register_intent({
-            name = "delegate_task",
-            description = "Delegate a task to an independent sub-agent that runs its own LLM session with tool access. "
-                .. "Use when the task requires separate investigation, research, or multi-step work "
-                .. "that would benefit from independent processing. The sub-agent works asynchronously; "
-                .. "results appear in your context on the next turn.",
-            component = "builtin::agent_mgr",
-            operation = "delegate",
-            timeout_ms = 600000,
-            params = {
-                description = {
-                    type = "string",
-                    description = "Detailed description of the task to delegate",
-                    required = true,
-                },
-                context = {
-                    type = "string",
-                    description = "Relevant context for the sub-agent (file paths, constraints, background)",
-                    required = false,
-                },
-            },
-        })
-        if delegate_reg and delegate_reg.ok then
-            orcs.log("debug", "llm-worker: registered delegate_task intent")
-        else
-            orcs.log("warn", "llm-worker: delegate_task intent registration failed: "
-                .. ((delegate_reg and delegate_reg.error) or "unknown"))
-        end
-
-        local tool_desc = ""
-        if orcs.tool_descriptions then
-            local td = orcs.tool_descriptions()
-            if td and td ~= "" then
-                tool_desc = "## Available ORCS Tools\n" .. td
-            end
-        end
-
-        -- 2. Compose system block (skills + tool descriptions)
-        local system_parts = {}
-        if recommendation ~= "" then
-            system_parts[#system_parts + 1] = recommendation
-        end
-        if tool_desc ~= "" then
-            system_parts[#system_parts + 1] = tool_desc
-        end
-        local system_full = table.concat(system_parts, "\n\n")
-
-        -- 3. Compose history block
-        local history_block = ""
-        if history_context ~= "" then
-            history_block = "## Recent Conversation\n" .. history_context
-        end
-
-        -- 3b. Compose delegation results block (from completed sub-agent tasks)
-        local delegation_block = ""
-        if delegation_context ~= "" then
-            delegation_block = delegation_context
-        end
-
-        -- 4. Assemble prompt based on placement strategy
-        --
-        -- Fixed positions:
-        --   f_system      → always at top (identity/core rules)
-        --   console_block → after f_system (workspace context)
-        --   f_task        → before history (project context)
-        --   f_guard       → just before user message (output constraints)
-        --
-        -- Placement strategy controls skill/tool block (system_full) position only.
-        local sections = {}
-
-        -- Foundation:system — always top
-        if f_system ~= "" then sections[#sections + 1] = f_system end
-
-        -- Console metrics — always after f_system
-        if console_block ~= "" then sections[#sections + 1] = console_block end
-
-        if placement == "top" then
-            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [f:guard] [UserInput]
-            if system_full ~= "" then sections[#sections + 1] = system_full end
-            if f_task ~= "" then sections[#sections + 1] = f_task end
-            if history_block ~= "" then sections[#sections + 1] = history_block end
-            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
-            if f_guard ~= "" then sections[#sections + 1] = f_guard end
-            sections[#sections + 1] = message
-
-        elseif placement == "bottom" then
-            -- [f:system] [Metrics] [f:task] [History] [Delegation] [f:guard] [UserInput] [Skills/Tools]
-            if f_task ~= "" then sections[#sections + 1] = f_task end
-            if history_block ~= "" then sections[#sections + 1] = history_block end
-            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
-            if f_guard ~= "" then sections[#sections + 1] = f_guard end
-            sections[#sections + 1] = message
-            if system_full ~= "" then sections[#sections + 1] = system_full end
-
-        else
-            -- "both" (default):
-            -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [Skills/Tools] [f:guard] [UserInput]
-            if system_full ~= "" then sections[#sections + 1] = system_full end
-            if f_task ~= "" then sections[#sections + 1] = f_task end
-            if history_block ~= "" then sections[#sections + 1] = history_block end
-            if delegation_block ~= "" then sections[#sections + 1] = delegation_block end
-            if system_full ~= "" then sections[#sections + 1] = system_full end
-            if f_guard ~= "" then sections[#sections + 1] = f_guard end
-            sections[#sections + 1] = message
-        end
-
-        local prompt = table.concat(sections, "\n\n")
-
-        orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
-            placement, skill_count, #history_context, #tool_desc,
-            #f_system, #f_task, #f_guard, #console_block
-        ))
-
-        -- 5. Call LLM via orcs.llm() with provider/model from config
-        -- Note: session_id is handled by the early-return path above;
-        -- this path is always a fresh first call.
-        local llm_opts = build_llm_opts(input)
-        -- Enable tool-use auto-resolution: LLM tool_use calls (skills, builtins)
-        -- are dispatched via IntentRegistry and results fed back automatically.
-        llm_opts.resolve = true
-        local llm_resp = orcs.llm(prompt, llm_opts)
-        if llm_resp and llm_resp.ok then
-            emit_success(message, llm_resp)
-            return {
-                success = true,
-                data = {
-                    response = llm_resp.content,
-                    session_id = llm_resp.session_id,
-                    num_turns = llm_resp.num_turns,
-                    cost = llm_resp.cost,
-                    source = "llm-worker",
-                },
-            }
-        else
-            local err = (llm_resp and llm_resp.error) or "llm call failed"
-            orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
-            return {
-                success = false,
-                error = err,
-            }
-        end
-    end,
-
-    on_signal = function(signal)
-        if signal.kind == "Veto" then
-            return "Abort"
-        end
-        return "Handled"
-    end,
-}
-]]
-
--- Delegate Worker: spawned as an independent Component for task delegation.
--- Has its own Lua VM, event loop, and ChannelRunner.
---
--- Communication: subscribes to "DelegateTask" Extension events (broadcast).
--- agent_mgr emits DelegateTask events when LLM calls delegate_task tool;
--- this worker receives them asynchronously and processes with its own LLM session.
--- Output: calls orcs.output() directly (IO output channel inherited from parent).
--- Completion: emits "DelegateResult" event for agent_mgr context injection.
-local delegate_worker_script = [[
-return {
-    id = "delegate-worker",
-    namespace = "builtin",
-    subscriptions = {"DelegateTask"},
-
-    -- Receives DelegateTask events via subscription.
-    -- Routes LLM processing through concierge (if configured) or orcs.llm().
-    -- On completion, emits DelegateResult event and outputs directly to IO.
-    on_request = function(request)
-        local operation = request.operation or ""
-        if operation ~= "process" then
-            return { success = true }
-        end
-
-        local payload = request.payload or {}
-        local request_id = payload.request_id or "unknown"
-        local description = payload.description or ""
-        local context = payload.context or ""
-        local llm_config = payload.llm_config or {}
-        local delegate_backend = payload.delegate_backend  -- FQN of backend component (nil = use orcs.llm)
-
-        orcs.log("info", "delegate-worker: starting task " .. request_id
-            .. (delegate_backend and (" via " .. delegate_backend) or " via orcs.llm"))
-        orcs.output("[Delegate:" .. request_id .. "] Starting task...")
-
-        -- Build task-focused prompt
-        local prompt_parts = {}
-        prompt_parts[#prompt_parts + 1] = "You are a specialized sub-agent handling a delegated task."
-        prompt_parts[#prompt_parts + 1] = "Complete the following task thoroughly and report your findings concisely."
-        prompt_parts[#prompt_parts + 1] = "You have access to file tools (read, write, grep, glob, exec) to assist."
-        if context ~= "" then
-            prompt_parts[#prompt_parts + 1] = "## Context\n" .. context
-        end
-        prompt_parts[#prompt_parts + 1] = "## Task\n" .. description
-        local prompt = table.concat(prompt_parts, "\n\n")
-
-        local summary, cost, session_id, err
-
-        if delegate_backend then
-            -- Route through external backend component (e.g. custom::my_llm)
-            -- Sends RPC to the backend's on_request(operation="process") handler.
-            local result = orcs.request(delegate_backend, "process", {
-                message = prompt,
-            }, { timeout_ms = 600000 })
-            if result and result.success then
-                summary = (result.data and result.data.response) or ""
-            else
-                err = (result and result.error) or "concierge request failed"
-            end
-        else
-            -- Fallback: use built-in orcs.llm() with configured provider
-            local opts = {}
-            if llm_config.provider    then opts.provider    = llm_config.provider end
-            if llm_config.model       then opts.model       = llm_config.model end
-            if llm_config.base_url    then opts.base_url    = llm_config.base_url end
-            if llm_config.api_key     then opts.api_key     = llm_config.api_key end
-            if llm_config.temperature then opts.temperature = llm_config.temperature end
-            if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
-            if llm_config.timeout     then opts.timeout     = llm_config.timeout end
-            opts.resolve = true  -- Enable tool-use for the delegate
-
-            local resp = orcs.llm(prompt, opts)
-            if resp and resp.ok then
-                summary = resp.content or ""
-                cost = resp.cost
-                session_id = resp.session_id
-            else
-                err = (resp and resp.error) or "unknown error"
-            end
-        end
-
-        if not err then
-            orcs.output("[Delegate:" .. request_id .. "] " .. (summary or ""))
-            orcs.emit_event("DelegateResult", "completed", {
-                request_id = request_id,
-                summary = summary or "",
-                success = true,
-                cost = cost,
-                session_id = session_id,
-            })
-            orcs.log("info", string.format(
-                "delegate-worker: task %s completed (cost=%.4f)",
-                request_id, cost or 0
-            ))
-        else
-            orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. tostring(err), "error")
-            orcs.emit_event("DelegateResult", "completed", {
-                request_id = request_id,
-                error = err,
-                success = false,
-            })
-            orcs.log("error", "delegate-worker: task " .. request_id .. " failed: " .. err)
-        end
-
-        return { success = true }
-    end,
-
-    on_signal = function(signal)
-        if signal.kind == "Veto" then
-            return "Abort"
-        end
-        return "Handled"
-    end,
-}
-]]
-
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
@@ -607,9 +158,10 @@ local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as conte
 -- Component settings (populated from config in init())
 local component_settings = {}
 
--- FQN of the spawned LLM worker Component (set in init()).
+-- FQN of the concierge agent (set in init()).
+-- Either the spawned builtin or the external FQN from config.
 -- Used by init() for health check RPC and dispatch_llm() guard check.
-local llm_worker_fqn = nil
+local concierge_fqn = nil
 
 -- FQN of the spawned delegate worker Component (set in init()).
 local delegate_worker_fqn = nil
@@ -810,17 +362,14 @@ local function fetch_delegation_context()
 end
 
 --- Default route: emit AgentTask event for LLM processing.
---- The event is broadcast to all subscribed components (llm-worker or concierge).
---- agent_mgr returns immediately — the worker handles LLM processing and output
+--- The event is broadcast to the concierge agent (builtin or external).
+--- agent_mgr returns immediately — the concierge handles LLM processing and output
 --- asynchronously via its own event loop.
 local function dispatch_llm(message)
-    -- Normalize concierge: Lua treats "" as truthy, so coerce to nil
-    local concierge = component_settings.concierge
-    if concierge == "" then concierge = nil end
-
-    -- Guard: at least one subscriber (llm-worker or concierge) must be available
-    if not concierge and not llm_worker_fqn then
-        orcs.output_with_level("[AgentMgr] Error: no LLM backend available (worker not spawned, concierge not set)", "error")
+    -- Guard: concierge agent (builtin or external) must be available.
+    -- concierge_fqn is set in init() for both builtin spawn and external config.
+    if not concierge_fqn then
+        orcs.output_with_level("[AgentMgr] Error: no LLM backend available (concierge not initialized)", "error")
         return { success = false, error = "no LLM backend available" }
     end
 
@@ -841,7 +390,7 @@ local function dispatch_llm(message)
     local llm_config = extract_llm_config()
 
     -- Emit AgentTask event (fire-and-forget, non-blocking).
-    -- Subscribers (llm-worker or concierge) receive this and process asynchronously.
+    -- The concierge agent receives this and processes asynchronously.
     local payload = {
         message = message,
         prompt_placement = placement,
@@ -917,7 +466,44 @@ return {
             return { success = true }
         end
 
-        -- Handle delegation requests from llm-worker (via IntentRegistry dispatch).
+        -- Handle list_active: return agent summary for console_metrics.
+        -- Returns locally cached info only (no cross-agent RPC).
+        --
+        -- Safety: This handler reads only local variables (concierge_fqn,
+        -- delegate_worker_fqn, component_settings, delegation_counter,
+        -- delegation_results). No blocking RPC calls are made, so it
+        -- cannot contribute to deadlock regardless of ChannelRunner state.
+        --
+        -- Deadlock scenario avoided: if this handler queried child agents
+        -- (e.g., orcs.request(concierge_fqn, "status")), the call chain
+        -- would be: console_metrics → agent_mgr → concierge. If the
+        -- concierge's ChannelRunner is blocked on an LLM call, agent_mgr's
+        -- on_request would also block, starving all other RPCs to agent_mgr.
+        if operation == "list_active" then
+            local agents = {}
+
+            -- Concierge info (FQN only, no live status query)
+            agents.concierge_fqn = concierge_fqn
+
+            -- Delegate-worker info (FQN only, no live status query)
+            agents.delegate_fqn = delegate_worker_fqn
+
+            -- LLM config (for display when using builtin concierge)
+            local concierge_cfg = component_settings.concierge
+            if concierge_cfg == "" then concierge_cfg = nil end
+            if not concierge_cfg then
+                agents.llm_provider = component_settings.llm_provider
+                agents.llm_model = component_settings.llm_model
+            end
+
+            -- Delegation stats
+            agents.delegation_count = delegation_counter
+            agents.delegation_completed = #delegation_results
+
+            return { success = true, data = agents }
+        end
+
+        -- Handle delegation requests from concierge (via IntentRegistry dispatch).
         -- Spawns delegate-worker task via DelegateTask event.
         if operation == "delegate" then
             local payload = request.payload or {}
@@ -991,12 +577,12 @@ return {
                 orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. route.target)
                 return dispatch_route(route, body)
             else
-                -- Unknown @prefix: pass full message to llm-worker as-is
+                -- Unknown @prefix: pass full message to concierge as-is
                 orcs.log("debug", "AgentMgr: unknown prefix @" .. prefix .. ", falling through to llm")
             end
         end
 
-        -- Default: route to llm-worker
+        -- Default: route to concierge agent
         return dispatch_llm(message)
     end,
 
@@ -1029,21 +615,15 @@ return {
             concierge or "off", placement, llm_provider, llm_model
         ))
 
-        -- Spawn LLM worker only when using built-in backend.
-        -- When concierge is set, the external component (loaded via config.toml)
-        -- subscribes to AgentTask events and handles LLM processing independently.
+        -- Spawn concierge agent (handles AgentTask events for LLM processing).
+        -- When concierge is set to an external FQN, skip spawning the builtin.
         if not concierge then
-            -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
-            -- wait for World registration (ready notification via oneshot channel).
-            -- When this call returns, the Component is fully registered and event-reachable.
-            local llm = orcs.spawn_runner({
-                script = llm_worker_script,
-            })
-            if llm.ok then
-                llm_worker_fqn = llm.fqn
-                orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
+            local result = orcs.spawn_runner({ builtin = "concierge.lua" })
+            if result.ok then
+                concierge_fqn = result.fqn
+                orcs.log("info", "spawned concierge agent (fqn=" .. concierge_fqn .. ")")
 
-                -- Startup health check: verify LLM provider connectivity (targeted RPC)
+                -- Startup health check: verify LLM provider connectivity
                 local ping_ok, ping_err = pcall(function()
                     local ping_config = extract_llm_config({
                         llm_provider = "provider",
@@ -1052,7 +632,7 @@ return {
                         llm_api_key  = "api_key",
                     })
 
-                    local ping_result = orcs.request(llm_worker_fqn, "ping", {
+                    local ping_result = orcs.request(concierge_fqn, "ping", {
                         llm_config = ping_config,
                     })
                     if ping_result and ping_result.success and ping_result.data then
@@ -1080,25 +660,21 @@ return {
                     orcs.log("warn", "LLM health check failed: " .. tostring(ping_err))
                 end
             else
-                orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
+                orcs.log("error", "failed to spawn concierge: " .. (result.error or ""))
             end
         else
-            orcs.log("info", "concierge='" .. concierge .. "': skipping llm-worker spawn (external backend)")
+            concierge_fqn = concierge
+            orcs.log("info", "concierge='" .. concierge .. "': using external agent")
         end
 
-        -- Spawn delegate-worker for LLM-initiated task delegation.
-        -- Always spawned regardless of concierge mode: delegation is orthogonal
-        -- to the LLM backend choice. Both built-in llm-worker and concierge
-        -- backends can emit delegate_task actions that need a delegate-worker.
-        local delegate = orcs.spawn_runner({
-            script = delegate_worker_script,
-        })
+        -- Spawn delegate-worker agent (handles DelegateTask events).
+        -- Always spawned: delegation is orthogonal to the concierge choice.
+        local delegate = orcs.spawn_runner({ builtin = "delegate_worker.lua" })
         if delegate.ok then
             delegate_worker_fqn = delegate.fqn
-            orcs.log("info", "spawned delegate-worker as Component (fqn=" .. delegate_worker_fqn .. ")")
+            orcs.log("info", "spawned delegate-worker agent (fqn=" .. delegate_worker_fqn .. ")")
         else
             orcs.log("warn", "failed to spawn delegate-worker: " .. (delegate.error or ""))
-            -- Non-fatal: delegation will be unavailable but core LLM flow works
         end
 
         -- Register observability hook: log routing outcomes
@@ -1123,7 +699,7 @@ return {
             end
         end
 
-        local backend = concierge or llm_worker_fqn or "failed"
+        local backend = concierge_fqn or "failed"
         local delegate_status = delegate_worker_fqn and "ok" or "off"
         orcs.output("[AgentMgr] Ready (backend: " .. backend .. ", delegate: " .. delegate_status .. ")")
         orcs.log("info", "agent_mgr initialized")

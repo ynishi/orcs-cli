@@ -994,6 +994,23 @@ impl ChildContext for ChildContextImpl {
         Ok((channel_id, fqn))
     }
 
+    fn spawn_runner_from_builtin(
+        &self,
+        name: &str,
+        id: Option<&str>,
+    ) -> Result<(ChannelId, String), SpawnError> {
+        let loader = self
+            .component_loader
+            .as_ref()
+            .ok_or_else(|| SpawnError::Internal("no component loader configured".into()))?;
+
+        let script = loader
+            .resolve_builtin(name)
+            .ok_or_else(|| SpawnError::Internal(format!("builtin not found: {name}")))?;
+
+        self.spawn_runner_from_script(&script, id)
+    }
+
     fn can_execute_command(&self, cmd: &str) -> bool {
         match (&self.session, &self.checker) {
             (Some(session), Some(checker)) => checker.can_execute_command(session, cmd),
