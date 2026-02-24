@@ -62,9 +62,9 @@ local function emit_success(message, llm_resp)
         cost = llm_resp.cost,
         source = "concierge",
     })
-    orcs.log("debug", string.format(
+    orcs.log("info", string.format(
         "concierge: completed (cost=%.4f, session=%s)",
-        llm_resp.cost or 0, llm_resp.session_id or "none"
+        llm_resp.cost or 0, (llm_resp.session_id or "none"):sub(1, 12)
     ))
 end
 
@@ -76,7 +76,7 @@ local function fetch_foundation()
     if f_resp and f_resp.success and f_resp.data then
         return f_resp.data.system or "", f_resp.data.task or "", f_resp.data.guard or ""
     end
-    orcs.log("debug", "concierge: foundation segments unavailable, proceeding without")
+    orcs.log("info", "concierge: foundation segments unavailable, proceeding without")
     return "", "", ""
 end
 
@@ -86,7 +86,7 @@ local function fetch_console_metrics()
     if m_resp and m_resp.success and m_resp.formatted then
         return m_resp.formatted
     end
-    orcs.log("debug", "concierge: console metrics unavailable, proceeding without")
+    orcs.log("info", "concierge: console metrics unavailable, proceeding without")
     return ""
 end
 
@@ -192,7 +192,7 @@ local function register_delegate_intent()
         },
     })
     if delegate_reg and delegate_reg.ok then
-        orcs.log("debug", "concierge: registered delegate_task intent")
+        orcs.log("info", "concierge: registered delegate_task intent")
     else
         orcs.log("warn", "concierge: delegate_task intent registration failed: "
             .. ((delegate_reg and delegate_reg.error) or "unknown"))
@@ -371,7 +371,7 @@ local function handle_process(input)
         -- the message directly to the existing LLM session.
         local resume_sid = input.session_id or session_id
         if resume_sid and resume_sid ~= "" then
-            orcs.log("debug", "concierge: resuming session " .. resume_sid:sub(1, 20))
+            orcs.log("info", "concierge: resuming session " .. resume_sid:sub(1, 20))
             local opts = build_llm_opts(input)
             opts.session_id = resume_sid
             opts.resolve = true
@@ -405,17 +405,12 @@ local function handle_process(input)
         local console_block = fetch_console_metrics()
         local recommendation, skill_count = fetch_and_register_skills(message, history_context)
         register_delegate_intent()
-        local tool_desc = fetch_tool_descriptions()
 
-        -- Compose system block (skills + tool descriptions)
-        local system_parts = {}
-        if recommendation ~= "" then
-            system_parts[#system_parts + 1] = recommendation
-        end
-        if tool_desc ~= "" then
-            system_parts[#system_parts + 1] = tool_desc
-        end
-        local system_full = table.concat(system_parts, "\n\n")
+        -- Compose system block (skill recommendations only).
+        -- Tool definitions are provided exclusively via the API tools parameter
+        -- (built from IntentRegistry in build_tools_for_provider). Embedding tool
+        -- descriptions in the prompt text would conflict with native tool_use.
+        local system_full = recommendation
 
         -- Compose context blocks
         local history_block = ""
@@ -440,9 +435,9 @@ local function handle_process(input)
             delegation_block = delegation_block,
         })
 
-        orcs.log("debug", string.format(
-            "concierge: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
-            placement, skill_count, #history_context, #tool_desc,
+        orcs.log("info", string.format(
+            "concierge: prompt built (placement=%s, skills=%d, history=%d, foundation=%d+%d+%d, metrics=%d chars)",
+            placement, skill_count, #history_context,
             #f_system, #f_task, #f_guard, #console_block
         ))
 

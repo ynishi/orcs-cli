@@ -250,6 +250,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
     // Configure agent with short timeout
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout)))
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
@@ -281,6 +282,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
         Ok(resp) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
+            // Any HTTP response (including 4xx/5xx) confirms connectivity
             result.set("ok", true)?;
             result.set("status", status)?;
             result.set("latency_ms", latency.as_millis() as u64)?;
@@ -289,16 +291,10 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
             let latency = start.elapsed();
             result.set("latency_ms", latency.as_millis() as u64)?;
 
-            // If we got an HTTP response (non-2xx), connectivity is confirmed
-            if let ureq::Error::StatusCode(status) = &e {
-                result.set("ok", true)?;
-                result.set("status", *status)?;
-            } else {
-                let (error_kind, error_msg) = classify_ureq_error(&e);
-                result.set("ok", false)?;
-                result.set("error", error_msg)?;
-                result.set("error_kind", error_kind)?;
-            }
+            let (error_kind, error_msg) = classify_ureq_error(&e);
+            result.set("ok", false)?;
+            result.set("error", error_msg)?;
+            result.set("error_kind", error_kind)?;
         }
     }
 
@@ -448,8 +444,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     );
 
     // Configure ureq agent (reused across retries and tool turns)
+    // http_status_as_error(false): receive 4xx/5xx as Ok(Response) so that
+    // parse_response_body can read the error body and should_retry_status
+    // can properly retry 429/5xx responses.
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(llm_opts.timeout)))
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
@@ -471,12 +471,17 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         };
 
         let body_str = request_body.to_string();
-        tracing::debug!(
-            "llm request turn={}: {} {} ({}B)",
+        let tool_count = tools_json
+            .as_ref()
+            .and_then(|t| t.as_array())
+            .map_or(0, |a| a.len());
+        tracing::info!(
+            "llm request turn={}: {} {} ({}B, tools={})",
             tool_turn,
             llm_opts.provider.chat_path(),
             llm_opts.model,
-            body_str.len()
+            body_str.len(),
+            tool_count
         );
 
         // Send with retry
@@ -493,6 +498,14 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
 
         let is_tool_use = parsed_resp.stop_reason == StopReason::ToolUse;
         let should_resolve = is_tool_use && llm_opts.resolve && !parsed_resp.intents.is_empty();
+        tracing::info!(
+            "llm response turn={}: stop_reason={:?}, intents={}, resolve={}, content_len={}",
+            tool_turn,
+            parsed_resp.stop_reason,
+            parsed_resp.intents.len(),
+            should_resolve,
+            parsed_resp.content.len()
+        );
 
         if should_resolve && tool_turn < llm_opts.max_tool_turns {
             // ── Auto-resolve: dispatch intents and continue loop ──
