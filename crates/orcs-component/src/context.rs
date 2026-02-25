@@ -107,6 +107,9 @@ pub trait ComponentLoader: Send + Sync {
     ///
     /// * `script` - Inline script content
     /// * `id` - Optional component ID (extracted from script if None)
+    /// * `globals` - Optional globals to inject into the VM before script execution.
+    ///   When provided, the JSON object's top-level keys become global variables
+    ///   in the new VM. This avoids string-based code injection for passing config.
     ///
     /// # Returns
     ///
@@ -115,6 +118,7 @@ pub trait ComponentLoader: Send + Sync {
         &self,
         script: &str,
         id: Option<&str>,
+        globals: Option<&serde_json::Value>,
     ) -> Result<Box<dyn crate::Component>, SpawnError>;
 }
 
@@ -492,6 +496,7 @@ pub trait ChildContext: Send + Sync + Debug {
     ///
     /// * `script` - Inline script content (e.g., Lua component script)
     /// * `id` - Optional component ID (extracted from script if None)
+    /// * `globals` - Optional globals to inject into the VM before script execution
     ///
     /// # Returns
     ///
@@ -507,6 +512,7 @@ pub trait ChildContext: Send + Sync + Debug {
         &self,
         _script: &str,
         _id: Option<&str>,
+        _globals: Option<&serde_json::Value>,
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "runner spawning not supported by this context".into(),

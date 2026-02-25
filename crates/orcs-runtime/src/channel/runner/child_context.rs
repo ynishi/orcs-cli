@@ -948,6 +948,7 @@ impl ChildContext for ChildContextImpl {
         &self,
         script: &str,
         id: Option<&str>,
+        globals: Option<&serde_json::Value>,
     ) -> Result<(ChannelId, String), SpawnError> {
         // Get component loader
         let loader = self
@@ -956,7 +957,7 @@ impl ChildContext for ChildContextImpl {
             .ok_or_else(|| SpawnError::Internal("no component loader configured".into()))?;
 
         // Create component from script
-        let component = loader.load_from_script(script, id)?;
+        let component = loader.load_from_script(script, id, globals)?;
         let fqn = component.id().fqn();
 
         // Spawn as runner and wait for registration to complete.

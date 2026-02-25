@@ -163,7 +163,7 @@ impl LuaComponent {
             .map_err(|_| LuaError::ScriptNotFound(path.display().to_string()))?;
 
         let script_dir = path.parent().map(|p| p.to_path_buf());
-        let mut component = Self::from_script_inner(&script, sandbox, script_dir.as_deref())?;
+        let mut component = Self::from_script_inner(&script, sandbox, script_dir.as_deref(), None)?;
         component.script_path = Some(path.display().to_string());
         Ok(component)
     }
@@ -196,7 +196,7 @@ impl LuaComponent {
         let script = std::fs::read_to_string(&init_path)
             .map_err(|_| LuaError::ScriptNotFound(init_path.display().to_string()))?;
 
-        let mut component = Self::from_script_inner(&script, sandbox, Some(dir))?;
+        let mut component = Self::from_script_inner(&script, sandbox, Some(dir), None)?;
         component.script_path = Some(init_path.display().to_string());
         Ok(component)
     }
@@ -212,17 +212,33 @@ impl LuaComponent {
     ///
     /// Returns error if script is invalid.
     pub fn from_script(script: &str, sandbox: Arc<dyn SandboxPolicy>) -> Result<Self, LuaError> {
-        Self::from_script_inner(script, sandbox, None)
+        Self::from_script_inner(script, sandbox, None, None)
     }
 
-    /// Internal: creates a LuaComponent with optional search path setup.
+    /// Creates a new LuaComponent from a script string with pre-injected globals.
+    ///
+    /// Each top-level key in `globals` (JSON object) is set as a Lua global
+    /// variable before the script executes, enabling structured data passing
+    /// without string serialization.
+    pub fn from_script_with_globals(
+        script: &str,
+        sandbox: Arc<dyn SandboxPolicy>,
+        globals: Option<&serde_json::Value>,
+    ) -> Result<Self, LuaError> {
+        Self::from_script_inner(script, sandbox, None, globals)
+    }
+
+    /// Internal: creates a LuaComponent with optional search path setup and globals.
     ///
     /// When `script_dir` is provided, it is added to `LuaEnv`'s search paths
     /// so that `require()` resolves co-located modules with sandbox validation.
+    /// When `globals` is provided, each top-level key is set as a Lua global
+    /// before the script executes.
     fn from_script_inner(
         script: &str,
         sandbox: Arc<dyn SandboxPolicy>,
         script_dir: Option<&Path>,
+        globals: Option<&serde_json::Value>,
     ) -> Result<Self, LuaError> {
         // Build LuaEnv with sandbox and optional script directory as search path.
         let mut lua_env = LuaEnv::new(Arc::clone(&sandbox));
@@ -254,6 +270,16 @@ impl LuaComponent {
                 Ok(())
             })?;
             orcs_table.set("output_with_level", output_level_noop)?;
+        }
+
+        // Inject globals into VM before script execution.
+        // Each top-level key in the JSON object becomes a Lua global variable.
+        if let Some(serde_json::Value::Object(map)) = globals {
+            let lua_globals = lua.globals();
+            for (k, v) in map {
+                let lua_val = json_to_lua_value(&lua, v)?;
+                lua_globals.set(k.as_str(), lua_val)?;
+            }
         }
 
         // Execute script and get the returned table
@@ -762,9 +788,10 @@ impl ComponentLoader for LuaComponentLoader {
         &self,
         script: &str,
         _id: Option<&str>,
+        globals: Option<&serde_json::Value>,
     ) -> Result<Box<dyn Component>, SpawnError> {
         // Note: id parameter is ignored; LuaComponent extracts ID from script
-        LuaComponent::from_script(script, Arc::clone(&self.sandbox))
+        LuaComponent::from_script_with_globals(script, Arc::clone(&self.sandbox), globals)
             .map(|c| Box::new(c) as Box<dyn Component>)
             .map_err(|e| SpawnError::InvalidScript(e.to_string()))
     }

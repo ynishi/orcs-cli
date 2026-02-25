@@ -450,6 +450,7 @@ impl ChildContext for CapMockContext {
         &self,
         _script: &str,
         _id: Option<&str>,
+        _globals: Option<&serde_json::Value>,
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal("not supported".into()))
     }

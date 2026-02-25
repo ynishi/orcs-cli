@@ -438,6 +438,7 @@ function orcs.spawn_child(config) end
 ---@class SpawnRunnerConfig
 ---@field script string Lua script (required)
 ---@field id? string Optional runner ID
+---@field globals? table<string, any> Globals to inject into new VM before script execution
 
 ---@class SpawnRunnerResult
 ---@field ok boolean

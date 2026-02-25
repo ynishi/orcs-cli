@@ -960,3 +960,102 @@ mod snapshot_tests {
         assert!(result.is_err(), "restore with wrong FQN should fail");
     }
 }
+
+// --- from_script_with_globals tests ---
+
+#[test]
+fn globals_inject_string_value() {
+    let script = r#"
+        return {
+            id = "globals-test",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                return { success = true, data = MY_CONFIG }
+            end,
+            on_signal = function(sig) return "Ignored" end,
+        }
+    "#;
+
+    let globals = serde_json::json!({ "MY_CONFIG": "injected_value" });
+    let mut component =
+        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+            .expect("load script with globals");
+
+    let req = create_test_request("get", JsonValue::Null);
+    let result = component.on_request(&req).expect("request should succeed");
+    assert_eq!(result, JsonValue::String("injected_value".into()));
+}
+
+#[test]
+fn globals_inject_nested_table() {
+    let script = r#"
+        return {
+            id = "globals-nested",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                return {
+                    success = true,
+                    data = {
+                        name = _agent_config.name,
+                        expertise = _agent_config.expertise,
+                    },
+                }
+            end,
+            on_signal = function(sig) return "Ignored" end,
+        }
+    "#;
+
+    let globals = serde_json::json!({
+        "_agent_config": {
+            "name": "test-agent",
+            "expertise": "Rust expert",
+            "subscriptions": ["AgentTask"],
+        }
+    });
+    let mut component =
+        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+            .expect("load script with globals");
+
+    let req = create_test_request("get", JsonValue::Null);
+    let result = component.on_request(&req).expect("request should succeed");
+    assert_eq!(result["name"], "test-agent");
+    assert_eq!(result["expertise"], "Rust expert");
+}
+
+#[test]
+fn globals_none_is_backward_compatible() {
+    let script = r#"
+        return {
+            id = "no-globals",
+            subscriptions = {"Echo"},
+            on_request = function(req)
+                return { success = true, data = "ok" }
+            end,
+            on_signal = function(sig) return "Ignored" end,
+        }
+    "#;
+
+    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), None)
+        .expect("load without globals");
+    assert!(component.id().fqn().contains("no-globals"));
+}
+
+#[test]
+fn globals_used_in_component_id() {
+    let script = r#"
+        return {
+            id = _agent_name,
+            namespace = "agent",
+            subscriptions = {},
+            on_request = function(req)
+                return { success = true }
+            end,
+            on_signal = function(sig) return "Ignored" end,
+        }
+    "#;
+
+    let globals = serde_json::json!({ "_agent_name": "custom-agent" });
+    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+        .expect("load with dynamic id");
+    assert_eq!(component.id().fqn(), "agent::custom-agent");
+}

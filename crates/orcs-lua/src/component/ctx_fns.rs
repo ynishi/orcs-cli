@@ -572,9 +572,11 @@ pub(super) fn register(
     orcs_table.set("request_batch", request_batch_fn)?;
 
     // orcs.spawn_runner(config) -> { ok, channel_id, fqn, error }
-    // config = { script = "...", id = "optional-id" }
+    // config = { script = "...", id = "optional-id", globals = { key = value, ... } }
     // Spawns a Component as a separate ChannelRunner for parallel execution.
     // The returned `fqn` can be used immediately with orcs.request(fqn, ...).
+    // When `globals` is provided, each top-level key is set as a global variable
+    // in the new VM before the script executes.
     let ctx_clone = Arc::clone(&ctx);
     let spawn_runner_fn = lua.create_function(move |lua, config: Table| {
         let ctx_guard = ctx_clone.lock();
@@ -606,8 +608,17 @@ pub(super) fn register(
         // ID is optional
         let id: Option<String> = config.get("id").ok();
 
+        // Globals: convert Lua table to serde_json::Value for cross-VM injection
+        let globals: Option<serde_json::Value> = config
+            .get::<mlua::Value>("globals")
+            .ok()
+            .and_then(|v| match v {
+                mlua::Value::Nil => None,
+                other => lua.from_value(other).ok(),
+            });
+
         let result_table = lua.create_table()?;
-        match ctx_guard.spawn_runner_from_script(&script, id.as_deref()) {
+        match ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref()) {
             Ok((channel_id, fqn)) => {
                 result_table.set("ok", true)?;
                 result_table.set("channel_id", channel_id.to_string())?;
