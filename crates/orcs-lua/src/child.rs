@@ -2037,7 +2037,7 @@ mod tests {
             let lua = Arc::new(Mutex::new(Lua::new()));
             let script = r#"
                 return {
-                    id = "llm-worker",
+                    id = "test-worker",
                     run = function(input)
                         local result = orcs.llm("hello")
                         return { success = true, data = {

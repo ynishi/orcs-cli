@@ -1,6 +1,6 @@
 //! Integration tests for prompt placement strategies.
 //!
-//! Tests the prompt assembly logic used by agent_mgr's llm-worker.
+//! Tests the prompt assembly logic used by agent_mgr's CommonAgent.
 //! Uses mock injection (orcs.llm, orcs.request, orcs.tool_descriptions)
 //! to capture assembled prompts and verify section ordering.
 
@@ -14,9 +14,9 @@ fn test_sandbox() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
-/// Lua component that replicates the llm-worker prompt assembly logic.
+/// Lua component that replicates the CommonAgent prompt assembly logic.
 ///
-/// Accepts the same inputs as the real llm-worker (message, history_context,
+/// Accepts the same inputs as the real CommonAgent (message, history_context,
 /// prompt_placement) and performs identical prompt assembly. Calls orcs.llm()
 /// with the assembled prompt, allowing tests to capture and inspect it.
 const PROMPT_ASSEMBLER_SCRIPT: &str = r###"

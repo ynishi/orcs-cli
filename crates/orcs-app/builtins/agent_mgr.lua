@@ -1,20 +1,27 @@
 -- agent_mgr.lua
--- Agent Manager component: routes UserInput to specialized workers.
+-- Agent Manager component: routes UserInput to CommonAgent instances and workers.
 --
 -- Architecture (Event-driven + RPC hybrid):
 --   agent_mgr (Router Component, subscriptions=UserInput,DelegateResult)
 --     │
---     ├─ @prefix commands → targeted RPC to specific components
+--     ├─ @prefix commands → targeted RPC to specific components or agents
 --     │
 --     ├─ LLM tasks → emit "AgentTask" event (fire-and-forget, non-blocking)
 --     │       │
 --     │       ▼ (broadcast via EventBus)
---     │   llm-worker (spawned via orcs.spawn_runner(), subscriptions=AgentTask)
---     │     — receives AgentTask events via subscription
+--     │   common-agent [primary] (spawned via spawn_common_agent(), subscriptions=AgentTask)
+--     │     — generic LLM-powered agent, parameterized via _agent_config
+--     │     — expertise field injected into system prompt (agent identity)
 --     │     — calls orcs.llm(resolve=true) for tool-use auto-dispatch
 --     │     — registers "delegate_task" IntentDef for LLM-initiated delegation
---     │     — calls orcs.output() directly to display response (output_to_io inherited)
+--     │     — calls orcs.output() directly to display response
 --     │     — agent_mgr is NOT blocked during LLM processing
+--     │
+--     ├─ Config-based agents ([components.settings.agent_mgr.agents.<name>])
+--     │     — defined in config.toml as pure data (name, expertise, llm overrides)
+--     │     — spawned as CommonAgent instances via spawn_common_agent()
+--     │     — RPC-only (subscriptions={}, no broadcast)
+--     │     — callable via @name prefix or orcs.request(fqn, "process", ...)
 --     │
 --     ├─ Delegation → LLM tool_call("delegate_task") → agent_mgr.delegate()
 --     │       │          → emit "DelegateTask" event (fire-and-forget)
@@ -26,13 +33,14 @@
 --     │     — emits "DelegateResult" event on completion
 --     │     — agent_mgr stores results for context injection in next turn
 --     │
---     └─ init() → targeted RPC (ping) to llm-worker for health check
+--     └─ init() → targeted RPC (ping) to primary agent for health check
 --
 -- Concierge mode:
 --   When concierge is set (e.g. concierge="custom::my_llm"), agent_mgr does NOT spawn
---   llm-worker. Instead, the external component (loaded via config.toml) subscribes
---   to "AgentTask" events and handles LLM processing independently.
+--   the primary CommonAgent. Instead, the external component (loaded via config.toml)
+--   subscribes to "AgentTask" events and handles LLM processing independently.
 --   delegate-worker IS always spawned (delegation is orthogonal to LLM backend).
+--   Config-based agents (settings.agents) are still loaded regardless of concierge.
 --
 -- Tool execution:
 --   LLM uses tool_use (function calling) to invoke:
@@ -47,6 +55,7 @@
 --   @skill <op> ...        → skill::skill_manager (operation dispatch)
 --   @profile <op> ...      → profile::profile_manager (passthrough via handle_input)
 --   @foundation <op> ...   → foundation::foundation_manager (operation dispatch)
+--   @<agent_name> <msg>    → agent::<name> (dynamic, from settings.agents)
 --
 -- Foundation segments (from agent.md via foundation_manager):
 --   system — always at top (identity/core rules)
@@ -78,13 +87,34 @@
 -- | llm_temperature   | number                            | (none)           | Sampling temperature               |
 -- | llm_max_tokens    | number                            | (none)           | Max completion tokens              |
 -- | llm_timeout       | number                            | 120              | Request timeout (seconds)          |
+-- | agents            | table { [name] = agent_config }   | {}               | Config-based agent definitions     |
+--
+-- ### agents.<name> sub-table
+--
+-- Each key under `agents` defines a specialized CommonAgent instance.
+-- The key becomes the agent name (used for @prefix routing and FQN).
+--
+-- | Key           | Type      | Default          | Description                    |
+-- |---------------|-----------|------------------|--------------------------------|
+-- | expertise     | string    | ""               | System prompt expertise block  |
+-- | llm_provider  | string    | (inherit parent) | LLM provider override          |
+-- | llm_model     | string    | (inherit parent) | Model override                 |
+-- | llm_base_url  | string    | (inherit parent) | Provider base URL override     |
+-- | llm_api_key   | string    | (inherit parent) | API key override               |
+-- | subscriptions | string[]  | {}               | Event subscriptions (RPC-only) |
+--
+-- Example:
+--   [components.settings.agent_mgr.agents.rust-reviewer]
+--   expertise = "You are an expert Rust code reviewer."
+--   llm_provider = "ollama"
+--   llm_model = "llama3.2"
 --
 -- ## Concierge Mode (concierge setting)
 --
 -- When `concierge` is set to a component FQN (e.g. "custom::my_llm"), agent_mgr
--- replaces the built-in llm-worker with the specified external component:
+-- replaces the built-in primary agent with the specified external component:
 --
---   1. llm-worker is NOT spawned (the concierge handles AgentTask events instead)
+--   1. Primary CommonAgent is NOT spawned (the concierge handles AgentTask events)
 --   2. llm_* settings are UNUSED for main conversation (the concierge component
 --      manages its own LLM configuration independently)
 --
@@ -105,7 +135,7 @@
 --
 -- ### Config Examples
 --
--- Built-in mode (default — uses llm-worker + orcs.llm for both):
+-- Built-in mode (default — uses CommonAgent + orcs.llm for both):
 --   [components.settings.agent_mgr]
 --   llm_provider = "ollama"
 --   llm_model    = "qwen2.5-coder:7b"
@@ -145,21 +175,34 @@
 
 -- === Worker Scripts ===
 
--- LLM Worker: spawned as an independent Component via orcs.spawn_runner().
+-- CommonAgent: generic LLM-powered agent, spawned as an independent Component.
 -- Has its own Lua VM, event loop, and ChannelRunner.
 --
--- Communication: subscribes to "AgentTask" Extension events (broadcast).
--- agent_mgr emits AgentTask events; this worker receives them asynchronously.
+-- Parameterized via _agent_config (injected at spawn time):
+--   name          — agent identifier (used as Component id)
+--   expertise     — system prompt segment defining agent identity
+--   subscriptions — EventBus subscriptions (default: {} = RPC-only)
+--   llm           — LLM config overrides (provider, model, etc.)
+--
+-- Primary agent: _agent_config.subscriptions = {"AgentTask"} (broadcast receiver)
+-- Specialized agents: _agent_config.subscriptions = {} (RPC-only, called via @prefix)
+--
 -- Output: calls orcs.output() directly (IO output channel inherited from parent).
--- RPC: "ping" operation is still handled via targeted orcs.request() from init().
-local llm_worker_script = [[
-return {
-    id = "llm-worker",
-    namespace = "builtin",
-    subscriptions = {"AgentTask"},
+-- RPC: "ping" operation for health check, "process" for LLM processing.
+local common_agent_script = [[
+-- _agent_config is injected by spawn_common_agent() before this script.
+-- Fallback defaults for direct usage / testing:
+if not _agent_config then
+    _agent_config = { name = "common-agent", subscriptions = {"AgentTask"} }
+end
+local _name = _agent_config.name or "common-agent"
 
-    -- Receives AgentTask events via subscription and targeted RPCs (ping).
-    -- operation="process" — main LLM processing (from AgentTask event)
+return {
+    id = _name,
+    namespace = "agent",
+    subscriptions = _agent_config.subscriptions or {},
+
+    -- operation="process" — main LLM processing (from AgentTask event or RPC)
     --   NOTE: When invoked via event (fire-and-forget), the return value of
     --   on_request is discarded by the runtime. Output and observability are
     --   handled inside emit_success() / orcs.output_with_level().
@@ -190,11 +233,11 @@ return {
                 response = llm_resp.content,
                 session_id = llm_resp.session_id,
                 cost = llm_resp.cost,
-                source = "llm-worker",
+                source = _name,
             })
             orcs.log("debug", string.format(
-                "llm-worker: completed (cost=%.4f, session=%s)",
-                llm_resp.cost or 0, llm_resp.session_id or "none"
+                "%s: completed (cost=%.4f, session=%s)",
+                _name, llm_resp.cost or 0, llm_resp.session_id or "none"
             ))
         end
 
@@ -212,7 +255,7 @@ return {
 
         -- Session resumption: skip full prompt assembly, send message directly
         if input.session_id and input.session_id ~= "" then
-            orcs.log("debug", "llm-worker: resuming session " .. input.session_id:sub(1, 20))
+            orcs.log("debug", _name .. ": resuming session " .. input.session_id:sub(1, 20))
             local opts = build_llm_opts(input)
             opts.session_id = input.session_id
             opts.resolve = true
@@ -226,12 +269,12 @@ return {
                         session_id = llm_resp.session_id,
                         num_turns = llm_resp.num_turns,
                         cost = llm_resp.cost,
-                        source = "llm-worker",
+                        source = _name,
                     },
                 }
             else
                 local err = (llm_resp and llm_resp.error) or "llm resume failed"
-                orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
+                orcs.output_with_level("[" .. _name .. "] Error: " .. tostring(err), "error")
                 return { success = false, error = err }
             end
         end
@@ -251,7 +294,7 @@ return {
             f_task = f_resp.data.task or ""
             f_guard = f_resp.data.guard or ""
         else
-            orcs.log("debug", "llm-worker: foundation segments unavailable, proceeding without")
+            orcs.log("debug", _name .. ": foundation segments unavailable, proceeding without")
         end
 
         -- 0b. Fetch console metrics (git, cwd, timestamp)
@@ -260,7 +303,7 @@ return {
         if m_resp and m_resp.success and m_resp.formatted then
             console_block = m_resp.formatted
         else
-            orcs.log("debug", "llm-worker: console metrics unavailable, proceeding without")
+            orcs.log("debug", _name .. ": console metrics unavailable, proceeding without")
         end
 
         -- 1. Gather system parts: skill recommendations + tool descriptions
@@ -309,22 +352,22 @@ return {
                     })
                     if reg and reg.ok then
                         registered_names[#registered_names + 1] = s.name
-                        orcs.log("debug", "llm-worker: registered skill intent: " .. s.name)
+                        orcs.log("debug", _name .. ": registered skill intent: " .. s.name)
                     else
                         local err_msg = (reg and reg.error) or (reg and tostring(reg)) or "nil returned"
-                        orcs.log("warn", "llm-worker: skill intent registration failed: " .. s.name
+                        orcs.log("warn", _name .. ": skill intent registration failed: " .. s.name
                             .. " (" .. err_msg .. ")")
                     end
                 end
                 if #registered_names > 0 then
                     orcs.log("info", string.format(
-                        "llm-worker: registered %d skill intent(s): [%s]",
-                        #registered_names, table.concat(registered_names, ", ")
+                        "%s: registered %d skill intent(s): [%s]",
+                        _name, #registered_names, table.concat(registered_names, ", ")
                     ))
                 elseif skill_count > 0 then
                     orcs.log("warn", string.format(
-                        "llm-worker: all %d skill intent registration(s) failed",
-                        skill_count
+                        "%s: all %d skill intent registration(s) failed",
+                        _name, skill_count
                     ))
                 end
             end
@@ -355,9 +398,9 @@ return {
             },
         })
         if delegate_reg and delegate_reg.ok then
-            orcs.log("debug", "llm-worker: registered delegate_task intent")
+            orcs.log("debug", _name .. ": registered delegate_task intent")
         else
-            orcs.log("warn", "llm-worker: delegate_task intent registration failed: "
+            orcs.log("warn", _name .. ": delegate_task intent registration failed: "
                 .. ((delegate_reg and delegate_reg.error) or "unknown"))
         end
 
@@ -395,7 +438,8 @@ return {
         --
         -- Fixed positions:
         --   f_system      → always at top (identity/core rules)
-        --   console_block → after f_system (workspace context)
+        --   expertise     → after f_system (agent identity)
+        --   console_block → after expertise (workspace context)
         --   f_task        → before history (project context)
         --   f_guard       → just before user message (output constraints)
         --
@@ -405,7 +449,13 @@ return {
         -- Foundation:system — always top
         if f_system ~= "" then sections[#sections + 1] = f_system end
 
-        -- Console metrics — always after f_system
+        -- Agent expertise — defines agent identity (injected via _agent_config)
+        local expertise = _agent_config.expertise or ""
+        if expertise ~= "" then
+            sections[#sections + 1] = "## Expertise\n" .. expertise
+        end
+
+        -- Console metrics — after agent identity
         if console_block ~= "" then sections[#sections + 1] = console_block end
 
         if placement == "top" then
@@ -441,9 +491,9 @@ return {
         local prompt = table.concat(sections, "\n\n")
 
         orcs.log("debug", string.format(
-            "llm-worker: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d chars)",
-            placement, skill_count, #history_context, #tool_desc,
-            #f_system, #f_task, #f_guard, #console_block
+            "%s: prompt built (placement=%s, skills=%d, history=%d, tools=%d, foundation=%d+%d+%d, metrics=%d, expertise=%d chars)",
+            _name, placement, skill_count, #history_context, #tool_desc,
+            #f_system, #f_task, #f_guard, #console_block, #expertise
         ))
 
         -- 5. Call LLM via orcs.llm() with provider/model from config
@@ -453,6 +503,15 @@ return {
         -- Enable tool-use auto-resolution: LLM tool_use calls (skills, builtins)
         -- are dispatched via IntentRegistry and results fed back automatically.
         llm_opts.resolve = true
+        -- Apply _agent_config.llm overrides (agent-specific LLM settings)
+        if _agent_config.llm then
+            for k, v in pairs(_agent_config.llm) do
+                if llm_opts[k] == nil then
+                    llm_opts[k] = v
+                end
+            end
+        end
+
         local llm_resp = orcs.llm(prompt, llm_opts)
         if llm_resp and llm_resp.ok then
             emit_success(message, llm_resp)
@@ -463,12 +522,12 @@ return {
                     session_id = llm_resp.session_id,
                     num_turns = llm_resp.num_turns,
                     cost = llm_resp.cost,
-                    source = "llm-worker",
+                    source = _name,
                 },
             }
         else
             local err = (llm_resp and llm_resp.error) or "llm call failed"
-            orcs.output_with_level("[llm-worker] Error: " .. tostring(err), "error")
+            orcs.output_with_level("[" .. _name .. "] Error: " .. tostring(err), "error")
             return {
                 success = false,
                 error = err,
@@ -600,6 +659,40 @@ return {
 }
 ]]
 
+-- === CommonAgent Spawn ===
+
+--- Spawned agents registry: name → fqn.
+--- Populated by spawn_common_agent(), used for @prefix routing.
+local spawned_agents = {}
+
+--- Spawn a CommonAgent instance with the given config.
+--- Config fields: name (required), expertise, subscriptions, llm.
+--- Returns spawn result table or nil + error string.
+---
+--- Uses orcs.spawn_runner() globals parameter to inject _agent_config
+--- as a Lua global variable in the new VM. This avoids string concatenation
+--- (serialize_config + header injection) and passes structured data directly
+--- through the Rust serde_json boundary.
+local function spawn_common_agent(config)
+    if not config or not config.name then
+        return nil, "config.name is required"
+    end
+    if spawned_agents[config.name] then
+        return nil, "duplicate agent name: " .. config.name
+    end
+
+    local result = orcs.spawn_runner({
+        script = common_agent_script,
+        id = config.name,
+        globals = { _agent_config = config },
+    })
+    if result and result.ok then
+        spawned_agents[config.name] = result.fqn
+        orcs.log("info", "spawned agent '" .. config.name .. "' (fqn=" .. result.fqn .. ")")
+    end
+    return result
+end
+
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
@@ -607,9 +700,9 @@ local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as conte
 -- Component settings (populated from config in init())
 local component_settings = {}
 
--- FQN of the spawned LLM worker Component (set in init()).
+-- FQN of the primary CommonAgent (set in init()).
 -- Used by init() for health check RPC and dispatch_llm() guard check.
-local llm_worker_fqn = nil
+local primary_agent_fqn = nil
 
 -- FQN of the spawned delegate worker Component (set in init()).
 local delegate_worker_fqn = nil
@@ -810,16 +903,16 @@ local function fetch_delegation_context()
 end
 
 --- Default route: emit AgentTask event for LLM processing.
---- The event is broadcast to all subscribed components (llm-worker or concierge).
---- agent_mgr returns immediately — the worker handles LLM processing and output
+--- The event is broadcast to all subscribed components (primary agent or concierge).
+--- agent_mgr returns immediately — the agent handles LLM processing and output
 --- asynchronously via its own event loop.
 local function dispatch_llm(message)
     -- Normalize concierge: Lua treats "" as truthy, so coerce to nil
     local concierge = component_settings.concierge
     if concierge == "" then concierge = nil end
 
-    -- Guard: at least one subscriber (llm-worker or concierge) must be available
-    if not concierge and not llm_worker_fqn then
+    -- Guard: at least one subscriber (primary agent or concierge) must be available
+    if not concierge and not primary_agent_fqn then
         orcs.output_with_level("[AgentMgr] Error: no LLM backend available (worker not spawned, concierge not set)", "error")
         return { success = false, error = "no LLM backend available" }
     end
@@ -841,7 +934,7 @@ local function dispatch_llm(message)
     local llm_config = extract_llm_config()
 
     -- Emit AgentTask event (fire-and-forget, non-blocking).
-    -- Subscribers (llm-worker or concierge) receive this and process asynchronously.
+    -- Subscribers (primary agent or concierge) receive this and process asynchronously.
     local payload = {
         message = message,
         prompt_placement = placement,
@@ -917,7 +1010,7 @@ return {
             return { success = true }
         end
 
-        -- Handle delegation requests from llm-worker (via IntentRegistry dispatch).
+        -- Handle delegation requests from CommonAgent (via IntentRegistry dispatch).
         -- Spawns delegate-worker task via DelegateTask event.
         if operation == "delegate" then
             local payload = request.payload or {}
@@ -990,13 +1083,37 @@ return {
             if route then
                 orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. route.target)
                 return dispatch_route(route, body)
-            else
-                -- Unknown @prefix: pass full message to llm-worker as-is
-                orcs.log("debug", "AgentMgr: unknown prefix @" .. prefix .. ", falling through to llm")
             end
+
+            -- Dynamic routing: check spawned agents
+            local agent_fqn = spawned_agents[prefix]
+            if agent_fqn then
+                orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. agent_fqn)
+                local resp = orcs.request(agent_fqn, "process", {
+                    message = body,
+                    llm_config = extract_llm_config(),
+                    prompt_placement = component_settings.prompt_placement or "both",
+                })
+                if resp and resp.success then
+                    return {
+                        success = true,
+                        data = {
+                            response = resp.data,
+                            source = "agent:" .. prefix,
+                        },
+                    }
+                else
+                    local err = (resp and resp.error) or "agent request failed"
+                    orcs.output_with_level("[AgentMgr] @" .. prefix .. " error: " .. err, "error")
+                    return { success = false, error = err }
+                end
+            end
+
+            -- Unknown @prefix: pass full message to primary agent as-is
+            orcs.log("debug", "AgentMgr: unknown prefix @" .. prefix .. ", falling through to primary agent")
         end
 
-        -- Default: route to llm-worker
+        -- Default: route to primary agent
         return dispatch_llm(message)
     end,
 
@@ -1029,19 +1146,17 @@ return {
             concierge or "off", placement, llm_provider, llm_model
         ))
 
-        -- Spawn LLM worker only when using built-in backend.
+        -- Spawn primary CommonAgent only when using built-in backend.
         -- When concierge is set, the external component (loaded via config.toml)
         -- subscribes to AgentTask events and handles LLM processing independently.
         if not concierge then
-            -- Rust-side spawn_runner_from_script() uses block_in_place to synchronously
-            -- wait for World registration (ready notification via oneshot channel).
-            -- When this call returns, the Component is fully registered and event-reachable.
-            local llm = orcs.spawn_runner({
-                script = llm_worker_script,
+            local primary_result = spawn_common_agent({
+                name = "common-agent",
+                subscriptions = {"AgentTask"},
+                -- No expertise: primary agent is general-purpose
             })
-            if llm.ok then
-                llm_worker_fqn = llm.fqn
-                orcs.log("info", "spawned llm-worker as Component (fqn=" .. llm_worker_fqn .. ")")
+            if primary_result and primary_result.ok then
+                primary_agent_fqn = primary_result.fqn
 
                 -- Startup health check: verify LLM provider connectivity (targeted RPC)
                 local ping_ok, ping_err = pcall(function()
@@ -1052,7 +1167,7 @@ return {
                         llm_api_key  = "api_key",
                     })
 
-                    local ping_result = orcs.request(llm_worker_fqn, "ping", {
+                    local ping_result = orcs.request(primary_agent_fqn, "ping", {
                         llm_config = ping_config,
                     })
                     if ping_result and ping_result.success and ping_result.data then
@@ -1080,15 +1195,15 @@ return {
                     orcs.log("warn", "LLM health check failed: " .. tostring(ping_err))
                 end
             else
-                orcs.log("error", "failed to spawn llm-worker: " .. (llm.error or ""))
+                orcs.log("error", "failed to spawn primary agent: " .. ((primary_result and primary_result.error) or ""))
             end
         else
-            orcs.log("info", "concierge='" .. concierge .. "': skipping llm-worker spawn (external backend)")
+            orcs.log("info", "concierge='" .. concierge .. "': skipping primary agent spawn (external backend)")
         end
 
         -- Spawn delegate-worker for LLM-initiated task delegation.
         -- Always spawned regardless of concierge mode: delegation is orthogonal
-        -- to the LLM backend choice. Both built-in llm-worker and concierge
+        -- to the LLM backend choice. Both built-in primary agent and concierge
         -- backends can emit delegate_task actions that need a delegate-worker.
         local delegate = orcs.spawn_runner({
             script = delegate_worker_script,
@@ -1099,6 +1214,57 @@ return {
         else
             orcs.log("warn", "failed to spawn delegate-worker: " .. (delegate.error or ""))
             -- Non-fatal: delegation will be unavailable but core LLM flow works
+        end
+
+        -- Spawn config-based agents from [components.settings.agent_mgr.agents]
+        -- Each key is the agent name, value is { expertise?, llm_provider?, llm_model?, ... }
+        -- Pure TOML data — no Lua script execution. Non-fatal: failures logged and skipped.
+        local agents_loaded, agents_failed = 0, 0
+        local agents_config = component_settings.agents
+        if agents_config and type(agents_config) == "table" then
+            for name, agent_cfg in pairs(agents_config) do
+                if type(agent_cfg) == "table" then
+                    -- Build spawn config: name from key, LLM overrides from sub-table
+                    local spawn_cfg = { name = name }
+                    if agent_cfg.expertise then
+                        spawn_cfg.expertise = tostring(agent_cfg.expertise)
+                    end
+                    if agent_cfg.subscriptions then
+                        spawn_cfg.subscriptions = agent_cfg.subscriptions
+                    end
+                    -- Collect LLM overrides into spawn_cfg.llm
+                    local llm_overrides = {}
+                    local has_llm = false
+                    for _, key in ipairs({"llm_provider", "llm_model", "llm_base_url", "llm_api_key"}) do
+                        if agent_cfg[key] then
+                            -- Strip "llm_" prefix for the llm sub-table
+                            llm_overrides[key:sub(5)] = agent_cfg[key]
+                            has_llm = true
+                        end
+                    end
+                    if has_llm then
+                        spawn_cfg.llm = llm_overrides
+                    end
+
+                    local result, spawn_err = spawn_common_agent(spawn_cfg)
+                    if result and result.ok then
+                        agents_loaded = agents_loaded + 1
+                    else
+                        agents_failed = agents_failed + 1
+                        orcs.log("warn", "agent spawn failed: " .. name
+                            .. " (" .. (spawn_err or (result and result.error) or "unknown") .. ")")
+                    end
+                else
+                    agents_failed = agents_failed + 1
+                    orcs.log("warn", "agent config invalid: " .. name
+                        .. " (expected table, got " .. type(agent_cfg) .. ")")
+                end
+            end
+        end
+        if agents_loaded > 0 or agents_failed > 0 then
+            orcs.log("info", string.format(
+                "config-based agents: %d loaded, %d failed", agents_loaded, agents_failed
+            ))
         end
 
         -- Register observability hook: log routing outcomes
@@ -1123,9 +1289,12 @@ return {
             end
         end
 
-        local backend = concierge or llm_worker_fqn or "failed"
+        local backend = concierge or primary_agent_fqn or "failed"
         local delegate_status = delegate_worker_fqn and "ok" or "off"
-        orcs.output("[AgentMgr] Ready (backend: " .. backend .. ", delegate: " .. delegate_status .. ")")
+        local agents_status = agents_loaded > 0 and tostring(agents_loaded) or "none"
+        orcs.output("[AgentMgr] Ready (backend: " .. backend
+            .. ", delegate: " .. delegate_status
+            .. ", agents: " .. agents_status .. ")")
         orcs.log("info", "agent_mgr initialized")
     end,
 

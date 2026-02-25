@@ -42,7 +42,7 @@ fn command_mode_at_shell_routes_but_needs_approval() {
 // ─── Mock LLM Pipeline (full command mode) ──────────────────────
 
 /// Sends a plain message in command mode (no @prefix).
-/// agent_mgr dispatches to llm-worker → mock HTTP LLM server → stdout.
+/// agent_mgr dispatches to CommonAgent → mock HTTP LLM server → stdout.
 ///
 /// Uses a mock HTTP server returning Ollama-format JSON instantly.
 /// Verifies: user input → agent_mgr → dispatch_llm → mock HTTP
