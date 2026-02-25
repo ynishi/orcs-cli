@@ -125,22 +125,6 @@ pub fn register_base_orcs_functions(
     // orcs.pwd - sandbox root as string (always available)
     orcs_table.set("pwd", sandbox.root().display().to_string())?;
 
-    // orcs.llm(prompt) -> {ok=false, error="..."}
-    // Deny by default: llm requires ChildContext with Capability::LLM.
-    // Overridden by capability-checked version when ChildContext is set.
-    if orcs_table.get::<mlua::Function>("llm").is_err() {
-        let llm_fn = lua.create_function(|lua, _prompt: String| {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set(
-                "error",
-                "llm denied: no execution context (ChildContext with Capability::LLM required)",
-            )?;
-            Ok(result)
-        })?;
-        orcs_table.set("llm", llm_fn)?;
-    }
-
     // orcs.tool_descriptions() -> string
     // Returns formatted tool reference for prompt embedding.
     {
@@ -318,7 +302,7 @@ orcs.sanitize_strict(s) -> {ok, value, error, violations}
   Validate with all rules (shell meta, env expansion, glob, traversal, control).
 
 orcs.http(method, url [, opts]) -> {ok, status, headers, body, error, error_kind}
-  HTTP request via ureq. method = "GET"/"POST"/"PUT"/"DELETE"/"PATCH"/"HEAD".
+  HTTP request via reqwest. method = "GET"/"POST"/"PUT"/"DELETE"/"PATCH"/"HEAD".
   opts.headers = {name=value, ...} request headers.
   opts.body = "..." request body string.
   opts.timeout = 30 timeout in seconds (default 30).

@@ -1,3 +1,28 @@
+//! LLM provider abstraction and request body builders.
+//!
+//! # Design Decision: OpenAI API Format Unification
+//!
+//! All OpenAI-compatible servers (OpenAI, Ollama, llama.cpp, vLLM, LM Studio)
+//! are handled via a single `OpenAICompat` variant using the standard
+//! `/v1/chat/completions` endpoint. The only difference is `base_url`.
+//!
+//! This design was chosen because:
+//! - Ollama natively supports `/v1/chat/completions` (OpenAI-compat mode)
+//! - llama.cpp server implements the same OpenAI-compatible API
+//! - vLLM, SGLang, LM Studio all follow the OpenAI spec
+//! - Maintaining per-server adapters (e.g. Ollama `/api/chat`) was unnecessary
+//!   code surface for functionally identical behavior
+//!
+//! Anthropic uses a distinct wire format (`/v1/messages` with different JSON
+//! schema) and is handled as a separate variant with `reqwest` directly.
+//!
+//! # Continuous Batching (llama.cpp / vLLM)
+//!
+//! These servers implement continuous batching at the inference engine level.
+//! No special batch API is needed — parallel HTTP requests are automatically
+//! batched internally via `--parallel N` slots. Use `tokio::spawn` /
+//! `futures::join_all` for client-side parallelism.
+
 use mlua::Lua;
 use orcs_types::intent::{ContentBlock, IntentDef, Role};
 
@@ -7,33 +32,58 @@ use crate::tool_registry::IntentRegistry;
 
 // ── Provider ───────────────────────────────────────────────────────────
 
-/// Supported LLM providers.
+/// Supported LLM provider categories.
+///
+/// `OpenAICompat` covers any server implementing the OpenAI Chat Completions API:
+/// - OpenAI (`https://api.openai.com`)
+/// - Ollama (`http://localhost:11434`)
+/// - llama.cpp server (`http://localhost:8080`)
+/// - vLLM, SGLang, LM Studio, etc.
+///
+/// `Anthropic` uses a distinct wire format and is handled separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Provider {
-    Ollama,
-    OpenAI,
+    /// Any server implementing the OpenAI Chat Completions API.
+    OpenAICompat,
+    /// Anthropic Messages API (distinct wire format).
     Anthropic,
 }
 
-impl Provider {
+impl std::str::FromStr for Provider {
+    type Err = String;
+
     /// Parse provider from string (case-insensitive).
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    ///
+    /// Accepts: "openai", "ollama", "openai_compat", "anthropic".
+    /// "ollama" maps to `OpenAICompat` since Ollama supports `/v1/chat/completions`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "ollama" => Ok(Self::Ollama),
-            "openai" => Ok(Self::OpenAI),
+            "ollama" | "openai" | "openai_compat" => Ok(Self::OpenAICompat),
             "anthropic" => Ok(Self::Anthropic),
             other => Err(format!(
-                "unsupported provider: '{}' (expected: ollama, openai, anthropic)",
+                "unsupported provider: '{}' (expected: ollama, openai, openai_compat, anthropic)",
                 other
             )),
         }
     }
+}
+
+impl Provider {
+    /// Stable string identifier for this provider (used in Lua result tables).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAICompat => "openai_compat",
+            Self::Anthropic => "anthropic",
+        }
+    }
 
     /// Default base URL for this provider.
+    ///
+    /// `OpenAICompat` defaults to Ollama's local URL. For OpenAI or other
+    /// remote servers, set `base_url` explicitly or use `ORCS_LLM_BASE_URL`.
     pub fn default_base_url(self) -> &'static str {
         match self {
-            Self::Ollama => "http://localhost:11434",
-            Self::OpenAI => "https://api.openai.com",
+            Self::OpenAICompat => "http://localhost:11434",
             Self::Anthropic => "https://api.anthropic.com",
         }
     }
@@ -41,8 +91,7 @@ impl Provider {
     /// Default model for this provider.
     pub fn default_model(self) -> &'static str {
         match self {
-            Self::Ollama => "llama3.2",
-            Self::OpenAI => "gpt-4o",
+            Self::OpenAICompat => "llama3.2",
             Self::Anthropic => "claude-sonnet-4-20250514",
         }
     }
@@ -50,31 +99,30 @@ impl Provider {
     /// Chat API path for this provider.
     pub fn chat_path(self) -> &'static str {
         match self {
-            Self::Ollama => "/api/chat",
-            Self::OpenAI => "/v1/chat/completions",
+            Self::OpenAICompat => "/v1/chat/completions",
             Self::Anthropic => "/v1/messages",
         }
     }
 
     /// Environment variable name for the API key.
+    ///
+    /// For `OpenAICompat`, checks `OPENAI_API_KEY`. Local servers (Ollama,
+    /// llama.cpp) simply won't have this set, which is fine — the key is
+    /// sent only when present.
     pub fn api_key_env(self) -> Option<&'static str> {
         match self {
-            Self::Ollama => None,
-            Self::OpenAI => Some("OPENAI_API_KEY"),
+            Self::OpenAICompat => Some("OPENAI_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
         }
     }
 
     /// Health-check path for this provider.
     ///
-    /// - Ollama: `GET /` returns `"Ollama is running"` (no auth)
-    /// - OpenAI: `GET /v1/models` (requires auth, but proves connectivity)
-    /// - Anthropic: no dedicated health endpoint; we probe the chat path
-    ///   expecting a non-timeout response (e.g. 401/405) to prove connectivity
+    /// - OpenAICompat: `GET /v1/models` (standard OpenAI endpoint)
+    /// - Anthropic: `POST /v1/messages` (no dedicated health endpoint)
     pub fn health_path(self) -> &'static str {
         match self {
-            Self::Ollama => "/",
-            Self::OpenAI => "/v1/models",
+            Self::OpenAICompat => "/v1/models",
             Self::Anthropic => "/v1/messages",
         }
     }
@@ -89,21 +137,19 @@ pub(super) fn build_request_body(
     tools: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     match opts.provider {
-        Provider::Ollama => build_ollama_body(opts, messages, tools),
-        Provider::OpenAI => build_openai_body(opts, messages, tools),
+        Provider::OpenAICompat => build_openai_body(opts, messages, tools),
         Provider::Anthropic => build_anthropic_body(opts, messages, tools),
     }
 }
 
-/// Convert a single internal Message to OpenAI/Ollama wire format.
+/// Convert a single internal Message to OpenAI wire format.
 ///
 /// A single Message may expand to multiple wire messages:
 /// - `MessageContent::Blocks` with `ToolUse` → assistant message with `tool_calls` array
 /// - `MessageContent::Blocks` with `ToolResult` → one `role: "tool"` message per result
 ///
-/// `stringify_args`: when true, tool_call arguments are serialized as a JSON
-/// string (OpenAI format); when false, kept as a JSON object (Ollama format).
-fn message_to_openai_wire(m: &Message, stringify_args: bool) -> Vec<serde_json::Value> {
+/// Tool call arguments are always serialized as JSON strings per the OpenAI spec.
+fn message_to_openai_wire(m: &Message) -> Vec<serde_json::Value> {
     use orcs_types::intent::MessageContent;
 
     match &m.content {
@@ -112,7 +158,7 @@ fn message_to_openai_wire(m: &Message, stringify_args: bool) -> Vec<serde_json::
         }
         MessageContent::Blocks(blocks) => {
             let classified = classify_content_blocks(blocks);
-            blocks_to_wire_messages(&classified, &m.role, stringify_args)
+            blocks_to_wire_messages(&classified, &m.role)
         }
     }
 }
@@ -153,12 +199,8 @@ fn classify_content_blocks(blocks: &[ContentBlock]) -> ClassifiedBlocks<'_> {
     }
 }
 
-/// Convert classified blocks into OpenAI/Ollama wire-format JSON messages.
-fn blocks_to_wire_messages(
-    cb: &ClassifiedBlocks<'_>,
-    role: &Role,
-    stringify_args: bool,
-) -> Vec<serde_json::Value> {
+/// Convert classified blocks into OpenAI wire-format JSON messages.
+fn blocks_to_wire_messages(cb: &ClassifiedBlocks<'_>, role: &Role) -> Vec<serde_json::Value> {
     let mut msgs = Vec::new();
 
     // Assistant message with tool_calls
@@ -172,7 +214,7 @@ fn blocks_to_wire_messages(
         let calls: Vec<serde_json::Value> = cb
             .tool_uses
             .iter()
-            .map(|(id, name, input)| build_openai_tool_call(id, name, input, stringify_args))
+            .map(|(id, name, input)| build_openai_tool_call(id, name, input))
             .collect();
 
         msgs.push(serde_json::json!({
@@ -205,60 +247,19 @@ fn blocks_to_wire_messages(
 }
 
 /// Build a single OpenAI-format tool_call entry.
-fn build_openai_tool_call(
-    id: &str,
-    name: &str,
-    input: &serde_json::Value,
-    stringify_args: bool,
-) -> serde_json::Value {
-    let args_val = if stringify_args {
-        serde_json::Value::String(serde_json::to_string(input).unwrap_or_default())
-    } else {
-        input.clone()
-    };
+///
+/// Arguments are always serialized as a JSON string (OpenAI spec).
+/// OpenAI-compat servers (Ollama, llama.cpp, vLLM) accept this format.
+fn build_openai_tool_call(id: &str, name: &str, input: &serde_json::Value) -> serde_json::Value {
+    let args_str = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
     serde_json::json!({
         "id": id,
         "type": "function",
         "function": {
             "name": name,
-            "arguments": args_val,
+            "arguments": args_str,
         }
     })
-}
-
-fn build_ollama_body(
-    opts: &LlmOpts,
-    messages: &[Message],
-    tools: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let msgs: Vec<serde_json::Value> = messages
-        .iter()
-        .flat_map(|m| message_to_openai_wire(m, false))
-        .collect();
-
-    let mut body = serde_json::json!({
-        "model": opts.model,
-        "messages": msgs,
-        "stream": false,
-    });
-
-    // Ollama puts temperature and num_predict inside "options"
-    let mut options = serde_json::Map::new();
-    if let Some(temp) = opts.temperature {
-        options.insert("temperature".into(), serde_json::json!(temp));
-    }
-    if let Some(max) = opts.max_tokens {
-        options.insert("num_predict".into(), serde_json::json!(max));
-    }
-    if !options.is_empty() {
-        body["options"] = serde_json::Value::Object(options);
-    }
-
-    if let Some(t) = tools {
-        body["tools"] = t.clone();
-    }
-
-    Ok(body)
 }
 
 fn build_openai_body(
@@ -266,10 +267,7 @@ fn build_openai_body(
     messages: &[Message],
     tools: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let msgs: Vec<serde_json::Value> = messages
-        .iter()
-        .flat_map(|m| message_to_openai_wire(m, true))
-        .collect();
+    let msgs: Vec<serde_json::Value> = messages.iter().flat_map(message_to_openai_wire).collect();
 
     let mut body = serde_json::json!({
         "model": opts.model,
@@ -364,12 +362,12 @@ pub(super) fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<
     );
     let tools = match provider {
         Provider::Anthropic => build_tools_anthropic_format(defs),
-        Provider::Ollama | Provider::OpenAI => build_tools_openai_format(defs),
+        Provider::OpenAICompat => build_tools_openai_format(defs),
     };
     Some(tools)
 }
 
-/// Build tools array in OpenAI/Ollama format.
+/// Build tools array in OpenAI format.
 ///
 /// ```json
 /// [{ "type": "function", "function": { "name": "...", "description": "...", "parameters": {...} } }]
@@ -423,22 +421,36 @@ mod tests {
     #[test]
     fn provider_from_str_valid() {
         assert_eq!(
-            Provider::from_str("ollama").expect("should parse ollama"),
-            Provider::Ollama
+            "ollama"
+                .parse::<Provider>()
+                .expect("should parse ollama as OpenAICompat"),
+            Provider::OpenAICompat
         );
         assert_eq!(
-            Provider::from_str("OpenAI").expect("should parse OpenAI"),
-            Provider::OpenAI
+            "OpenAI"
+                .parse::<Provider>()
+                .expect("should parse OpenAI as OpenAICompat"),
+            Provider::OpenAICompat
         );
         assert_eq!(
-            Provider::from_str("ANTHROPIC").expect("should parse ANTHROPIC"),
+            "openai_compat"
+                .parse::<Provider>()
+                .expect("should parse openai_compat"),
+            Provider::OpenAICompat
+        );
+        assert_eq!(
+            "ANTHROPIC"
+                .parse::<Provider>()
+                .expect("should parse ANTHROPIC"),
             Provider::Anthropic
         );
     }
 
     #[test]
     fn provider_from_str_invalid() {
-        let err = Provider::from_str("gemini").expect_err("should reject gemini");
+        let err = "gemini"
+            .parse::<Provider>()
+            .expect_err("should reject gemini");
         assert!(
             err.contains("unsupported provider"),
             "error should mention unsupported, got: {}",
@@ -449,43 +461,37 @@ mod tests {
     #[test]
     fn provider_defaults() {
         assert_eq!(
-            Provider::Ollama.default_base_url(),
+            Provider::OpenAICompat.default_base_url(),
             "http://localhost:11434"
-        );
-        assert_eq!(
-            Provider::OpenAI.default_base_url(),
-            "https://api.openai.com"
         );
         assert_eq!(
             Provider::Anthropic.default_base_url(),
             "https://api.anthropic.com"
         );
 
-        assert_eq!(Provider::Ollama.default_model(), "llama3.2");
-        assert_eq!(Provider::OpenAI.default_model(), "gpt-4o");
+        assert_eq!(Provider::OpenAICompat.default_model(), "llama3.2");
         assert_eq!(
             Provider::Anthropic.default_model(),
             "claude-sonnet-4-20250514"
         );
 
-        assert_eq!(Provider::Ollama.chat_path(), "/api/chat");
-        assert_eq!(Provider::OpenAI.chat_path(), "/v1/chat/completions");
+        // All OpenAI-compat providers use the same standard path
+        assert_eq!(Provider::OpenAICompat.chat_path(), "/v1/chat/completions");
         assert_eq!(Provider::Anthropic.chat_path(), "/v1/messages");
     }
 
     #[test]
     fn provider_api_key_env() {
-        assert_eq!(Provider::Ollama.api_key_env(), None);
-        assert_eq!(Provider::OpenAI.api_key_env(), Some("OPENAI_API_KEY"));
+        assert_eq!(Provider::OpenAICompat.api_key_env(), Some("OPENAI_API_KEY"));
         assert_eq!(Provider::Anthropic.api_key_env(), Some("ANTHROPIC_API_KEY"));
     }
 
     // ── Request body builder tests ─────────────────────────────────────
 
     #[test]
-    fn build_ollama_body_basic() {
+    fn build_openai_body_basic() {
         let opts = LlmOpts {
-            provider: Provider::Ollama,
+            provider: Provider::OpenAICompat,
             base_url: "http://localhost:11434".into(),
             model: "llama3.2".into(),
             api_key: None,
@@ -504,18 +510,22 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let body = build_ollama_body(&opts, &messages, None).expect("should build body");
+        let body = build_openai_body(&opts, &messages, None).expect("should build body");
         assert_eq!(body["model"], "llama3.2");
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
-        assert!(body.get("options").is_none(), "no options when empty");
+        // No Ollama-specific "options" key — unified format
+        assert!(
+            body.get("options").is_none(),
+            "should not have Ollama 'options' key"
+        );
     }
 
     #[test]
-    fn build_ollama_body_with_options() {
+    fn build_openai_body_with_options() {
         let opts = LlmOpts {
-            provider: Provider::Ollama,
+            provider: Provider::OpenAICompat,
             base_url: "http://localhost:11434".into(),
             model: "llama3.2".into(),
             api_key: None,
@@ -534,15 +544,16 @@ mod tests {
             content: "hi".into(),
         }];
 
-        let body = build_ollama_body(&opts, &messages, None).expect("should build body");
-        assert_eq!(body["options"]["temperature"], 0.7);
-        assert_eq!(body["options"]["num_predict"], 4096);
+        let body = build_openai_body(&opts, &messages, None).expect("should build body");
+        // Standard OpenAI fields (not Ollama options.num_predict)
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 4096);
     }
 
     #[test]
-    fn build_openai_body_basic() {
+    fn build_openai_body_openai_server() {
         let opts = LlmOpts {
-            provider: Provider::OpenAI,
+            provider: Provider::OpenAICompat,
             base_url: "https://api.openai.com".into(),
             model: "gpt-4o".into(),
             api_key: Some("sk-test".into()),
@@ -595,8 +606,6 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
         };
-        // messages might include a system message from non-Anthropic path,
-        // but Anthropic builder should filter it out.
         let messages = vec![
             Message {
                 role: Role::System,
@@ -690,7 +699,7 @@ mod tests {
             role: Role::User,
             content: MessageContent::Text("hello".to_string()),
         };
-        let wire = message_to_openai_wire(&msg, true);
+        let wire = message_to_openai_wire(&msg);
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
         assert_eq!(wire[0]["content"], "hello");
@@ -712,8 +721,7 @@ mod tests {
             ]),
         };
 
-        // OpenAI format: stringify_args = true
-        let wire = message_to_openai_wire(&msg, true);
+        let wire = message_to_openai_wire(&msg);
         assert_eq!(wire.len(), 1, "should produce 1 assistant message");
         assert_eq!(wire[0]["role"], "assistant");
         assert_eq!(wire[0]["content"], "Let me read that.");
@@ -725,43 +733,13 @@ mod tests {
         assert_eq!(tool_calls[0]["id"], "call_1");
         assert_eq!(tool_calls[0]["type"], "function");
         assert_eq!(tool_calls[0]["function"]["name"], "read");
-        // OpenAI: arguments is a JSON string
+        // Arguments are always a JSON string (OpenAI standard)
         let args_str = tool_calls[0]["function"]["arguments"]
             .as_str()
-            .expect("args should be string");
+            .expect("args should be string per OpenAI spec");
         let args_parsed: serde_json::Value =
             serde_json::from_str(args_str).expect("should parse args");
         assert_eq!(args_parsed["path"], "src/main.rs");
-    }
-
-    #[test]
-    fn ollama_wire_assistant_tool_calls_object_args() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "exec".to_string(),
-                input: serde_json::json!({"cmd": "ls"}),
-            }]),
-        };
-
-        // Ollama format: stringify_args = false
-        let wire = message_to_openai_wire(&msg, false);
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0]["role"], "assistant");
-        // content should be null when no text
-        assert!(wire[0]["content"].is_null());
-
-        let tool_calls = wire[0]["tool_calls"]
-            .as_array()
-            .expect("should have tool_calls");
-        // Ollama: arguments is a JSON object (not a string)
-        assert!(
-            tool_calls[0]["function"]["arguments"].is_object(),
-            "Ollama args should be an object, got: {}",
-            tool_calls[0]["function"]["arguments"]
-        );
-        assert_eq!(tool_calls[0]["function"]["arguments"]["cmd"], "ls");
     }
 
     #[test]
@@ -782,7 +760,7 @@ mod tests {
             ]),
         };
 
-        let wire = message_to_openai_wire(&msg, true);
+        let wire = message_to_openai_wire(&msg);
         assert_eq!(
             wire.len(),
             2,
@@ -816,7 +794,7 @@ mod tests {
             ]),
         };
 
-        let wire = message_to_openai_wire(&msg, true);
+        let wire = message_to_openai_wire(&msg);
         assert_eq!(wire.len(), 1, "all tool_calls in one message");
         let calls = wire[0]["tool_calls"].as_array().expect("tool_calls");
         assert_eq!(calls.len(), 2);
@@ -830,7 +808,7 @@ mod tests {
             role: Role::Assistant,
             content: MessageContent::Blocks(vec![]),
         };
-        let wire = message_to_openai_wire(&msg, true);
+        let wire = message_to_openai_wire(&msg);
         assert_eq!(wire.len(), 1, "empty blocks should produce fallback");
         assert_eq!(wire[0]["role"], "assistant");
     }

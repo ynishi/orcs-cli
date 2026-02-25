@@ -80,7 +80,7 @@ pub(super) fn build_messages(
     if messages.is_empty() {
         if let Some(ref sys) = opts.system_prompt {
             // For Anthropic, system goes at top level (handled in build_request_body).
-            // For Ollama/OpenAI, system goes in messages.
+            // For OpenAI-compat (OpenAI, Ollama, llama.cpp), system goes in messages.
             if opts.provider != Provider::Anthropic {
                 messages.push(Message {
                     role: Role::System,
@@ -184,7 +184,7 @@ mod tests {
         let sid = resolve_session_id(&lua, &None);
 
         let opts = LlmOpts {
-            provider: Provider::Ollama,
+            provider: Provider::OpenAICompat,
             base_url: String::new(),
             model: String::new(),
             api_key: None,
@@ -243,7 +243,7 @@ mod tests {
         update_session(&lua, &sid, "first question", "first answer");
 
         let opts = LlmOpts {
-            provider: Provider::Ollama,
+            provider: Provider::OpenAICompat,
             base_url: String::new(),
             model: String::new(),
             api_key: None,
