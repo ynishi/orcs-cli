@@ -19,7 +19,8 @@
 --     │
 --     ├─ Config-based agents ([components.settings.agent_mgr.agents.<name>])
 --     │     — defined in config.toml as pure data (name, expertise, llm overrides)
---     │     — spawned as CommonAgent instances via spawn_common_agent()
+--     │     — registered in agent_registry at init (NOT spawned)
+--     │     — spawned on-demand when @prefix is used (lazy instantiation)
 --     │     — RPC-only (subscriptions={}, no broadcast)
 --     │     — callable via @name prefix or orcs.request(fqn, "process", ...)
 --     │
@@ -659,26 +660,63 @@ return {
 }
 ]]
 
--- === CommonAgent Spawn ===
+-- === Agent Registry & Lifecycle ===
+--
+-- Lifecycle:
+--   [1] Register  — store agent definition in registry (init time, from config.toml)
+--   [2] Spawn     — Mgr creates a running instance from a registered definition
+--   [3] Spawned   — instance is running, tracked in spawned_agents
+--   [4] Complete  — task done, instance removed (or persistent: stays alive)
+--
+-- Registered agents are templates (name, expertise, llm overrides).
+-- Spawned agents are running instances created from those templates.
+-- Multiple instances of the same registered agent can coexist.
+-- Persistent agents (primary, delegate-worker) are spawned at init and stay alive.
 
---- Spawned agents registry: name → fqn.
---- Populated by spawn_common_agent(), used for @prefix routing.
+--- Agent registry: name → config (definitions/templates from config.toml).
+--- Populated by register_agent(), queried on-demand by @prefix routing.
+local agent_registry = {}
+
+--- Spawned agents: name → { fqn, config, persistent }.
+--- Populated by spawn_agent(), used for @prefix routing and instance tracking.
 local spawned_agents = {}
 
---- Spawn a CommonAgent instance with the given config.
---- Config fields: name (required), expertise, subscriptions, llm.
---- Returns spawn result table or nil + error string.
----
---- Uses orcs.spawn_runner() globals parameter to inject _agent_config
---- as a Lua global variable in the new VM. This avoids string concatenation
---- (serialize_config + header injection) and passes structured data directly
---- through the Rust serde_json boundary.
-local function spawn_common_agent(config)
+--- Register an agent definition in the registry.
+--- Does NOT spawn the agent — just stores the config for on-demand use.
+--- @param name string  Agent name (used as @prefix and registry key)
+--- @param config table  Agent config: { expertise?, llm?, subscriptions? }
+--- @return boolean, string|nil  success, error message
+local function register_agent(name, config)
+    if not name or name == "" then
+        return false, "agent name is required"
+    end
+    if agent_registry[name] then
+        return false, "duplicate agent registration: " .. name
+    end
+    config.name = name
+    agent_registry[name] = config
+    orcs.log("info", "registered agent '" .. name .. "'")
+    return true
+end
+
+--- Spawn a CommonAgent instance.
+--- If name matches a registered agent, uses that config as base.
+--- Additional opts are merged (ad-hoc prompt enrichment).
+--- @param config table  Config with name (required), expertise, subscriptions, llm
+--- @param opts table|nil  Optional overrides (not yet used; reserved for ad-hoc prompt)
+--- @return table|nil, string|nil  spawn result, error message
+local function spawn_agent(config, opts)
     if not config or not config.name then
         return nil, "config.name is required"
     end
-    if spawned_agents[config.name] then
-        return nil, "duplicate agent name: " .. config.name
+
+    -- Merge opts if provided (future: ad-hoc prompt injection)
+    if opts then
+        for k, v in pairs(opts) do
+            if config[k] == nil then
+                config[k] = v
+            end
+        end
     end
 
     local result = orcs.spawn_runner({
@@ -687,9 +725,70 @@ local function spawn_common_agent(config)
         globals = { _agent_config = config },
     })
     if result and result.ok then
-        spawned_agents[config.name] = result.fqn
+        spawned_agents[config.name] = {
+            fqn = result.fqn,
+            config = config,
+            persistent = config.persistent or false,
+        }
         orcs.log("info", "spawned agent '" .. config.name .. "' (fqn=" .. result.fqn .. ")")
     end
+    return result
+end
+
+--- Spawn a registered agent by name (on-demand).
+--- Looks up the registry, copies the config, and spawns.
+--- @param name string  Registered agent name
+--- @return table|nil, string|nil  spawn result, error message
+local function spawn_registered_agent(name)
+    local reg = agent_registry[name]
+    if not reg then
+        return nil, "agent not registered: " .. name
+    end
+    if spawned_agents[name] then
+        -- Already running — return existing info
+        return { ok = true, fqn = spawned_agents[name].fqn }
+    end
+    -- Deep-copy config so spawn doesn't mutate registry
+    local config = {}
+    for k, v in pairs(reg) do
+        if type(v) == "table" then
+            config[k] = {}
+            for k2, v2 in pairs(v) do config[k][k2] = v2 end
+        else
+            config[k] = v
+        end
+    end
+    return spawn_agent(config)
+end
+
+--- List registered agents (definitions).
+--- @return table  Array of { name, expertise, has_llm_override }
+local function list_registered_agents()
+    local result = {}
+    for name, config in pairs(agent_registry) do
+        result[#result + 1] = {
+            name = name,
+            expertise = config.expertise or "",
+            has_llm_override = config.llm ~= nil,
+            spawned = spawned_agents[name] ~= nil,
+        }
+    end
+    table.sort(result, function(a, b) return a.name < b.name end)
+    return result
+end
+
+--- List spawned (running) agent instances.
+--- @return table  Array of { name, fqn, persistent }
+local function list_spawned_agents()
+    local result = {}
+    for name, info in pairs(spawned_agents) do
+        result[#result + 1] = {
+            name = name,
+            fqn = info.fqn,
+            persistent = info.persistent,
+        }
+    end
+    table.sort(result, function(a, b) return a.name < b.name end)
     return result
 end
 
@@ -1085,11 +1184,25 @@ return {
                 return dispatch_route(route, body)
             end
 
-            -- Dynamic routing: check spawned agents
-            local agent_fqn = spawned_agents[prefix]
-            if agent_fqn then
-                orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. agent_fqn)
-                local resp = orcs.request(agent_fqn, "process", {
+            -- Dynamic routing: check spawned agents first, then registry
+            local agent_info = spawned_agents[prefix]
+            if not agent_info and agent_registry[prefix] then
+                -- On-demand spawn from registry
+                orcs.log("info", "AgentMgr: on-demand spawn for @" .. prefix)
+                local spawn_result, spawn_err = spawn_registered_agent(prefix)
+                if spawn_result and spawn_result.ok then
+                    agent_info = spawned_agents[prefix]
+                else
+                    orcs.output_with_level(
+                        "[AgentMgr] @" .. prefix .. " spawn failed: " .. (spawn_err or "unknown"),
+                        "error"
+                    )
+                    return { success = false, error = spawn_err or "agent spawn failed" }
+                end
+            end
+            if agent_info then
+                orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. agent_info.fqn)
+                local resp = orcs.request(agent_info.fqn, "process", {
                     message = body,
                     llm_config = extract_llm_config(),
                     prompt_placement = component_settings.prompt_placement or "both",
@@ -1150,9 +1263,10 @@ return {
         -- When concierge is set, the external component (loaded via config.toml)
         -- subscribes to AgentTask events and handles LLM processing independently.
         if not concierge then
-            local primary_result = spawn_common_agent({
+            local primary_result = spawn_agent({
                 name = "common-agent",
                 subscriptions = {"AgentTask"},
+                persistent = true,
                 -- No expertise: primary agent is general-purpose
             })
             if primary_result and primary_result.ok then
@@ -1216,43 +1330,42 @@ return {
             -- Non-fatal: delegation will be unavailable but core LLM flow works
         end
 
-        -- Spawn config-based agents from [components.settings.agent_mgr.agents]
+        -- Register config-based agents from [components.settings.agent_mgr.agents]
         -- Each key is the agent name, value is { expertise?, llm_provider?, llm_model?, ... }
-        -- Pure TOML data — no Lua script execution. Non-fatal: failures logged and skipped.
-        local agents_loaded, agents_failed = 0, 0
+        -- Agents are registered (not spawned) — spawned on-demand when @prefix is used.
+        local agents_registered, agents_failed = 0, 0
         local agents_config = component_settings.agents
         if agents_config and type(agents_config) == "table" then
             for name, agent_cfg in pairs(agents_config) do
                 if type(agent_cfg) == "table" then
-                    -- Build spawn config: name from key, LLM overrides from sub-table
-                    local spawn_cfg = { name = name }
+                    -- Build registration config from TOML data
+                    local reg_cfg = {}
                     if agent_cfg.expertise then
-                        spawn_cfg.expertise = tostring(agent_cfg.expertise)
+                        reg_cfg.expertise = tostring(agent_cfg.expertise)
                     end
                     if agent_cfg.subscriptions then
-                        spawn_cfg.subscriptions = agent_cfg.subscriptions
+                        reg_cfg.subscriptions = agent_cfg.subscriptions
                     end
-                    -- Collect LLM overrides into spawn_cfg.llm
+                    -- Collect LLM overrides into reg_cfg.llm
                     local llm_overrides = {}
                     local has_llm = false
                     for _, key in ipairs({"llm_provider", "llm_model", "llm_base_url", "llm_api_key"}) do
                         if agent_cfg[key] then
-                            -- Strip "llm_" prefix for the llm sub-table
                             llm_overrides[key:sub(5)] = agent_cfg[key]
                             has_llm = true
                         end
                     end
                     if has_llm then
-                        spawn_cfg.llm = llm_overrides
+                        reg_cfg.llm = llm_overrides
                     end
 
-                    local result, spawn_err = spawn_common_agent(spawn_cfg)
-                    if result and result.ok then
-                        agents_loaded = agents_loaded + 1
+                    local ok, reg_err = register_agent(name, reg_cfg)
+                    if ok then
+                        agents_registered = agents_registered + 1
                     else
                         agents_failed = agents_failed + 1
-                        orcs.log("warn", "agent spawn failed: " .. name
-                            .. " (" .. (spawn_err or (result and result.error) or "unknown") .. ")")
+                        orcs.log("warn", "agent registration failed: " .. name
+                            .. " (" .. (reg_err or "unknown") .. ")")
                     end
                 else
                     agents_failed = agents_failed + 1
@@ -1261,9 +1374,9 @@ return {
                 end
             end
         end
-        if agents_loaded > 0 or agents_failed > 0 then
+        if agents_registered > 0 or agents_failed > 0 then
             orcs.log("info", string.format(
-                "config-based agents: %d loaded, %d failed", agents_loaded, agents_failed
+                "config-based agents: %d registered, %d failed", agents_registered, agents_failed
             ))
         end
 
@@ -1291,7 +1404,7 @@ return {
 
         local backend = concierge or primary_agent_fqn or "failed"
         local delegate_status = delegate_worker_fqn and "ok" or "off"
-        local agents_status = agents_loaded > 0 and tostring(agents_loaded) or "none"
+        local agents_status = agents_registered > 0 and tostring(agents_registered) or "none"
         orcs.output("[AgentMgr] Ready (backend: " .. backend
             .. ", delegate: " .. delegate_status
             .. ", agents: " .. agents_status .. ")")
