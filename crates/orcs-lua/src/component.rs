@@ -217,13 +217,21 @@ impl LuaComponent {
 
     /// Creates a new LuaComponent from a script string with pre-injected globals.
     ///
-    /// Each top-level key in `globals` (JSON object) is set as a Lua global
-    /// variable before the script executes, enabling structured data passing
-    /// without string serialization.
+    /// Each top-level key in `globals` is set as a Lua global variable before
+    /// the script executes, enabling structured data passing without string
+    /// serialization.
+    ///
+    /// # Design: `Map<String, Value>` instead of `serde_json::Value`
+    ///
+    /// The parameter accepts `Map<String, Value>` (a JSON object) rather than
+    /// an arbitrary `serde_json::Value`. This follows the *parse, don't validate*
+    /// principle: callers must produce a `Map` at the boundary, so this function
+    /// never encounters non-object values and needs no `unreachable!()` fallback.
+    /// See [`ComponentLoader::load_from_script`] for the trait-level rationale.
     pub fn from_script_with_globals(
         script: &str,
         sandbox: Arc<dyn SandboxPolicy>,
-        globals: Option<&serde_json::Value>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Self, LuaError> {
         Self::from_script_inner(script, sandbox, None, globals)
     }
@@ -238,7 +246,7 @@ impl LuaComponent {
         script: &str,
         sandbox: Arc<dyn SandboxPolicy>,
         script_dir: Option<&Path>,
-        globals: Option<&serde_json::Value>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Self, LuaError> {
         // Build LuaEnv with sandbox and optional script directory as search path.
         let mut lua_env = LuaEnv::new(Arc::clone(&sandbox));
@@ -273,8 +281,10 @@ impl LuaComponent {
         }
 
         // Inject globals into VM before script execution.
-        // Each top-level key in the JSON object becomes a Lua global variable.
-        if let Some(serde_json::Value::Object(map)) = globals {
+        // Each top-level key in the Map becomes a Lua global variable.
+        // The type signature guarantees `globals` is already a JSON object —
+        // no variant matching or `unreachable!()` needed.
+        if let Some(map) = globals {
             let lua_globals = lua.globals();
             for (k, v) in map {
                 let lua_val = json_to_lua_value(&lua, v)?;
@@ -788,7 +798,7 @@ impl ComponentLoader for LuaComponentLoader {
         &self,
         script: &str,
         _id: Option<&str>,
-        globals: Option<&serde_json::Value>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Box<dyn Component>, SpawnError> {
         // Note: id parameter is ignored; LuaComponent extracts ID from script
         LuaComponent::from_script_with_globals(script, Arc::clone(&self.sandbox), globals)

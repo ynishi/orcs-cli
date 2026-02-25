@@ -948,7 +948,7 @@ impl ChildContext for ChildContextImpl {
         &self,
         script: &str,
         id: Option<&str>,
-        globals: Option<&serde_json::Value>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         // Get component loader
         let loader = self

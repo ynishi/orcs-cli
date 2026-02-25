@@ -976,9 +976,12 @@ fn globals_inject_string_value() {
         }
     "#;
 
-    let globals = serde_json::json!({ "MY_CONFIG": "injected_value" });
+    let globals_val = serde_json::json!({ "MY_CONFIG": "injected_value" });
+    let globals = globals_val
+        .as_object()
+        .expect("test fixture must be a JSON object");
     let mut component =
-        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
@@ -1005,15 +1008,18 @@ fn globals_inject_nested_table() {
         }
     "#;
 
-    let globals = serde_json::json!({
+    let globals_val = serde_json::json!({
         "_agent_config": {
             "name": "test-agent",
             "expertise": "Rust expert",
             "subscriptions": ["AgentTask"],
         }
     });
+    let globals = globals_val
+        .as_object()
+        .expect("test fixture must be a JSON object");
     let mut component =
-        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
@@ -1054,8 +1060,18 @@ fn globals_used_in_component_id() {
         }
     "#;
 
-    let globals = serde_json::json!({ "_agent_name": "custom-agent" });
-    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), Some(&globals))
+    let globals_val = serde_json::json!({ "_agent_name": "custom-agent" });
+    let globals = globals_val
+        .as_object()
+        .expect("test fixture must be a JSON object");
+    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
         .expect("load with dynamic id");
     assert_eq!(component.id().fqn(), "agent::custom-agent");
 }
+
+// Non-object globals (array, string, etc.) are now prevented at compile time
+// by the type signature: `Option<&serde_json::Map<String, serde_json::Value>>`.
+// The previous runtime rejection tests (`globals_rejects_non_object_array`,
+// `globals_rejects_non_object_string`) have been removed because the type system
+// makes them impossible to express. This is the intended outcome of the
+// "parse, don't validate" design — invalid states are unrepresentable.

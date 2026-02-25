@@ -608,14 +608,51 @@ pub(super) fn register(
         // ID is optional
         let id: Option<String> = config.get("id").ok();
 
-        // Globals: convert Lua table to serde_json::Value for cross-VM injection
-        let globals: Option<serde_json::Value> = config
-            .get::<mlua::Value>("globals")
-            .ok()
-            .and_then(|v| match v {
-                mlua::Value::Nil => None,
-                other => lua.from_value(other).ok(),
-            });
+        // Globals: convert Lua table → serde_json::Map for cross-VM injection.
+        //
+        // Design decisions (parse, don't validate):
+        //   1. `config.get::<Value>("globals")` errors are propagated via `?`,
+        //      not silently converted to `None`. If `__index` metamethod throws,
+        //      the caller deserves to know.
+        //   2. Serialization failure (functions, userdata, etc.) is returned as
+        //      `RuntimeError` so the Lua caller gets clear feedback.
+        //   3. The result is converted to `Map<String, Value>` here — the sole
+        //      boundary — so that downstream functions accept the already-parsed
+        //      type and never need `unreachable!()` branches.
+        let globals_raw: mlua::Value = config.get("globals")?;
+        let globals: Option<serde_json::Map<String, serde_json::Value>> = match globals_raw {
+            mlua::Value::Nil => None,
+            other => {
+                let val: serde_json::Value = lua.from_value(other).map_err(|e| {
+                    mlua::Error::RuntimeError(format!(
+                        "config.globals must be a serializable table: {e}"
+                    ))
+                })?;
+                match val {
+                    serde_json::Value::Object(map) => Some(map),
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "config.globals must be a table (JSON object), got {}",
+                            match other {
+                                serde_json::Value::Array(_) => "array",
+                                serde_json::Value::String(_) => "string",
+                                serde_json::Value::Number(_) => "number",
+                                serde_json::Value::Bool(_) => "boolean",
+                                serde_json::Value::Null => "null",
+                                serde_json::Value::Object(_) => {
+                                    // Outer match already handled Object.
+                                    // This arm exists only for exhaustiveness of
+                                    // the non_exhaustive serde_json::Value enum.
+                                    // If reached, it indicates a logic error.
+                                    debug_assert!(false, "Object case handled above");
+                                    "object"
+                                }
+                            }
+                        )));
+                    }
+                }
+            }
+        };
 
         let result_table = lua.create_table()?;
         match ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref()) {

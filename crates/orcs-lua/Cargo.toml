@@ -66,6 +66,5 @@ tokio = { workspace = true }
 orcs-hook = { workspace = true, features = ["test-utils"] }
 orcs-lua = { path = ".", features = ["test-utils"] }
 
-[lints.rust]
-# Required for mlua Send/Sync wrapper
-unsafe_code = "allow"
+[lints]
+workspace = true

@@ -107,9 +107,15 @@ pub trait ComponentLoader: Send + Sync {
     ///
     /// * `script` - Inline script content
     /// * `id` - Optional component ID (extracted from script if None)
-    /// * `globals` - Optional globals to inject into the VM before script execution.
-    ///   When provided, the JSON object's top-level keys become global variables
-    ///   in the new VM. This avoids string-based code injection for passing config.
+    /// * `globals` - Optional key-value pairs to inject into the VM before script
+    ///   execution. Each entry becomes a global variable in the new VM, enabling
+    ///   structured data passing without string-based code injection.
+    ///
+    ///   The type is `Map<String, Value>` (a JSON object) rather than a generic
+    ///   `serde_json::Value` so that the compiler enforces the "must be an object"
+    ///   invariant at the call site. This follows the *parse, don't validate*
+    ///   principle — callers convert to `Map` once, and downstream code never
+    ///   needs to re-check or use `unreachable!()` branches.
     ///
     /// # Returns
     ///
@@ -118,7 +124,7 @@ pub trait ComponentLoader: Send + Sync {
         &self,
         script: &str,
         id: Option<&str>,
-        globals: Option<&serde_json::Value>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Box<dyn crate::Component>, SpawnError>;
 }
 
@@ -496,7 +502,9 @@ pub trait ChildContext: Send + Sync + Debug {
     ///
     /// * `script` - Inline script content (e.g., Lua component script)
     /// * `id` - Optional component ID (extracted from script if None)
-    /// * `globals` - Optional globals to inject into the VM before script execution
+    /// * `globals` - Optional key-value pairs to inject into the VM. See
+    ///   [`ComponentLoader::load_from_script`] for the rationale behind using
+    ///   `Map<String, Value>` instead of a generic `serde_json::Value`.
     ///
     /// # Returns
     ///
@@ -512,7 +520,7 @@ pub trait ChildContext: Send + Sync + Debug {
         &self,
         _script: &str,
         _id: Option<&str>,
-        _globals: Option<&serde_json::Value>,
+        _globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "runner spawning not supported by this context".into(),

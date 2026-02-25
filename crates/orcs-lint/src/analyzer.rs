@@ -89,8 +89,20 @@ impl Analyzer {
                 .unwrap_or(Severity::Error),
         };
 
+        let no_silent_err = rules::NoSilentErr {
+            allow_in_tests: self
+                .config
+                .rules
+                .get(rules::no_silent_err::NAME)
+                .map_or(true, |c| c.get_bool("allow_in_tests", true)),
+            severity: self
+                .config
+                .rule_severity(rules::no_silent_err::NAME)
+                .unwrap_or(Severity::Warning),
+        };
+
         for file_path in &files {
-            match self.analyze_file(file_path, &no_unwrap, &no_panic) {
+            match self.analyze_file(file_path, &no_unwrap, &no_panic, &no_silent_err) {
                 Ok(violations) => {
                     result.violations.extend(violations);
                     result.files_checked += 1;
@@ -120,6 +132,7 @@ impl Analyzer {
         path: &Path,
         no_unwrap: &rules::NoUnwrap,
         no_panic: &rules::NoPanicInLib,
+        no_silent_err: &rules::NoSilentErr,
     ) -> Result<Vec<Violation>, AnalyzerError> {
         debug!("Analyzing: {}", path.display());
 
@@ -137,6 +150,9 @@ impl Analyzer {
         }
         if self.should_run_rule(rules::no_panic::NAME) {
             violations.extend(no_panic.check(&ctx, &ast));
+        }
+        if self.should_run_rule(rules::no_silent_err::NAME) {
+            violations.extend(no_silent_err.check(&ctx, &ast));
         }
 
         Ok(violations)

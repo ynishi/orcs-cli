@@ -1,3 +1,7 @@
+// mlua internally uses unsafe for Lua VM bindings (Send/Sync wrappers).
+// This crate re-exports mlua types, so unsafe_code must be allowed here.
+#![allow(unsafe_code)]
+
 //! Lua scripting support for ORCS components.
 //!
 //! This crate enables writing ORCS Components and Children in Lua scripts.
