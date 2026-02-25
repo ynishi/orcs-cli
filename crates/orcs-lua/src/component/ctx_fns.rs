@@ -612,8 +612,9 @@ pub(super) fn register(
         //
         // Design decisions (parse, don't validate):
         //   1. `config.get::<Value>("globals")` errors are propagated via `?`,
-        //      not silently converted to `None`. If `__index` metamethod throws,
-        //      the caller deserves to know.
+        //      not silently converted to `None`. mlua's `Table::get` returns
+        //      `Nil` (not `Err`) for missing keys, so `?` only fires when the
+        //      `__index` metamethod raises an error — the caller deserves to know.
         //   2. Serialization failure (functions, userdata, etc.) is returned as
         //      `RuntimeError` so the Lua caller gets clear feedback.
         //   3. The result is converted to `Map<String, Value>` here — the sole
@@ -639,14 +640,10 @@ pub(super) fn register(
                                 serde_json::Value::Number(_) => "number",
                                 serde_json::Value::Bool(_) => "boolean",
                                 serde_json::Value::Null => "null",
-                                serde_json::Value::Object(_) => {
-                                    // Outer match already handled Object.
-                                    // This arm exists only for exhaustiveness of
-                                    // the non_exhaustive serde_json::Value enum.
-                                    // If reached, it indicates a logic error.
-                                    debug_assert!(false, "Object case handled above");
-                                    "object"
-                                }
+                                // Object is already matched above; this arm is
+                                // unreachable. serde_json::Value is exhaustive
+                                // (not #[non_exhaustive]), so no wildcard needed.
+                                serde_json::Value::Object(_) => "object",
                             }
                         )));
                     }

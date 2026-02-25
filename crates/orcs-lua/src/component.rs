@@ -137,7 +137,17 @@ pub struct LuaComponent {
 // 5. The remaining fields (id, subscriptions, status, script_path) are all Send+Sync.
 //
 // The "send" feature documentation: https://docs.rs/mlua/latest/mlua/#async-send
+//
+// FOR AI: #[allow(unsafe_code)] MUST be placed on each `unsafe impl` individually.
+// DO NOT use crate-root #![allow(unsafe_code)] — that disables the unsafe_code lint
+// for the entire crate, silently allowing any future unsafe code to go undetected.
+// mlua's `Lua` type is !Send + !Sync, so these manual Send/Sync impls are the ONLY
+// places in this crate that require unsafe. Keep the allow scoped here exclusively.
+//
+// SAFETY: see justification above (points 1-5).
+#[allow(unsafe_code)]
 unsafe impl Send for LuaComponent {}
+#[allow(unsafe_code)]
 unsafe impl Sync for LuaComponent {}
 
 impl LuaComponent {
