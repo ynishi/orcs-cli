@@ -546,12 +546,18 @@ return {
         -- Enable tool-use auto-resolution: LLM tool_use calls (skills, builtins)
         -- are dispatched via IntentRegistry and results fed back automatically.
         llm_opts.resolve = true
-        -- Apply _agent_config.llm overrides (agent-specific LLM settings)
+        -- Apply _agent_config.llm overrides (agent-specific LLM settings).
+        -- Unconditional overwrite: keys in _agent_config.llm are explicitly
+        -- specified by the user (config.toml agents.<name>.llm_*), so they
+        -- take priority over the parent agent_mgr settings.
+        --
+        -- NOTE: This is static config-time override only. If a future feature
+        -- allows the Mgr to dynamically switch models at runtime (e.g. "this
+        -- task is simple, use Sonnet 4.5 instead"), that path MUST go through
+        -- HIL (Human-in-the-Loop) approval before overwriting agent config.
         if _agent_config.llm then
             for k, v in pairs(_agent_config.llm) do
-                if llm_opts[k] == nil then
-                    llm_opts[k] = v
-                end
+                llm_opts[k] = v
             end
         end
 
@@ -766,7 +772,10 @@ local function spawn_agent(config, opts)
         id = config.name,
         globals = { _agent_config = config },
     })
-    if result and result.ok then
+    if not result then
+        return nil, "spawn_runner returned nil for agent '" .. config.name .. "'"
+    end
+    if result.ok then
         spawned_agents[config.name] = {
             fqn = result.fqn,
             config = config,

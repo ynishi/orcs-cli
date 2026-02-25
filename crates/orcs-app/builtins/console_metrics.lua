@@ -114,9 +114,10 @@ local function collect_metrics()
     -- Timestamp
     m.timestamp = os.date("%Y-%m-%d %H:%M:%S")
 
-    -- Agent status (query agent_mgr for registered/spawned agents)
-    local agent_resp = orcs.request("builtin::agent_mgr", "list_agents", {})
-    if agent_resp and agent_resp.success and agent_resp.data then
+    -- Agent status (query agent_mgr for registered/spawned agents).
+    -- Non-critical: if agent_mgr is slow or unavailable, skip gracefully.
+    local agent_ok, agent_resp = pcall(orcs.request, "builtin::agent_mgr", "list_agents", {})
+    if agent_ok and agent_resp and agent_resp.success and agent_resp.data then
         m.agents = agent_resp.data
     end
 
