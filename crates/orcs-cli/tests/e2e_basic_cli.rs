@@ -306,8 +306,8 @@ fn dispatch_llm_output_reaches_stdout() {
                 }
             }
 
-            // Return Ollama-format JSON response.
-            let ollama_response = r#"{"model":"mock-model","message":{"role":"assistant","content":"MOCK_LLM_RESPONSE_42"},"done":true,"done_reason":"stop"}"#;
+            // Return OpenAI-compatible JSON response (Ollama uses this wire format).
+            let ollama_response = r#"{"model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"MOCK_LLM_RESPONSE_42"},"finish_reason":"stop"}]}"#;
             let http_response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 ollama_response.len(),
