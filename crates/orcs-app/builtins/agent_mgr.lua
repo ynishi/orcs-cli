@@ -198,6 +198,10 @@ if not _agent_config then
 end
 local _name = _agent_config.name or "common-agent"
 
+-- IntentDef registration guard: register skills/delegate/agent intents once per VM.
+-- process() is called on every LLM turn; IntentDefs are idempotent but wasteful.
+local _intents_registered = false
+
 return {
     id = _name,
     namespace = "agent",
@@ -374,77 +378,84 @@ return {
             end
         end
 
-        -- Register delegate_task intent: allows LLM to delegate work to a sub-agent.
-        -- The IntentDef routes to agent_mgr, which spawns/dispatches to delegate-worker.
-        local delegate_reg = orcs.register_intent({
-            name = "delegate_task",
-            description = "Delegate a task to an independent sub-agent that runs its own LLM session with tool access. "
-                .. "Use when the task requires separate investigation, research, or multi-step work "
-                .. "that would benefit from independent processing. The sub-agent works asynchronously; "
-                .. "results appear in your context on the next turn.",
-            component = "builtin::agent_mgr",
-            operation = "delegate",
-            timeout_ms = 600000,
-            params = {
-                description = {
-                    type = "string",
-                    description = "Detailed description of the task to delegate",
-                    required = true,
-                },
-                context = {
-                    type = "string",
-                    description = "Relevant context for the sub-agent (file paths, constraints, background)",
-                    required = false,
-                },
-            },
-        })
-        if delegate_reg and delegate_reg.ok then
-            orcs.log("debug", _name .. ": registered delegate_task intent")
-        else
-            orcs.log("warn", _name .. ": delegate_task intent registration failed: "
-                .. ((delegate_reg and delegate_reg.error) or "unknown"))
-        end
-
-        -- Register IntentDefs for registered agents (from payload).
-        -- Allows LLM to invoke specialized agents as tools.
-        -- Routes to agent_mgr "invoke_agent" operation, which spawns on-demand.
-        local registered_agent_names = {}
-        for _, agent in ipairs(input.registered_agents or {}) do
-            local agent_name = agent.name or ""
-            if agent_name ~= "" then
-                local agent_reg = orcs.register_intent({
-                    name = "invoke_" .. agent_name,
-                    description = (agent.expertise ~= "" and agent.expertise)
-                        or ("Invoke the " .. agent_name .. " agent"),
-                    component = "builtin::agent_mgr",
-                    operation = "invoke_agent",
-                    timeout_ms = 600000,
-                    params = {
-                        agent_name = {
-                            type = "string",
-                            description = "Name of the agent to invoke",
-                            required = true,
-                        },
-                        message = {
-                            type = "string",
-                            description = "Task or message to send to the agent",
-                            required = true,
-                        },
+        -- Register static IntentDefs (delegate_task + agent intents) once per VM.
+        -- These definitions are fixed after init and don't change across LLM turns.
+        -- Skill IntentDefs (above) are NOT guarded because recommended skills vary per turn.
+        if not _intents_registered then
+            -- Register delegate_task intent: allows LLM to delegate work to a sub-agent.
+            -- The IntentDef routes to agent_mgr, which spawns/dispatches to delegate-worker.
+            local delegate_reg = orcs.register_intent({
+                name = "delegate_task",
+                description = "Delegate a task to an independent sub-agent that runs its own LLM session with tool access. "
+                    .. "Use when the task requires separate investigation, research, or multi-step work "
+                    .. "that would benefit from independent processing. The sub-agent works asynchronously; "
+                    .. "results appear in your context on the next turn.",
+                component = "builtin::agent_mgr",
+                operation = "delegate",
+                timeout_ms = 600000,
+                params = {
+                    description = {
+                        type = "string",
+                        description = "Detailed description of the task to delegate",
+                        required = true,
                     },
-                })
-                if agent_reg and agent_reg.ok then
-                    registered_agent_names[#registered_agent_names + 1] = agent_name
-                else
-                    orcs.log("warn", _name .. ": agent intent registration failed: " .. agent_name
-                        .. " (" .. ((agent_reg and agent_reg.error) or "unknown") .. ")")
+                    context = {
+                        type = "string",
+                        description = "Relevant context for the sub-agent (file paths, constraints, background)",
+                        required = false,
+                    },
+                },
+            })
+            if delegate_reg and delegate_reg.ok then
+                orcs.log("debug", _name .. ": registered delegate_task intent")
+            else
+                orcs.log("warn", _name .. ": delegate_task intent registration failed: "
+                    .. ((delegate_reg and delegate_reg.error) or "unknown"))
+            end
+
+            -- Register IntentDefs for registered agents (from payload).
+            -- Allows LLM to invoke specialized agents as tools.
+            -- Routes to agent_mgr "invoke_agent" operation, which spawns on-demand.
+            local registered_agent_names = {}
+            for _, agent in ipairs(input.registered_agents or {}) do
+                local agent_name = agent.name or ""
+                if agent_name ~= "" then
+                    local agent_reg = orcs.register_intent({
+                        name = "invoke_" .. agent_name,
+                        description = (agent.expertise ~= "" and agent.expertise)
+                            or ("Invoke the " .. agent_name .. " agent"),
+                        component = "builtin::agent_mgr",
+                        operation = "invoke_agent",
+                        timeout_ms = 600000,
+                        params = {
+                            agent_name = {
+                                type = "string",
+                                description = "Name of the agent to invoke",
+                                required = true,
+                            },
+                            message = {
+                                type = "string",
+                                description = "Task or message to send to the agent",
+                                required = true,
+                            },
+                        },
+                    })
+                    if agent_reg and agent_reg.ok then
+                        registered_agent_names[#registered_agent_names + 1] = agent_name
+                    else
+                        orcs.log("warn", _name .. ": agent intent registration failed: " .. agent_name
+                            .. " (" .. ((agent_reg and agent_reg.error) or "unknown") .. ")")
+                    end
                 end
             end
-        end
-        if #registered_agent_names > 0 then
-            orcs.log("info", string.format(
-                "%s: registered %d agent intent(s): [%s]",
-                _name, #registered_agent_names, table.concat(registered_agent_names, ", ")
-            ))
+            if #registered_agent_names > 0 then
+                orcs.log("info", string.format(
+                    "%s: registered %d agent intent(s): [%s]",
+                    _name, #registered_agent_names, table.concat(registered_agent_names, ", ")
+                ))
+            end
+
+            _intents_registered = true
         end
 
         local tool_desc = ""
@@ -730,6 +741,24 @@ local agent_registry = {}
 --- Use find_spawned_by_name() for name-based lookup.
 local spawned_agents = {}
 
+--- Reverse index: name → channel_id.
+--- Maintained by spawn_agent() for O(1) name-based lookup.
+--- spawn_registered_agent() reuses existing instances, so same-name overwrites are safe.
+local spawned_by_name = {}
+
+--- Deep-copy a value recursively (tables are copied, non-tables passed through).
+--- Used to isolate registry definitions from spawned instance mutations.
+--- @param t any  Value to copy
+--- @return any  Deep-copied value
+local function deep_copy(t)
+    if type(t) ~= "table" then return t end
+    local copy = {}
+    for k, v in pairs(t) do
+        copy[k] = deep_copy(v)
+    end
+    return copy
+end
+
 --- Register an agent definition in the registry.
 --- Does NOT spawn the agent — just stores the config for on-demand use.
 --- @param name string  Agent name (used as @prefix and registry key)
@@ -748,14 +777,13 @@ local function register_agent(name, config)
     return true
 end
 
---- Find a spawned agent by name (returns the first match).
+--- Find a spawned agent by name via reverse index (O(1)).
 --- Used by @prefix routing and invoke_agent.
 --- @param name string  Agent name to look up
 --- @return table|nil  Spawned agent info { name, fqn, channel_id, config, persistent }
 local function find_spawned_by_name(name)
-    for _, info in pairs(spawned_agents) do
-        if info.name == name then return info end
-    end
+    local ch_id = spawned_by_name[name]
+    if ch_id then return spawned_agents[ch_id] end
     return nil
 end
 
@@ -795,11 +823,12 @@ local function spawn_agent(config, opts)
             config = config,
             persistent = config.persistent or false,
         }
+        spawned_by_name[config.name] = ch_id  -- Reverse index for O(1) lookup
         orcs.log("info", string.format(
             "spawned agent '%s' (channel=%s, fqn=%s)", config.name, ch_id, result.fqn
         ))
     end
-    return result
+    return result, (not result.ok) and result.error or nil
 end
 
 --- Spawn a registered agent by name (on-demand).
@@ -818,15 +847,7 @@ local function spawn_registered_agent(name)
         return { ok = true, fqn = existing.fqn }
     end
     -- Deep-copy config so spawn doesn't mutate registry
-    local config = {}
-    for k, v in pairs(reg) do
-        if type(v) == "table" then
-            config[k] = {}
-            for k2, v2 in pairs(v) do config[k][k2] = v2 end
-        else
-            config[k] = v
-        end
-    end
+    local config = deep_copy(reg)
     return spawn_agent(config)
 end
 
@@ -858,13 +879,17 @@ local function list_spawned_agents()
             persistent = info.persistent,
         }
     end
-    table.sort(result, function(a, b) return a.channel_id < b.channel_id end)
+    table.sort(result, function(a, b)
+        if a.name ~= b.name then return a.name < b.name end
+        return a.channel_id < b.channel_id
+    end)
     return result
 end
 
 -- === Constants & Settings ===
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
+local MAX_AGENT_INTENTS = 3  -- Max agent IntentDefs exposed to LLM per dispatch
 
 -- Component settings (populated from config in init())
 local component_settings = {}
@@ -887,6 +912,11 @@ local delegation_counter = 0
 
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
+
+--- Set of agent names authorized for LLM invocation via IntentDef.
+--- Updated by dispatch_llm() when building registered_agents_for_payload.
+--- Checked by invoke_agent handler to reject unauthorized agent_name values.
+local intent_allowed_agents = {}
 
 -- Mapping from component_settings keys (llm_*) to LLM config keys (without prefix).
 -- Single source of truth: used by dispatch_llm(), delegate operation, and init() ping.
@@ -1104,11 +1134,13 @@ local function dispatch_llm(message)
 
     -- Build registered agents list for CommonAgent IntentDef registration.
     -- Limited to MAX_AGENT_INTENTS to control LLM tool count and token usage.
-    local MAX_AGENT_INTENTS = 3
+    -- Also updates intent_allowed_agents set for invoke_agent validation.
     local registered_agents_for_payload = {}
+    intent_allowed_agents = {}  -- Reset on each dispatch (reflects latest registry)
     local reg_list = list_registered_agents()
     for i = 1, math.min(#reg_list, MAX_AGENT_INTENTS) do
         registered_agents_for_payload[i] = reg_list[i]
+        intent_allowed_agents[reg_list[i].name] = true
     end
 
     -- Emit AgentTask event (fire-and-forget, non-blocking).
@@ -1247,12 +1279,18 @@ return {
 
         -- Handle agent invocation from LLM IntentDef dispatch.
         -- Spawns registered agent on-demand and forwards the message via RPC.
+        -- Validates agent_name against intent_allowed_agents (set by dispatch_llm)
+        -- to prevent LLM from invoking agents not exposed via IntentDef.
         if operation == "invoke_agent" then
             local payload = request.payload or {}
             local agent_name = payload.agent_name or ""
             local agent_message = payload.message or ""
             if agent_name == "" then
                 return { success = false, error = "invoke_agent requires agent_name" }
+            end
+            if not intent_allowed_agents[agent_name] then
+                orcs.log("warn", "invoke_agent: rejected unauthorized agent_name '" .. agent_name .. "'")
+                return { success = false, error = "agent '" .. agent_name .. "' is not authorized for LLM invocation" }
             end
             if agent_message == "" then
                 return { success = false, error = "invoke_agent requires message" }

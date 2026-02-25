@@ -255,8 +255,10 @@ return {
     restore = function(state)
         if not state then return end
         metrics = state.metrics or {}
+        local count = 0
+        for _ in pairs(metrics) do count = count + 1 end
         orcs.log("info", string.format(
-            "console_metrics restored (%d metrics)", #metrics
+            "console_metrics restored (%d metrics)", count
         ))
     end,
 }
