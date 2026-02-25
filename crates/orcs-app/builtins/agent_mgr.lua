@@ -405,6 +405,48 @@ return {
                 .. ((delegate_reg and delegate_reg.error) or "unknown"))
         end
 
+        -- Register IntentDefs for registered agents (from payload).
+        -- Allows LLM to invoke specialized agents as tools.
+        -- Routes to agent_mgr "invoke_agent" operation, which spawns on-demand.
+        local registered_agent_names = {}
+        for _, agent in ipairs(input.registered_agents or {}) do
+            local agent_name = agent.name or ""
+            if agent_name ~= "" then
+                local agent_reg = orcs.register_intent({
+                    name = "invoke_" .. agent_name,
+                    description = (agent.expertise ~= "" and agent.expertise)
+                        or ("Invoke the " .. agent_name .. " agent"),
+                    component = "builtin::agent_mgr",
+                    operation = "invoke_agent",
+                    timeout_ms = 600000,
+                    params = {
+                        agent_name = {
+                            type = "string",
+                            description = "Name of the agent to invoke",
+                            required = true,
+                        },
+                        message = {
+                            type = "string",
+                            description = "Task or message to send to the agent",
+                            required = true,
+                        },
+                    },
+                })
+                if agent_reg and agent_reg.ok then
+                    registered_agent_names[#registered_agent_names + 1] = agent_name
+                else
+                    orcs.log("warn", _name .. ": agent intent registration failed: " .. agent_name
+                        .. " (" .. ((agent_reg and agent_reg.error) or "unknown") .. ")")
+                end
+            end
+        end
+        if #registered_agent_names > 0 then
+            orcs.log("info", string.format(
+                "%s: registered %d agent intent(s): [%s]",
+                _name, #registered_agent_names, table.concat(registered_agent_names, ", ")
+            ))
+        end
+
         local tool_desc = ""
         if orcs.tool_descriptions then
             local td = orcs.tool_descriptions()
@@ -458,6 +500,38 @@ return {
 
         -- Console metrics — after agent identity
         if console_block ~= "" then sections[#sections + 1] = console_block end
+
+        -- Agent status — after console metrics
+        local agents_block = ""
+        local status = input.agent_status
+        if status then
+            local parts = {}
+            parts[#parts + 1] = "[Agent Status]"
+            if status.registered and #status.registered > 0 then
+                local names = {}
+                for _, a in ipairs(status.registered) do
+                    local label = a.name
+                    if a.spawned then label = label .. " (running)" end
+                    names[#names + 1] = label
+                end
+                parts[#parts + 1] = "Registered: " .. table.concat(names, ", ")
+            end
+            if status.spawned and #status.spawned > 0 then
+                local running = {}
+                for _, a in ipairs(status.spawned) do
+                    if a.persistent then
+                        running[#running + 1] = a.name .. " (persistent)"
+                    end
+                end
+                if #running > 0 then
+                    parts[#parts + 1] = "Running: " .. table.concat(running, ", ")
+                end
+            end
+            if #parts > 1 then
+                agents_block = table.concat(parts, "\n")
+            end
+        end
+        if agents_block ~= "" then sections[#sections + 1] = agents_block end
 
         if placement == "top" then
             -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [f:guard] [UserInput]
@@ -1032,6 +1106,21 @@ local function dispatch_llm(message)
     -- Extract LLM-specific config (llm_* keys → config table without prefix)
     local llm_config = extract_llm_config()
 
+    -- Build registered agents list for CommonAgent IntentDef registration.
+    -- Limited to MAX_AGENT_INTENTS to control LLM tool count and token usage.
+    local MAX_AGENT_INTENTS = 3
+    local registered_agents_for_payload = {}
+    local reg_list = list_registered_agents()
+    for i = 1, math.min(#reg_list, MAX_AGENT_INTENTS) do
+        registered_agents_for_payload[i] = reg_list[i]
+    end
+
+    -- Build agent status for prompt context injection.
+    local agent_status = {
+        registered = reg_list,
+        spawned = list_spawned_agents(),
+    }
+
     -- Emit AgentTask event (fire-and-forget, non-blocking).
     -- Subscribers (primary agent or concierge) receive this and process asynchronously.
     local payload = {
@@ -1040,6 +1129,8 @@ local function dispatch_llm(message)
         llm_config = llm_config,
         history_context = history_context,
         delegation_context = delegation_context,
+        registered_agents = registered_agents_for_payload,
+        agent_status = agent_status,
     }
     local delivered = orcs.emit_event("AgentTask", "process", payload)
 
@@ -1159,6 +1250,61 @@ return {
                 data = {
                     request_id = request_id,
                     message = "Task delegated to sub-agent (id: " .. request_id .. "). Results will appear in your context on the next turn.",
+                },
+            }
+        end
+
+        -- Handle agent invocation from LLM IntentDef dispatch.
+        -- Spawns registered agent on-demand and forwards the message via RPC.
+        if operation == "invoke_agent" then
+            local payload = request.payload or {}
+            local agent_name = payload.agent_name or ""
+            local agent_message = payload.message or ""
+            if agent_name == "" then
+                return { success = false, error = "invoke_agent requires agent_name" }
+            end
+            if agent_message == "" then
+                return { success = false, error = "invoke_agent requires message" }
+            end
+
+            -- Spawn from registry (or reuse existing)
+            local spawn_result, spawn_err = spawn_registered_agent(agent_name)
+            if not spawn_result or not spawn_result.ok then
+                return { success = false, error = spawn_err or "agent spawn failed" }
+            end
+
+            local agent_info = spawned_agents[agent_name]
+            if not agent_info then
+                return { success = false, error = "agent spawned but not found in registry" }
+            end
+
+            -- Forward message to the spawned agent via RPC
+            local resp = orcs.request(agent_info.fqn, "process", {
+                message = agent_message,
+                llm_config = extract_llm_config(),
+                prompt_placement = component_settings.prompt_placement or "both",
+            })
+            if resp and resp.success then
+                return {
+                    success = true,
+                    data = {
+                        response = resp.data,
+                        source = "agent:" .. agent_name,
+                    },
+                }
+            else
+                local err = (resp and resp.error) or "agent request failed"
+                return { success = false, error = err }
+            end
+        end
+
+        -- List registered and spawned agents.
+        if operation == "list_agents" then
+            return {
+                success = true,
+                data = {
+                    registered = list_registered_agents(),
+                    spawned = list_spawned_agents(),
                 },
             }
         end
