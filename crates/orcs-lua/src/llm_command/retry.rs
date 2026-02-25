@@ -44,7 +44,10 @@ pub(super) fn send_with_retry(
             .header("Content-Type", "application/json");
 
         match opts.provider {
-            Provider::OpenAICompat => {
+            Provider::Ollama => {
+                // Ollama does not require authentication
+            }
+            Provider::OpenAI => {
                 if let Some(ref key) = opts.api_key {
                     req = req.header("Authorization", format!("Bearer {}", key));
                 }
@@ -194,9 +197,8 @@ pub(crate) fn truncate_for_error(s: &str, max: usize) -> &str {
 /// Read a response body as a UTF-8 string with a size limit.
 ///
 /// Uses `content-length` header for early rejection when available,
-/// then streams chunks with a running size check. The final `Bytes`
-/// buffer is converted to `String` in a single step (no intermediate
-/// `Vec<u8>` copy).
+/// then streams chunks into a `BytesMut` with a running size check.
+/// The buffer is frozen and converted to `String` via `to_vec()`.
 ///
 /// Bridges async reqwest into the sync context via `block_in_place`.
 pub(crate) fn read_body_limited(

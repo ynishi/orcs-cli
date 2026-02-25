@@ -1,20 +1,23 @@
 //! LLM provider abstraction and request body builders.
 //!
-//! # Design Decision: OpenAI API Format Unification
+//! # Design
 //!
-//! All OpenAI-compatible servers (OpenAI, Ollama, llama.cpp, vLLM, LM Studio)
-//! are handled via a single `OpenAICompat` variant using the standard
-//! `/v1/chat/completions` endpoint. The only difference is `base_url`.
+//! `Provider` identifies **which server** we are talking to (Ollama, OpenAI,
+//! Anthropic). Each provider carries its own metadata: default base URL,
+//! default model, API-key env var, and health-check path.
 //!
-//! This design was chosen because:
-//! - Ollama natively supports `/v1/chat/completions` (OpenAI-compat mode)
-//! - llama.cpp server implements the same OpenAI-compatible API
-//! - vLLM, SGLang, LM Studio all follow the OpenAI spec
-//! - Maintaining per-server adapters (e.g. Ollama `/api/chat`) was unnecessary
-//!   code surface for functionally identical behavior
+//! `WireFormat` identifies **how** the request/response is serialized.
+//! Ollama and OpenAI share the same OpenAI Chat Completions wire format
+//! (`/v1/chat/completions`), while Anthropic uses a distinct format
+//! (`/v1/messages`). The mapping is: `Provider → WireFormat` via
+//! [`Provider::wire_format()`].
 //!
-//! Anthropic uses a distinct wire format (`/v1/messages` with different JSON
-//! schema) and is handled as a separate variant with `reqwest` directly.
+//! ```text
+//! Provider::Ollama   ─┐
+//!                      ├─ WireFormat::OpenAI  (/v1/chat/completions)
+//! Provider::OpenAI   ─┘
+//! Provider::Anthropic ── WireFormat::Anthropic (/v1/messages)
+//! ```
 //!
 //! # Continuous Batching (llama.cpp / vLLM)
 //!
@@ -32,20 +35,31 @@ use crate::tool_registry::IntentRegistry;
 
 // ── Provider ───────────────────────────────────────────────────────────
 
-/// Supported LLM provider categories.
+/// Supported LLM providers.
 ///
-/// `OpenAICompat` covers any server implementing the OpenAI Chat Completions API:
-/// - OpenAI (`https://api.openai.com`)
-/// - Ollama (`http://localhost:11434`)
-/// - llama.cpp server (`http://localhost:8080`)
-/// - vLLM, SGLang, LM Studio, etc.
-///
-/// `Anthropic` uses a distinct wire format and is handled separately.
+/// Each variant identifies a specific server/service with its own defaults
+/// (base URL, model, API key, health-check path). The **wire format** used
+/// for request/response serialization is determined by [`Provider::wire_format()`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Provider {
-    /// Any server implementing the OpenAI Chat Completions API.
-    OpenAICompat,
-    /// Anthropic Messages API (distinct wire format).
+    /// Ollama local server. Wire format: OpenAI (`/v1/chat/completions`).
+    Ollama,
+    /// OpenAI API. Wire format: OpenAI (`/v1/chat/completions`).
+    OpenAI,
+    /// Anthropic Messages API. Wire format: Anthropic (`/v1/messages`).
+    Anthropic,
+}
+
+/// Wire format for request/response serialization.
+///
+/// Multiple providers can share the same wire format. This enum is used
+/// internally to select the correct body builder and response parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WireFormat {
+    /// OpenAI Chat Completions format (`/v1/chat/completions`).
+    /// Used by: Ollama, OpenAI, llama.cpp, vLLM, LM Studio, SGLang.
+    OpenAI,
+    /// Anthropic Messages format (`/v1/messages`).
     Anthropic,
 }
 
@@ -54,14 +68,14 @@ impl std::str::FromStr for Provider {
 
     /// Parse provider from string (case-insensitive).
     ///
-    /// Accepts: "openai", "ollama", "openai_compat", "anthropic".
-    /// "ollama" maps to `OpenAICompat` since Ollama supports `/v1/chat/completions`.
+    /// Accepts: "ollama", "openai", "anthropic".
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "ollama" | "openai" | "openai_compat" => Ok(Self::OpenAICompat),
+            "ollama" => Ok(Self::Ollama),
+            "openai" => Ok(Self::OpenAI),
             "anthropic" => Ok(Self::Anthropic),
             other => Err(format!(
-                "unsupported provider: '{}' (expected: ollama, openai, openai_compat, anthropic)",
+                "unsupported provider: '{}' (expected: ollama, openai, anthropic)",
                 other
             )),
         }
@@ -72,18 +86,25 @@ impl Provider {
     /// Stable string identifier for this provider (used in Lua result tables).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::OpenAICompat => "openai_compat",
+            Self::Ollama => "ollama",
+            Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
         }
     }
 
+    /// Wire format used by this provider for request/response serialization.
+    pub fn wire_format(self) -> WireFormat {
+        match self {
+            Self::Ollama | Self::OpenAI => WireFormat::OpenAI,
+            Self::Anthropic => WireFormat::Anthropic,
+        }
+    }
+
     /// Default base URL for this provider.
-    ///
-    /// `OpenAICompat` defaults to Ollama's local URL. For OpenAI or other
-    /// remote servers, set `base_url` explicitly or use `ORCS_LLM_BASE_URL`.
     pub fn default_base_url(self) -> &'static str {
         match self {
-            Self::OpenAICompat => "http://localhost:11434",
+            Self::Ollama => "http://localhost:11434",
+            Self::OpenAI => "https://api.openai.com",
             Self::Anthropic => "https://api.anthropic.com",
         }
     }
@@ -91,54 +112,66 @@ impl Provider {
     /// Default model for this provider.
     pub fn default_model(self) -> &'static str {
         match self {
-            Self::OpenAICompat => "llama3.2",
+            Self::Ollama => "llama3.2",
+            Self::OpenAI => "gpt-4o",
             Self::Anthropic => "claude-sonnet-4-20250514",
         }
     }
 
     /// Chat API path for this provider.
+    ///
+    /// Ollama and OpenAI share the same path (`/v1/chat/completions`).
     pub fn chat_path(self) -> &'static str {
-        match self {
-            Self::OpenAICompat => "/v1/chat/completions",
-            Self::Anthropic => "/v1/messages",
+        match self.wire_format() {
+            WireFormat::OpenAI => "/v1/chat/completions",
+            WireFormat::Anthropic => "/v1/messages",
         }
     }
 
     /// Environment variable name for the API key.
     ///
-    /// For `OpenAICompat`, checks `OPENAI_API_KEY`. Local servers (Ollama,
-    /// llama.cpp) simply won't have this set, which is fine — the key is
-    /// sent only when present.
+    /// Ollama runs locally and does not require an API key.
     pub fn api_key_env(self) -> Option<&'static str> {
         match self {
-            Self::OpenAICompat => Some("OPENAI_API_KEY"),
+            Self::Ollama => None,
+            Self::OpenAI => Some("OPENAI_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
         }
     }
 
     /// Health-check path for this provider.
     ///
-    /// - OpenAICompat: `GET /v1/models` (standard OpenAI endpoint)
-    /// - Anthropic: `POST /v1/messages` (no dedicated health endpoint)
+    /// - Ollama: `GET /` returns `"Ollama is running"` (no auth)
+    /// - OpenAI: `GET /v1/models` (requires auth, but proves connectivity)
+    /// - Anthropic: probe the chat path (no dedicated health endpoint)
     pub fn health_path(self) -> &'static str {
         match self {
-            Self::OpenAICompat => "/v1/models",
+            Self::Ollama => "/",
+            Self::OpenAI => "/v1/models",
             Self::Anthropic => "/v1/messages",
+        }
+    }
+
+    /// Whether this provider requires an API key.
+    pub fn requires_api_key(self) -> bool {
+        match self {
+            Self::Ollama => false,
+            Self::OpenAI | Self::Anthropic => true,
         }
     }
 }
 
 // ── Request Body Builders ──────────────────────────────────────────────
 
-/// Build the JSON request body for the given provider.
+/// Build the JSON request body for the given provider's wire format.
 pub(super) fn build_request_body(
     opts: &LlmOpts,
     messages: &[Message],
     tools: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    match opts.provider {
-        Provider::OpenAICompat => build_openai_body(opts, messages, tools),
-        Provider::Anthropic => build_anthropic_body(opts, messages, tools),
+    match opts.provider.wire_format() {
+        WireFormat::OpenAI => build_openai_body(opts, messages, tools),
+        WireFormat::Anthropic => build_anthropic_body(opts, messages, tools),
     }
 }
 
@@ -369,9 +402,9 @@ pub(super) fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<
         defs.len(),
         provider
     );
-    let tools = match provider {
-        Provider::Anthropic => build_tools_anthropic_format(defs),
-        Provider::OpenAICompat => build_tools_openai_format(defs),
+    let tools = match provider.wire_format() {
+        WireFormat::Anthropic => build_tools_anthropic_format(defs),
+        WireFormat::OpenAI => build_tools_openai_format(defs),
     };
     Some(tools)
 }
@@ -430,22 +463,12 @@ mod tests {
     #[test]
     fn provider_from_str_valid() {
         assert_eq!(
-            "ollama"
-                .parse::<Provider>()
-                .expect("should parse ollama as OpenAICompat"),
-            Provider::OpenAICompat
+            "ollama".parse::<Provider>().expect("should parse ollama"),
+            Provider::Ollama
         );
         assert_eq!(
-            "OpenAI"
-                .parse::<Provider>()
-                .expect("should parse OpenAI as OpenAICompat"),
-            Provider::OpenAICompat
-        );
-        assert_eq!(
-            "openai_compat"
-                .parse::<Provider>()
-                .expect("should parse openai_compat"),
-            Provider::OpenAICompat
+            "OpenAI".parse::<Provider>().expect("should parse OpenAI"),
+            Provider::OpenAI
         );
         assert_eq!(
             "ANTHROPIC"
@@ -470,29 +493,57 @@ mod tests {
     #[test]
     fn provider_defaults() {
         assert_eq!(
-            Provider::OpenAICompat.default_base_url(),
+            Provider::Ollama.default_base_url(),
             "http://localhost:11434"
+        );
+        assert_eq!(
+            Provider::OpenAI.default_base_url(),
+            "https://api.openai.com"
         );
         assert_eq!(
             Provider::Anthropic.default_base_url(),
             "https://api.anthropic.com"
         );
 
-        assert_eq!(Provider::OpenAICompat.default_model(), "llama3.2");
+        assert_eq!(Provider::Ollama.default_model(), "llama3.2");
+        assert_eq!(Provider::OpenAI.default_model(), "gpt-4o");
         assert_eq!(
             Provider::Anthropic.default_model(),
             "claude-sonnet-4-20250514"
         );
 
-        // All OpenAI-compat providers use the same standard path
-        assert_eq!(Provider::OpenAICompat.chat_path(), "/v1/chat/completions");
+        // Ollama and OpenAI share the same chat path via wire_format
+        assert_eq!(Provider::Ollama.chat_path(), "/v1/chat/completions");
+        assert_eq!(Provider::OpenAI.chat_path(), "/v1/chat/completions");
         assert_eq!(Provider::Anthropic.chat_path(), "/v1/messages");
     }
 
     #[test]
     fn provider_api_key_env() {
-        assert_eq!(Provider::OpenAICompat.api_key_env(), Some("OPENAI_API_KEY"));
+        assert_eq!(Provider::Ollama.api_key_env(), None);
+        assert_eq!(Provider::OpenAI.api_key_env(), Some("OPENAI_API_KEY"));
         assert_eq!(Provider::Anthropic.api_key_env(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn provider_wire_format() {
+        assert_eq!(Provider::Ollama.wire_format(), WireFormat::OpenAI);
+        assert_eq!(Provider::OpenAI.wire_format(), WireFormat::OpenAI);
+        assert_eq!(Provider::Anthropic.wire_format(), WireFormat::Anthropic);
+    }
+
+    #[test]
+    fn provider_requires_api_key() {
+        assert!(!Provider::Ollama.requires_api_key());
+        assert!(Provider::OpenAI.requires_api_key());
+        assert!(Provider::Anthropic.requires_api_key());
+    }
+
+    #[test]
+    fn provider_health_path() {
+        assert_eq!(Provider::Ollama.health_path(), "/");
+        assert_eq!(Provider::OpenAI.health_path(), "/v1/models");
+        assert_eq!(Provider::Anthropic.health_path(), "/v1/messages");
     }
 
     // ── Request body builder tests ─────────────────────────────────────
@@ -500,7 +551,7 @@ mod tests {
     #[test]
     fn build_openai_body_basic() {
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: "http://localhost:11434".into(),
             model: "llama3.2".into(),
             api_key: None,
@@ -524,7 +575,7 @@ mod tests {
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
-        // No Ollama-specific "options" key — unified format
+        // Uses standard OpenAI format (no Ollama-specific "options" key)
         assert!(
             body.get("options").is_none(),
             "should not have Ollama 'options' key"
@@ -534,7 +585,7 @@ mod tests {
     #[test]
     fn build_openai_body_with_options() {
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: "http://localhost:11434".into(),
             model: "llama3.2".into(),
             api_key: None,
@@ -562,7 +613,7 @@ mod tests {
     #[test]
     fn build_openai_body_openai_server() {
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::OpenAI,
             base_url: "https://api.openai.com".into(),
             model: "gpt-4o".into(),
             api_key: Some("sk-test".into()),

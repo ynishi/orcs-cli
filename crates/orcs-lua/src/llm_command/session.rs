@@ -184,7 +184,7 @@ mod tests {
         let sid = resolve_session_id(&lua, &None);
 
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: String::new(),
             model: String::new(),
             api_key: None,
@@ -243,7 +243,7 @@ mod tests {
         update_session(&lua, &sid, "first question", "first answer");
 
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: String::new(),
             model: String::new(),
             api_key: None,

@@ -8,16 +8,17 @@
 //! Lua: orcs.llm(prompt, opts)
 //!   → Capability::LLM gate (ctx_fns / child)
 //!   → llm_request_impl (Rust/reqwest)
-//!       ├── OpenAICompat: POST {base_url}/v1/chat/completions
-//!       │   (OpenAI, Ollama, llama.cpp, vLLM — all share /v1/ wire format)
-//!       └── Anthropic:    POST {base_url}/v1/messages
+//!       ├── Ollama:    POST {base_url}/v1/chat/completions  ─┐
+//!       ├── OpenAI:    POST {base_url}/v1/chat/completions  ─┤ WireFormat::OpenAI
+//!       │   (llama.cpp, vLLM, LM Studio also use this)      ─┘
+//!       └── Anthropic: POST {base_url}/v1/messages           ── WireFormat::Anthropic
 //! ```
 //!
 //! # Design Decisions
 //!
-//! - **OpenAI-compat unification**: Ollama, llama.cpp, and vLLM all expose
-//!   `/v1/chat/completions` with the OpenAI wire format. A single
-//!   `Provider::OpenAICompat` variant handles all of them — no per-server adapters.
+//! - **Provider vs WireFormat**: `Provider` identifies the server (Ollama, OpenAI,
+//!   Anthropic) with its own defaults. `WireFormat` (OpenAI or Anthropic) controls
+//!   request/response serialization. Multiple providers can share a wire format.
 //! - **reqwest (async)**: HTTP client bridged into sync Lua context via
 //!   `tokio::task::block_in_place(|| handle.block_on(...))`. Enables future
 //!   streaming support and aligns with `async-openai`'s internal transport.
@@ -305,7 +306,10 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
     let mut req = client.get(&url).timeout(Duration::from_secs(timeout));
     // Attach auth headers for providers that need them
     match provider {
-        Provider::OpenAICompat => {
+        Provider::Ollama => {
+            // Ollama does not require authentication
+        }
+        Provider::OpenAI => {
             if let Some(ref key) = api_key {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
@@ -326,7 +330,8 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
         Ok(resp) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
-            // Any HTTP response (including 4xx/5xx) confirms connectivity
+            // ok=true means "server responded" (reachable). The caller should
+            // inspect `status` to distinguish 200 from 401/403/5xx etc.
             result.set("ok", true)?;
             result.set("status", status)?;
             result.set("latency_ms", latency.as_millis() as u64)?;
@@ -451,9 +456,8 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         }
     };
 
-    // Validate API key requirement (Anthropic always requires it;
-    // OpenAICompat is optional — local servers like Ollama/llama.cpp don't need one)
-    if llm_opts.provider == Provider::Anthropic && llm_opts.api_key.is_none() {
+    // Validate API key requirement for providers that need one
+    if llm_opts.provider.requires_api_key() && llm_opts.api_key.is_none() {
         let env_name = llm_opts
             .provider
             .api_key_env()
@@ -628,9 +632,9 @@ mod tests {
     // ── LlmOpts tests ─────────────────────────────────────────────────
 
     #[test]
-    fn llm_opts_defaults_to_openai_compat() {
+    fn llm_opts_defaults_to_ollama() {
         let opts = LlmOpts::from_lua(None).expect("should parse None opts");
-        assert_eq!(opts.provider, Provider::OpenAICompat);
+        assert_eq!(opts.provider, Provider::Ollama);
         assert_eq!(opts.base_url, "http://localhost:11434");
         assert_eq!(opts.model, "llama3.2");
         assert_eq!(opts.timeout, 120);
@@ -665,7 +669,7 @@ mod tests {
         tbl.set("api_key", "sk-test").expect("set api_key");
 
         let opts = LlmOpts::from_lua(Some(&tbl)).expect("should parse opts");
-        assert_eq!(opts.provider, Provider::OpenAICompat);
+        assert_eq!(opts.provider, Provider::OpenAI);
         assert_eq!(opts.base_url, "https://custom.api.com");
         assert_eq!(opts.model, "gpt-4o-mini");
         assert_eq!(opts.temperature, Some(0.5));
@@ -945,12 +949,12 @@ mod tests {
     // ── Ping tests ──────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn ping_defaults_to_openai_compat() {
+    async fn ping_defaults_to_ollama() {
         let lua = Lua::new();
         let result = llm_ping_impl(&lua, None).expect("should not panic");
 
         let provider: String = result.get("provider").expect("get provider");
-        assert_eq!(provider, "openai_compat");
+        assert_eq!(provider, "ollama");
 
         let base_url: String = result.get("base_url").expect("get base_url");
         assert_eq!(base_url, "http://localhost:11434");
@@ -1023,34 +1027,27 @@ mod tests {
 
     // ── Integration: llm_request_impl with missing API key ─────────────
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn openai_compat_no_api_key_required() {
+    #[test]
+    fn openai_missing_api_key_returns_error() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "openai").expect("set provider");
-        opts.set("timeout", 1u64).expect("set timeout");
 
-        // Temporarily clear the env var to ensure test isolation
         let prev = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");
 
         let result =
             llm_request_impl(&lua, ("hello".into(), Some(opts))).expect("should not panic");
 
-        // Restore env
         if let Some(val) = prev {
             std::env::set_var("OPENAI_API_KEY", val);
         }
 
-        // OpenAICompat does NOT require an API key (local servers like Ollama/llama.cpp).
-        // The request may fail due to connection issues, but NOT due to missing_api_key.
-        if !result.get::<bool>("ok").expect("get ok") {
-            let error_kind: String = result.get("error_kind").expect("get error_kind");
-            assert_ne!(
-                error_kind, "missing_api_key",
-                "openai_compat should not require API key"
-            );
-        }
+        assert!(!result.get::<bool>("ok").expect("get ok"));
+        assert_eq!(
+            result.get::<String>("error_kind").expect("get error_kind"),
+            "missing_api_key"
+        );
     }
 
     #[test]
@@ -1185,7 +1182,7 @@ mod tests {
         );
 
         let provider: String = result.get("provider").expect("get provider");
-        assert_eq!(provider, "openai_compat");
+        assert_eq!(provider, "ollama");
 
         eprintln!("[E2E] ping ok={ok} status={status} latency={latency}ms");
     }

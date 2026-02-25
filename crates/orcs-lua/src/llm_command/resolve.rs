@@ -26,14 +26,14 @@ pub(super) fn parse_provider_response(
     provider: Provider,
     json: &serde_json::Value,
 ) -> Result<ParsedLlmResponse, String> {
-    let blocks = match provider {
-        Provider::OpenAICompat => llm_adapter::extract_content_openai(json),
-        Provider::Anthropic => llm_adapter::extract_content_anthropic(json),
+    let blocks = match provider.wire_format() {
+        super::provider::WireFormat::OpenAI => llm_adapter::extract_content_openai(json),
+        super::provider::WireFormat::Anthropic => llm_adapter::extract_content_anthropic(json),
     };
 
-    let stop_reason = match provider {
-        Provider::OpenAICompat => llm_adapter::extract_stop_reason_openai(json),
-        Provider::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
+    let stop_reason = match provider.wire_format() {
+        super::provider::WireFormat::OpenAI => llm_adapter::extract_stop_reason_openai(json),
+        super::provider::WireFormat::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
     };
 
     let intents = llm_adapter::content_blocks_to_intents(&blocks);
@@ -308,7 +308,7 @@ mod tests {
 
     /// Ollama `/v1/chat/completions` returns OpenAI-compatible format.
     #[test]
-    fn parse_openai_compat_ollama_response_success() {
+    fn parse_ollama_response_success() {
         let json = serde_json::json!({
             "model": "llama3.2",
             "choices": [{
@@ -320,8 +320,8 @@ mod tests {
                 "finish_reason": "stop"
             }]
         });
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
-            .expect("should parse ollama openai-compat response");
+        let parsed =
+            parse_provider_response(Provider::Ollama, &json).expect("should parse ollama response");
         assert_eq!(parsed.content, "Hello! How can I help?");
         assert_eq!(parsed.model, Some("llama3.2".to_string()));
         assert_eq!(parsed.stop_reason, StopReason::EndTurn);
@@ -332,9 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_compat_empty_returns_empty_content() {
+    fn parse_ollama_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "llama3.2"});
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
+        let parsed = parse_provider_response(Provider::Ollama, &json)
             .expect("should parse even with missing choices");
         assert_eq!(parsed.content, "", "empty response → empty content");
     }
@@ -358,8 +358,8 @@ mod tests {
                 "total_tokens": 15
             }
         });
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
-            .expect("should parse openai response");
+        let parsed =
+            parse_provider_response(Provider::OpenAI, &json).expect("should parse openai response");
         assert_eq!(parsed.content, "Hello from OpenAI!");
         assert_eq!(parsed.model, Some("gpt-4o-2024-05-13".to_string()));
         assert_eq!(parsed.stop_reason, StopReason::EndTurn);
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn parse_openai_response_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "gpt-4o"});
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
+        let parsed = parse_provider_response(Provider::OpenAI, &json)
             .expect("should parse even with missing choices");
         assert_eq!(parsed.content, "");
     }
@@ -425,7 +425,7 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
+        let parsed = parse_provider_response(Provider::OpenAI, &json)
             .expect("should parse tool_calls response");
         assert_eq!(parsed.content, "Let me read that.");
         assert_eq!(parsed.stop_reason, StopReason::ToolUse);
@@ -454,9 +454,9 @@ mod tests {
         assert_eq!(parsed.intents[0].name, "grep");
     }
 
-    /// Ollama tool_calls via OpenAI-compatible format.
+    /// Ollama tool_calls via OpenAI-compatible wire format.
     #[test]
-    fn parse_openai_compat_tool_calls_response() {
+    fn parse_ollama_tool_calls_response() {
         let json = serde_json::json!({
             "model": "llama3.2",
             "choices": [{
@@ -475,8 +475,8 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let parsed = parse_provider_response(Provider::OpenAICompat, &json)
-            .expect("should parse openai-compat tool_calls");
+        let parsed = parse_provider_response(Provider::Ollama, &json)
+            .expect("should parse ollama tool_calls");
         assert_eq!(parsed.stop_reason, StopReason::ToolUse);
         assert_eq!(parsed.intents.len(), 1);
         assert_eq!(parsed.intents[0].name, "exec");
@@ -574,7 +574,7 @@ mod tests {
             intents: vec![],
         };
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: "http://localhost:11434".to_string(),
             model: "llama3.2".to_string(),
             api_key: None,
@@ -634,7 +634,7 @@ mod tests {
             ],
         };
         let opts = LlmOpts {
-            provider: Provider::OpenAICompat,
+            provider: Provider::Ollama,
             base_url: "http://localhost:11434".to_string(),
             model: "llama3.2".to_string(),
             api_key: None,
