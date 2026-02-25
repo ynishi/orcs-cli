@@ -501,38 +501,6 @@ return {
         -- Console metrics — after agent identity
         if console_block ~= "" then sections[#sections + 1] = console_block end
 
-        -- Agent status — after console metrics
-        local agents_block = ""
-        local status = input.agent_status
-        if status then
-            local parts = {}
-            parts[#parts + 1] = "[Agent Status]"
-            if status.registered and #status.registered > 0 then
-                local names = {}
-                for _, a in ipairs(status.registered) do
-                    local label = a.name
-                    if a.spawned then label = label .. " (running)" end
-                    names[#names + 1] = label
-                end
-                parts[#parts + 1] = "Registered: " .. table.concat(names, ", ")
-            end
-            if status.spawned and #status.spawned > 0 then
-                local running = {}
-                for _, a in ipairs(status.spawned) do
-                    if a.persistent then
-                        running[#running + 1] = a.name .. " (persistent)"
-                    end
-                end
-                if #running > 0 then
-                    parts[#parts + 1] = "Running: " .. table.concat(running, ", ")
-                end
-            end
-            if #parts > 1 then
-                agents_block = table.concat(parts, "\n")
-            end
-        end
-        if agents_block ~= "" then sections[#sections + 1] = agents_block end
-
         if placement == "top" then
             -- [f:system] [Metrics] [Skills/Tools] [f:task] [History] [Delegation] [f:guard] [UserInput]
             if system_full ~= "" then sections[#sections + 1] = system_full end
@@ -1115,14 +1083,10 @@ local function dispatch_llm(message)
         registered_agents_for_payload[i] = reg_list[i]
     end
 
-    -- Build agent status for prompt context injection.
-    local agent_status = {
-        registered = reg_list,
-        spawned = list_spawned_agents(),
-    }
-
     -- Emit AgentTask event (fire-and-forget, non-blocking).
     -- Subscribers (primary agent or concierge) receive this and process asynchronously.
+    -- Note: agent_status is provided by console_metrics (via list_agents RPC),
+    -- not in this payload. registered_agents is for IntentDef registration only.
     local payload = {
         message = message,
         prompt_placement = placement,
@@ -1130,7 +1094,6 @@ local function dispatch_llm(message)
         history_context = history_context,
         delegation_context = delegation_context,
         registered_agents = registered_agents_for_payload,
-        agent_status = agent_status,
     }
     local delivered = orcs.emit_event("AgentTask", "process", payload)
 

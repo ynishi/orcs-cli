@@ -8,10 +8,13 @@
 -- without redundant subprocess invocations within a single prompt cycle.
 --
 -- Operations:
---   get_all      -> all metrics as { cwd, project_name, git, timestamp }
+--   get_all      -> all metrics as { cwd, project_name, git, timestamp, agents }
 --   get_metric   -> { name: "git" } -> single metric
 --   refresh      -> force refresh all metrics
 --   status       -> component status summary
+--
+-- External dependencies:
+--   builtin::agent_mgr (list_agents) -> registered/spawned agent status
 
 -- === Module State ===
 
@@ -57,6 +60,35 @@ local function format_for_prompt(m)
         parts[#parts + 1] = "Time: " .. m.timestamp
     end
 
+    -- Agent status (from agent_mgr list_agents RPC)
+    if m.agents then
+        local a = m.agents
+        local agent_parts = {}
+        if a.registered and #a.registered > 0 then
+            local names = {}
+            for _, reg in ipairs(a.registered) do
+                local label = reg.name
+                if reg.spawned then label = label .. " (running)" end
+                names[#names + 1] = label
+            end
+            agent_parts[#agent_parts + 1] = "Available: " .. table.concat(names, ", ")
+        end
+        if a.spawned and #a.spawned > 0 then
+            local persistent = {}
+            for _, s in ipairs(a.spawned) do
+                if s.persistent then
+                    persistent[#persistent + 1] = s.name
+                end
+            end
+            if #persistent > 0 then
+                agent_parts[#agent_parts + 1] = "Persistent: " .. table.concat(persistent, ", ")
+            end
+        end
+        if #agent_parts > 0 then
+            parts[#parts + 1] = "Agents: " .. table.concat(agent_parts, " | ")
+        end
+    end
+
     return table.concat(parts, "\n")
 end
 
@@ -81,6 +113,12 @@ local function collect_metrics()
 
     -- Timestamp
     m.timestamp = os.date("%Y-%m-%d %H:%M:%S")
+
+    -- Agent status (query agent_mgr for registered/spawned agents)
+    local agent_resp = orcs.request("builtin::agent_mgr", "list_agents", {})
+    if agent_resp and agent_resp.success and agent_resp.data then
+        m.agents = agent_resp.data
+    end
 
     return m
 end
