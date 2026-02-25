@@ -38,7 +38,7 @@ use tracing::warn;
 ///   }]
 /// }
 /// ```
-pub fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
+pub(crate) fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
 
     let message = match json
@@ -112,7 +112,7 @@ pub fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
 ///   ]
 /// }
 /// ```
-pub fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> {
+pub(crate) fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
 
     let content_array = match json.get("content").and_then(|c| c.as_array()) {
@@ -174,7 +174,7 @@ pub fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> 
 /// Extract normalized `StopReason` from an OpenAI response.
 ///
 /// OpenAI: `choices[0].finish_reason` → "stop" | "tool_calls" | "length"
-pub fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
+pub(crate) fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
     let reason = json
         .get("choices")
         .and_then(|c| c.get(0))
@@ -192,7 +192,7 @@ pub fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
 /// Extract normalized `StopReason` from an Anthropic response.
 ///
 /// Anthropic: `stop_reason` → "end_turn" | "tool_use" | "max_tokens"
-pub fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
+pub(crate) fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
     let reason = json
         .get("stop_reason")
         .and_then(|r| r.as_str())
@@ -210,7 +210,7 @@ pub fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
 /// Convert tool_use content blocks into `ActionIntent`s.
 ///
 /// Only `ContentBlock::ToolUse` blocks are converted; text blocks are skipped.
-pub fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
+pub(crate) fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -227,7 +227,7 @@ pub fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
 /// Returns `MessageContent::Text` when there's only a single text block
 /// (backward-compatible). Returns `MessageContent::Blocks` when there are
 /// multiple blocks or any tool_use blocks.
-pub fn blocks_to_message_content(blocks: Vec<ContentBlock>) -> MessageContent {
+pub(crate) fn blocks_to_message_content(blocks: Vec<ContentBlock>) -> MessageContent {
     if blocks.len() == 1 {
         if let ContentBlock::Text { ref text } = blocks[0] {
             return MessageContent::Text(text.clone());

@@ -251,7 +251,14 @@ fn blocks_to_wire_messages(cb: &ClassifiedBlocks<'_>, role: &Role) -> Vec<serde_
 /// Arguments are always serialized as a JSON string (OpenAI spec).
 /// OpenAI-compat servers (Ollama, llama.cpp, vLLM) accept this format.
 fn build_openai_tool_call(id: &str, name: &str, input: &serde_json::Value) -> serde_json::Value {
-    let args_str = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let args_str = serde_json::to_string(input).unwrap_or_else(|e| {
+        tracing::warn!(
+            "failed to serialize tool_call arguments for '{}' (id={}): {e}, falling back to {{}}",
+            name,
+            id
+        );
+        "{}".to_string()
+    });
     serde_json::json!({
         "id": id,
         "type": "function",
@@ -300,16 +307,18 @@ fn build_anthropic_body(
         .iter()
         .filter(|m| m.role != Role::System)
         .map(|m| {
-            let content_val = serde_json::to_value(&m.content).unwrap_or_else(|e| {
-                tracing::warn!("failed to serialize MessageContent for Anthropic: {e}");
-                serde_json::Value::Null
-            });
-            serde_json::json!({
+            let content_val = serde_json::to_value(&m.content).map_err(|e| {
+                format!(
+                    "failed to serialize MessageContent for Anthropic (role={:?}): {e}",
+                    m.role
+                )
+            })?;
+            Ok(serde_json::json!({
                 "role": m.role,
                 "content": content_val,
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     // max_tokens is required for Anthropic
     let max_tokens = opts.max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);

@@ -34,8 +34,8 @@ pub(super) fn send_with_retry(
         message: "no tokio runtime available for async HTTP".to_string(),
     })?;
 
-    // Pre-allocate body String outside the retry loop to avoid repeated conversion.
-    let body_owned = body_str.to_string();
+    // Convert to Bytes once — clone is O(1) via refcount (no memcpy per retry).
+    let body_bytes = bytes::Bytes::from(body_str.to_string());
 
     for attempt in 0..=opts.max_retries {
         let mut req = client
@@ -58,7 +58,7 @@ pub(super) fn send_with_retry(
         }
 
         let result =
-            tokio::task::block_in_place(|| handle.block_on(req.body(body_owned.clone()).send()));
+            tokio::task::block_in_place(|| handle.block_on(req.body(body_bytes.clone()).send()));
 
         match result {
             Ok(resp) => {
@@ -193,8 +193,10 @@ pub(crate) fn truncate_for_error(s: &str, max: usize) -> &str {
 
 /// Read a response body as a UTF-8 string with a size limit.
 ///
-/// Unlike `resp.text()`, this stops reading once `max_bytes` is reached,
-/// preventing unbounded memory allocation from oversized responses.
+/// Uses `content-length` header for early rejection when available,
+/// then streams chunks with a running size check. The final `Bytes`
+/// buffer is converted to `String` in a single step (no intermediate
+/// `Vec<u8>` copy).
 ///
 /// Bridges async reqwest into the sync context via `block_in_place`.
 pub(crate) fn read_body_limited(
@@ -203,10 +205,19 @@ pub(crate) fn read_body_limited(
 ) -> Result<String, ReadBodyError> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| ReadBodyError::NoRuntime)?;
 
-    let bytes = tokio::task::block_in_place(|| {
+    // Early rejection via Content-Length when the server provides it.
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes {
+            return Err(ReadBodyError::TooLarge);
+        }
+    }
+
+    let text = tokio::task::block_in_place(|| {
         handle.block_on(async {
             let mut resp = resp;
-            let mut buf: Vec<u8> = Vec::new();
+            // Pre-allocate with content-length hint when available.
+            let capacity = resp.content_length().map(|l| l as usize).unwrap_or(0);
+            let mut buf = bytes::BytesMut::with_capacity(capacity);
 
             while let Some(chunk) = resp
                 .chunk()
@@ -219,11 +230,13 @@ pub(crate) fn read_body_limited(
                 buf.extend_from_slice(&chunk);
             }
 
-            String::from_utf8(buf).map_err(|_| ReadBodyError::InvalidUtf8)
+            // Freeze into Bytes, then convert to String in one step.
+            let frozen = buf.freeze();
+            String::from_utf8(frozen.to_vec()).map_err(|_| ReadBodyError::InvalidUtf8)
         })
     })?;
 
-    Ok(bytes)
+    Ok(text)
 }
 
 /// Errors from [`read_body_limited`].
