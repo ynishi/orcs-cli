@@ -80,7 +80,7 @@ pub(super) fn build_messages(
     if messages.is_empty() {
         if let Some(ref sys) = opts.system_prompt {
             // For Anthropic, system goes at top level (handled in build_request_body).
-            // For Ollama/OpenAI, system goes in messages.
+            // For OpenAI-compat (OpenAI, Ollama, llama.cpp), system goes in messages.
             if opts.provider != Provider::Anthropic {
                 messages.push(Message {
                     role: Role::System,

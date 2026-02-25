@@ -1,3 +1,8 @@
+//! HTTP retry logic and error classification for LLM requests.
+//!
+//! Uses `reqwest` for both OpenAI-compatible and Anthropic providers.
+//! Retry policy: exponential backoff for 429/5xx and transient transport errors.
+
 use std::time::Duration;
 
 use super::provider::Provider;
@@ -7,40 +12,62 @@ use super::{LlmOpts, RETRY_BASE_DELAY_MS, RETRY_MAX_DELAY_SECS};
 
 /// Error type for send_with_retry.
 pub(super) enum SendError {
-    Transport(ureq::Error),
+    Transport(reqwest::Error),
+    /// Non-retryable error with pre-classified kind and message.
+    Classified {
+        kind: &'static str,
+        message: String,
+    },
 }
 
-/// Send an HTTP request with retry logic. Returns the raw response on success.
+/// Send an HTTP POST with retry logic. Returns the raw response on success.
+///
+/// Bridges async reqwest into the sync Lua call context via `tokio::runtime::Handle`.
 pub(super) fn send_with_retry(
-    agent: &ureq::Agent,
+    client: &reqwest::Client,
     url: &str,
     opts: &LlmOpts,
     body_str: &str,
-) -> Result<ureq::http::Response<ureq::Body>, SendError> {
+) -> Result<reqwest::Response, SendError> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| SendError::Classified {
+        kind: "runtime",
+        message: "no tokio runtime available for async HTTP".to_string(),
+    })?;
+
+    // Convert to Bytes once — clone is O(1) via refcount (no memcpy per retry).
+    let body_bytes = bytes::Bytes::from(body_str.to_string());
+
     for attempt in 0..=opts.max_retries {
-        let mut req = agent.post(url);
-        req = req.header("Content-Type", "application/json");
+        let mut req = client
+            .post(url)
+            .timeout(Duration::from_secs(opts.timeout))
+            .header("Content-Type", "application/json");
 
         match opts.provider {
-            Provider::Ollama => {}
+            Provider::Ollama => {
+                // Ollama does not require authentication
+            }
             Provider::OpenAI => {
                 if let Some(ref key) = opts.api_key {
-                    req = req.header("Authorization", &format!("Bearer {}", key));
+                    req = req.header("Authorization", format!("Bearer {}", key));
                 }
             }
             Provider::Anthropic => {
                 if let Some(ref key) = opts.api_key {
-                    req = req.header("x-api-key", key);
+                    req = req.header("x-api-key", key.as_str());
                 }
                 req = req.header("anthropic-version", "2023-06-01");
             }
         }
 
-        match req.send(body_str.as_bytes()) {
+        let result =
+            tokio::task::block_in_place(|| handle.block_on(req.body(body_bytes.clone()).send()));
+
+        match result {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if attempt < opts.max_retries && should_retry_status(status) {
-                    let delay = compute_retry_delay(&resp, attempt);
+                    let delay = compute_retry_delay_from_headers(&resp, attempt);
                     tracing::debug!(
                         "LLM HTTP {status}, retry {}/{} after {delay:?}",
                         attempt + 1,
@@ -69,20 +96,21 @@ pub(super) fn send_with_retry(
     }
     // The loop above always returns on the final iteration (attempt == max_retries),
     // but the compiler cannot prove this statically. Provide a safe fallback.
-    Err(SendError::Transport(ureq::Error::Other(
-        "retry loop exhausted without returning".into(),
-    )))
+    Err(SendError::Classified {
+        kind: "network",
+        message: "retry loop exhausted without returning".to_string(),
+    })
 }
 
 // ── Error Helpers ──────────────────────────────────────────────────────
 
-/// Build an error Lua table from a ureq error.
+/// Build an error Lua table from a reqwest error.
 pub(super) fn build_error_result(
     lua: &mlua::Lua,
-    error: ureq::Error,
+    error: reqwest::Error,
     session_id: &str,
 ) -> mlua::Result<mlua::Table> {
-    let (error_kind, error_msg) = classify_ureq_error(&error);
+    let (error_kind, error_msg) = classify_reqwest_error(&error);
 
     let result = lua.create_table()?;
     result.set("ok", false)?;
@@ -92,49 +120,53 @@ pub(super) fn build_error_result(
     Ok(result)
 }
 
-/// Classify a ureq error into kind + message.
-pub(super) fn classify_ureq_error(error: &ureq::Error) -> (&'static str, String) {
+/// Build an error Lua table from a pre-classified SendError.
+pub(super) fn build_classified_error_result(
+    lua: &mlua::Lua,
+    kind: &str,
+    message: &str,
+    session_id: &str,
+) -> mlua::Result<mlua::Table> {
+    let result = lua.create_table()?;
+    result.set("ok", false)?;
+    result.set("error", message)?;
+    result.set("error_kind", kind)?;
+    result.set("session_id", session_id)?;
+    Ok(result)
+}
+
+/// Classify a reqwest error into kind + message.
+pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> (&'static str, String) {
     let msg = error.to_string();
 
-    // Walk error chain for IO errors
-    let io_err = {
-        let mut source: Option<&dyn std::error::Error> = Some(error);
-        let mut found = None;
-        while let Some(err) = source {
-            if let Some(io) = err.downcast_ref::<std::io::Error>() {
-                found = Some(io);
-                break;
-            }
-            source = err.source();
+    if error.is_timeout() {
+        return ("timeout", msg);
+    }
+    if error.is_connect() {
+        // Heuristic sub-classification of connection errors
+        let lower = msg.to_lowercase();
+        if lower.contains("connection refused") {
+            return ("connection_refused", msg);
         }
-        found
-    };
-
-    if let Some(io) = io_err {
-        match io.kind() {
-            std::io::ErrorKind::TimedOut => return ("timeout", msg),
-            std::io::ErrorKind::ConnectionRefused => return ("connection_refused", msg),
-            std::io::ErrorKind::ConnectionReset => return ("connection_reset", msg),
-            _ => {}
+        if lower.contains("dns") || lower.contains("resolve") || lower.contains("name resolution") {
+            return ("dns", msg);
+        }
+        if lower.contains("reset") {
+            return ("connection_reset", msg);
+        }
+        return ("network", msg);
+    }
+    if error.is_request() {
+        let lower = msg.to_lowercase();
+        if lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") {
+            return ("tls", msg);
         }
     }
-
-    // String-based heuristics
-    let lower = msg.to_lowercase();
-    if lower.contains("timeout") || lower.contains("timed out") {
-        ("timeout", msg)
-    } else if lower.contains("dns")
-        || lower.contains("resolve")
-        || lower.contains("name resolution")
-    {
-        ("dns", msg)
-    } else if lower.contains("connection refused") {
-        ("connection_refused", msg)
-    } else if lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") {
-        ("tls", msg)
-    } else {
-        ("network", msg)
+    if error.is_decode() {
+        return ("parse_error", msg);
     }
+
+    ("network", msg)
 }
 
 /// Classify HTTP status code into an error kind string.
@@ -150,7 +182,7 @@ pub(super) fn classify_http_status(status: u16) -> &'static str {
 }
 
 /// Truncate a string for safe inclusion in error messages.
-pub(super) fn truncate_for_error(s: &str, max: usize) -> &str {
+pub(crate) fn truncate_for_error(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
@@ -160,6 +192,66 @@ pub(super) fn truncate_for_error(s: &str, max: usize) -> &str {
         }
         &s[..end]
     }
+}
+
+/// Read a response body as a UTF-8 string with a size limit.
+///
+/// Uses `content-length` header for early rejection when available,
+/// then streams chunks into a `BytesMut` with a running size check.
+/// The buffer is frozen and converted to `String` via `to_vec()`.
+///
+/// Bridges async reqwest into the sync context via `block_in_place`.
+pub(crate) fn read_body_limited(
+    resp: reqwest::Response,
+    max_bytes: u64,
+) -> Result<String, ReadBodyError> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| ReadBodyError::NoRuntime)?;
+
+    // Early rejection via Content-Length when the server provides it.
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes {
+            return Err(ReadBodyError::TooLarge);
+        }
+    }
+
+    let text = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let mut resp = resp;
+            // Pre-allocate with content-length hint when available.
+            let capacity = resp.content_length().map(|l| l as usize).unwrap_or(0);
+            let mut buf = bytes::BytesMut::with_capacity(capacity);
+
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| ReadBodyError::Network(e.to_string()))?
+            {
+                if (buf.len() + chunk.len()) as u64 > max_bytes {
+                    return Err(ReadBodyError::TooLarge);
+                }
+                buf.extend_from_slice(&chunk);
+            }
+
+            // Freeze into Bytes, then convert to String in one step.
+            let frozen = buf.freeze();
+            String::from_utf8(frozen.to_vec()).map_err(|_| ReadBodyError::InvalidUtf8)
+        })
+    })?;
+
+    Ok(text)
+}
+
+/// Errors from [`read_body_limited`].
+#[derive(Debug)]
+pub(crate) enum ReadBodyError {
+    /// No tokio runtime available.
+    NoRuntime,
+    /// Response body exceeded the size limit.
+    TooLarge,
+    /// Response body is not valid UTF-8.
+    InvalidUtf8,
+    /// Network/transport error while reading.
+    Network(String),
 }
 
 // ── Retry Helpers ─────────────────────────────────────────────────────
@@ -173,7 +265,7 @@ fn should_retry_status(status: u16) -> bool {
 ///
 /// For 429 responses, respects `Retry-After` header (integer seconds, capped).
 /// Otherwise falls back to exponential backoff.
-fn compute_retry_delay(resp: &ureq::http::Response<ureq::Body>, attempt: u32) -> Duration {
+fn compute_retry_delay_from_headers(resp: &reqwest::Response, attempt: u32) -> Duration {
     if let Some(val) = resp.headers().get("retry-after") {
         if let Ok(s) = val.to_str() {
             if let Ok(secs) = s.trim().parse::<u64>() {
@@ -196,9 +288,15 @@ fn exponential_backoff(attempt: u32) -> Duration {
 ///
 /// Retries: timeout, connection reset.
 /// Does NOT retry: connection refused (server not running), DNS, TLS.
-fn is_retryable_transport(error: &ureq::Error) -> bool {
-    let (kind, _) = classify_ureq_error(error);
-    matches!(kind, "timeout" | "connection_reset")
+fn is_retryable_transport(error: &reqwest::Error) -> bool {
+    if error.is_timeout() {
+        return true;
+    }
+    if error.is_connect() {
+        let msg = error.to_string().to_lowercase();
+        return msg.contains("reset");
+    }
+    false
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

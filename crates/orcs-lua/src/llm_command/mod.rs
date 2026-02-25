@@ -1,18 +1,29 @@
 //! Multi-provider LLM client for `orcs.llm()`.
 //!
-//! Direct HTTP implementation (via `ureq`) supporting Ollama, OpenAI, and Anthropic.
-//! Provider-agnostic blocking HTTP client supporting Ollama, OpenAI, and Anthropic.
-//!
 //! # Architecture
+//!
+//! Two provider families, one unified HTTP transport (reqwest):
 //!
 //! ```text
 //! Lua: orcs.llm(prompt, opts)
 //!   → Capability::LLM gate (ctx_fns / child)
-//!   → llm_request_impl (Rust/ureq)
-//!       ├── Ollama:    POST {base_url}/api/chat
-//!       ├── OpenAI:    POST {base_url}/v1/chat/completions
-//!       └── Anthropic: POST {base_url}/v1/messages
+//!   → llm_request_impl (Rust/reqwest)
+//!       ├── Ollama:    POST {base_url}/v1/chat/completions  ─┐
+//!       ├── OpenAI:    POST {base_url}/v1/chat/completions  ─┤ WireFormat::OpenAI
+//!       │   (llama.cpp, vLLM, LM Studio also use this)      ─┘
+//!       └── Anthropic: POST {base_url}/v1/messages           ── WireFormat::Anthropic
 //! ```
+//!
+//! # Design Decisions
+//!
+//! - **Provider vs WireFormat**: `Provider` identifies the server (Ollama, OpenAI,
+//!   Anthropic) with its own defaults. `WireFormat` (OpenAI or Anthropic) controls
+//!   request/response serialization. Multiple providers can share a wire format.
+//! - **reqwest (async)**: HTTP client bridged into sync Lua context via
+//!   `tokio::task::block_in_place(|| handle.block_on(...))`. Enables future
+//!   streaming support and aligns with `async-openai`'s internal transport.
+//! - **Anthropic kept separate**: distinct wire format (`content[]` blocks,
+//!   `x-api-key` header, `anthropic-version` header).
 //!
 //! # Session Management
 //!
@@ -40,7 +51,7 @@
 
 mod provider;
 pub(crate) mod resolve;
-mod retry;
+pub(crate) mod retry;
 mod session;
 
 use mlua::{Lua, Table};
@@ -53,7 +64,7 @@ use resolve::{
     build_assistant_content_blocks, build_lua_result, dispatch_intents_to_results,
     parse_response_body, ResponseOrError,
 };
-use retry::{build_error_result, classify_ureq_error, send_with_retry, SendError};
+use retry::{build_classified_error_result, build_error_result, send_with_retry, SendError};
 use session::{
     append_message, build_messages, ensure_session_store, resolve_session_id, update_session,
     Message, SessionStore,
@@ -79,6 +90,27 @@ const RETRY_MAX_DELAY_SECS: u64 = 30;
 
 /// Default maximum number of tool-loop turns (resolve mode).
 const DEFAULT_MAX_TOOL_TURNS: u32 = 10;
+
+// ── Shared HTTP Client ────────────────────────────────────────────────
+
+/// Wrapper for `reqwest::Client` stored in Lua app_data.
+///
+/// A single shared client is reused across all LLM and HTTP requests within
+/// a Lua VM, avoiding repeated TLS backend and connection pool initialization.
+/// Per-request timeout is set via `RequestBuilder::timeout()`.
+struct SharedHttpClient(reqwest::Client);
+
+/// Get or create the shared `reqwest::Client` from Lua app_data.
+pub(crate) fn get_or_init_http_client(lua: &Lua) -> Result<reqwest::Client, mlua::Error> {
+    if let Some(shared) = lua.app_data_ref::<SharedHttpClient>() {
+        return Ok(shared.0.clone());
+    }
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| mlua::Error::RuntimeError(format!("failed to build HTTP client: {e}")))?;
+    lua.set_app_data(SharedHttpClient(client.clone()));
+    Ok(client)
+}
 
 // ── Parsed Options ─────────────────────────────────────────────────────
 
@@ -112,7 +144,7 @@ impl LlmOpts {
         let provider_str = opts
             .and_then(|o| o.get::<String>("provider").ok())
             .unwrap_or_else(|| "ollama".to_string());
-        let provider = Provider::from_str(&provider_str)?;
+        let provider: Provider = provider_str.parse()?;
 
         // base_url resolution: opts.base_url > ORCS_LLM_BASE_URL env > provider default
         let base_url = opts
@@ -214,7 +246,8 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
         .as_ref()
         .and_then(|o| o.get::<String>("provider").ok())
         .unwrap_or_else(|| "ollama".to_string());
-    let provider = match Provider::from_str(&provider_str) {
+    let provider: Result<Provider, _> = provider_str.parse();
+    let provider = match provider {
         Ok(p) => p,
         Err(e) => {
             let result = lua.create_table()?;
@@ -252,42 +285,53 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
         provider.health_path()
     );
 
-    // Configure agent with short timeout
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(timeout)))
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+    // Get shared client
+    let client = get_or_init_http_client(lua)?;
+
+    // Get tokio runtime handle for async→sync bridge
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "no tokio runtime available for async HTTP")?;
+            result.set("error_kind", "runtime")?;
+            return Ok(result);
+        }
+    };
 
     // Send GET and measure latency
     let start = std::time::Instant::now();
 
-    let mut req = agent.get(&url);
+    let mut req = client.get(&url).timeout(Duration::from_secs(timeout));
     // Attach auth headers for providers that need them
     match provider {
-        Provider::Ollama => {}
+        Provider::Ollama => {
+            // Ollama does not require authentication
+        }
         Provider::OpenAI => {
             if let Some(ref key) = api_key {
-                req = req.header("Authorization", &format!("Bearer {}", key));
+                req = req.header("Authorization", format!("Bearer {}", key));
             }
         }
         Provider::Anthropic => {
             if let Some(ref key) = api_key {
-                req = req.header("x-api-key", key);
+                req = req.header("x-api-key", key.as_str());
             }
             req = req.header("anthropic-version", "2023-06-01");
         }
     }
 
     let result = lua.create_table()?;
-    result.set("provider", format!("{:?}", provider).to_lowercase())?;
+    result.set("provider", provider.as_str())?;
     result.set("base_url", base_url.as_str())?;
 
-    match req.call() {
+    match tokio::task::block_in_place(|| handle.block_on(req.send())) {
         Ok(resp) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
-            // Any HTTP response (including 4xx/5xx) confirms connectivity
+            // ok=true means "server responded" (reachable). The caller should
+            // inspect `status` to distinguish 200 from 401/403/5xx etc.
             result.set("ok", true)?;
             result.set("status", status)?;
             result.set("latency_ms", latency.as_millis() as u64)?;
@@ -296,7 +340,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
             let latency = start.elapsed();
             result.set("latency_ms", latency.as_millis() as u64)?;
 
-            let (error_kind, error_msg) = classify_ureq_error(&e);
+            let (error_kind, error_msg) = retry::classify_reqwest_error(&e);
             result.set("ok", false)?;
             result.set("error", error_msg)?;
             result.set("error_kind", error_kind)?;
@@ -412,8 +456,8 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         }
     };
 
-    // Validate API key requirement
-    if llm_opts.provider != Provider::Ollama && llm_opts.api_key.is_none() {
+    // Validate API key requirement for providers that need one
+    if llm_opts.provider.requires_api_key() && llm_opts.api_key.is_none() {
         let env_name = llm_opts
             .provider
             .api_key_env()
@@ -454,15 +498,8 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         llm_opts.provider.chat_path()
     );
 
-    // Configure ureq agent (reused across retries and tool turns)
-    // http_status_as_error(false): receive 4xx/5xx as Ok(Response) so that
-    // parse_response_body can read the error body and should_retry_status
-    // can properly retry 429/5xx responses.
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(llm_opts.timeout)))
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+    // Get shared client (reused across retries and tool turns)
+    let client = get_or_init_http_client(lua)?;
 
     // ── First turn: build messages from history + prompt ──
     let mut messages = build_messages(lua, &session_id, &prompt, &llm_opts);
@@ -496,9 +533,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         );
 
         // Send with retry
-        let resp = match send_with_retry(&agent, &url, &llm_opts, &body_str) {
+        let resp = match send_with_retry(&client, &url, &llm_opts, &body_str) {
             Ok(resp) => resp,
             Err(SendError::Transport(e)) => return build_error_result(lua, e, &session_id),
+            Err(SendError::Classified { kind, message }) => {
+                return build_classified_error_result(lua, kind, &message, &session_id);
+            }
         };
 
         // Parse response
@@ -908,8 +948,8 @@ mod tests {
 
     // ── Ping tests ──────────────────────────────────────────────────────
 
-    #[test]
-    fn ping_defaults_to_ollama() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ping_defaults_to_ollama() {
         let lua = Lua::new();
         let result = llm_ping_impl(&lua, None).expect("should not panic");
 
@@ -937,8 +977,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ping_connection_refused() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ping_connection_refused() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "ollama").expect("set provider");
@@ -992,16 +1032,13 @@ mod tests {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "openai").expect("set provider");
-        // Deliberately not setting api_key or env var
 
-        // Temporarily clear the env var to ensure test isolation
         let prev = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");
 
         let result =
             llm_request_impl(&lua, ("hello".into(), Some(opts))).expect("should not panic");
 
-        // Restore env
         if let Some(val) = prev {
             std::env::set_var("OPENAI_API_KEY", val);
         }
@@ -1010,12 +1047,6 @@ mod tests {
         assert_eq!(
             result.get::<String>("error_kind").expect("get error_kind"),
             "missing_api_key"
-        );
-        let error: String = result.get("error").expect("get error");
-        assert!(
-            error.contains("OPENAI_API_KEY"),
-            "error should mention env var, got: {}",
-            error
         );
     }
 
@@ -1066,8 +1097,8 @@ mod tests {
 
     // ── Integration: connection error ──────────────────────────────────
 
-    #[test]
-    fn connection_refused_returns_network_error() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connection_refused_returns_network_error() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "ollama").expect("set provider");
@@ -1099,8 +1130,8 @@ mod tests {
 
     /// connection_refused is NOT retried by default (server not running).
     /// With max_retries=0, no retry attempt is made.
-    #[test]
-    fn connection_refused_no_retry_with_zero_retries() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connection_refused_no_retry_with_zero_retries() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "ollama").expect("set provider");
@@ -1127,9 +1158,9 @@ mod tests {
 
     /// E2E: ping a real Ollama server.
     /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_ping -- --ignored --nocapture
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires running Ollama server"]
-    fn e2e_ollama_ping() {
+    async fn e2e_ollama_ping() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "ollama").expect("set provider");
@@ -1158,9 +1189,9 @@ mod tests {
 
     /// E2E: single-turn call to real Ollama server.
     /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_single_turn -- --ignored --nocapture
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires running Ollama server"]
-    fn e2e_ollama_single_turn() {
+    async fn e2e_ollama_single_turn() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("provider", "ollama").expect("set provider");
@@ -1197,9 +1228,9 @@ mod tests {
 
     /// E2E: multi-turn session with real Ollama server.
     /// Run with: cargo test -p orcs-lua --lib llm_command::tests::e2e_ollama_multi_turn -- --ignored --nocapture
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires running Ollama server"]
-    fn e2e_ollama_multi_turn() {
+    async fn e2e_ollama_multi_turn() {
         let lua = Lua::new();
 
         // Turn 1

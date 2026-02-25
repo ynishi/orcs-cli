@@ -1,21 +1,21 @@
 //! LLM response → ActionIntent adapter.
 //!
 //! Converts provider-specific tool_calls responses into the unified
-//! `ActionIntent` domain model. Each provider has a different wire format:
+//! `ActionIntent` domain model. Two wire formats:
 //!
 //! ```text
-//! OpenAI:    choices[0].message.tool_calls[].{id, function.name, function.arguments}
-//! Anthropic: content[].{type: "tool_use", id, name, input}
-//! Ollama:    message.tool_calls[].function.{name, arguments}
+//! OpenAI-compat: choices[0].message.tool_calls[].{id, function.name, function.arguments}
+//!   (OpenAI, Ollama /v1/, llama.cpp, vLLM — all share this format)
+//! Anthropic:     content[].{type: "tool_use", id, name, input}
 //! ```
 //!
-//! This module normalizes all three into `Vec<ContentBlock>` and
+//! This module normalizes both into `Vec<ContentBlock>` and
 //! `Vec<ActionIntent>`, plus a unified `StopReason`.
 //!
 //! # Design
 //!
 //! Pure data transformation — no Lua interaction, no side effects.
-//! Used by `llm_command.rs` to normalize provider responses.
+//! Used by `llm_command::resolve` to normalize provider responses.
 
 use orcs_types::intent::{ActionIntent, ContentBlock, MessageContent, StopReason};
 use tracing::warn;
@@ -38,7 +38,7 @@ use tracing::warn;
 ///   }]
 /// }
 /// ```
-pub fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
+pub(crate) fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
 
     let message = match json
@@ -112,7 +112,7 @@ pub fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlock> {
 ///   ]
 /// }
 /// ```
-pub fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> {
+pub(crate) fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
 
     let content_array = match json.get("content").and_then(|c| c.as_array()) {
@@ -169,87 +169,12 @@ pub fn extract_content_anthropic(json: &serde_json::Value) -> Vec<ContentBlock> 
     blocks
 }
 
-/// Extract content blocks from an Ollama chat response.
-///
-/// Ollama format (OpenAI-compatible):
-/// ```json
-/// {
-///   "message": {
-///     "role": "assistant",
-///     "content": "some text",
-///     "tool_calls": [
-///       { "function": { "name": "read", "arguments": { "path": "x" } } }
-///     ]
-///   }
-/// }
-/// ```
-///
-/// Note: Ollama tool_calls may omit `id` and send `arguments` as an object
-/// (not a JSON string like OpenAI). This function handles both formats.
-pub fn extract_content_ollama(json: &serde_json::Value) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-
-    let message = match json.get("message") {
-        Some(m) => m,
-        None => return blocks,
-    };
-
-    // Text content
-    if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
-        if !text.is_empty() {
-            blocks.push(ContentBlock::Text {
-                text: text.to_string(),
-            });
-        }
-    }
-
-    // Tool calls
-    if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
-        for (idx, tc) in tool_calls.iter().enumerate() {
-            let func = match tc.get("function") {
-                Some(f) => f,
-                None => continue,
-            };
-
-            let name = func
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if name.is_empty() {
-                warn!("Ollama tool_call has empty function name");
-            }
-
-            // Ollama sends arguments as an object (not a string)
-            // but also supports the OpenAI string format
-            let input = match func.get("arguments") {
-                Some(serde_json::Value::String(s)) => serde_json::from_str(s)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-                Some(obj @ serde_json::Value::Object(_)) => obj.clone(),
-                _ => serde_json::Value::Object(serde_json::Map::new()),
-            };
-
-            // Ollama may not provide tool call IDs; generate a synthetic one
-            let id = tc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("ollama_call_{idx}"));
-
-            blocks.push(ContentBlock::ToolUse { id, name, input });
-        }
-    }
-
-    blocks
-}
-
 // ── StopReason Extraction ───────────────────────────────────────────
 
 /// Extract normalized `StopReason` from an OpenAI response.
 ///
 /// OpenAI: `choices[0].finish_reason` → "stop" | "tool_calls" | "length"
-pub fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
+pub(crate) fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
     let reason = json
         .get("choices")
         .and_then(|c| c.get(0))
@@ -267,7 +192,7 @@ pub fn extract_stop_reason_openai(json: &serde_json::Value) -> StopReason {
 /// Extract normalized `StopReason` from an Anthropic response.
 ///
 /// Anthropic: `stop_reason` → "end_turn" | "tool_use" | "max_tokens"
-pub fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
+pub(crate) fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
     let reason = json
         .get("stop_reason")
         .and_then(|r| r.as_str())
@@ -280,38 +205,12 @@ pub fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopReason {
     }
 }
 
-/// Extract normalized `StopReason` from an Ollama response.
-///
-/// Ollama: `done_reason` → "stop" | "length" (tool_calls inferred from presence)
-pub fn extract_stop_reason_ollama(json: &serde_json::Value) -> StopReason {
-    // Ollama signals tool use by including tool_calls in message, not via done_reason
-    let has_tool_calls = json
-        .get("message")
-        .and_then(|m| m.get("tool_calls"))
-        .and_then(|t| t.as_array())
-        .is_some_and(|arr| !arr.is_empty());
-
-    if has_tool_calls {
-        return StopReason::ToolUse;
-    }
-
-    let reason = json
-        .get("done_reason")
-        .and_then(|r| r.as_str())
-        .unwrap_or("stop");
-
-    match reason {
-        "length" => StopReason::MaxTokens,
-        _ => StopReason::EndTurn, // "stop" and unknown
-    }
-}
-
 // ── ContentBlock → ActionIntent Conversion ──────────────────────────
 
 /// Convert tool_use content blocks into `ActionIntent`s.
 ///
 /// Only `ContentBlock::ToolUse` blocks are converted; text blocks are skipped.
-pub fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
+pub(crate) fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -328,7 +227,7 @@ pub fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIntent> {
 /// Returns `MessageContent::Text` when there's only a single text block
 /// (backward-compatible). Returns `MessageContent::Blocks` when there are
 /// multiple blocks or any tool_use blocks.
-pub fn blocks_to_message_content(blocks: Vec<ContentBlock>) -> MessageContent {
+pub(crate) fn blocks_to_message_content(blocks: Vec<ContentBlock>) -> MessageContent {
     if blocks.len() == 1 {
         if let ContentBlock::Text { ref text } = blocks[0] {
             return MessageContent::Text(text.clone());
@@ -600,112 +499,6 @@ mod tests {
         assert!(blocks.is_empty());
     }
 
-    // ── Ollama extraction ────────────────────────────────────────
-
-    #[test]
-    fn ollama_text_only_response() {
-        let json = serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "content": "Hello from Ollama!"
-            },
-            "done": true,
-            "done_reason": "stop"
-        });
-
-        let blocks = extract_content_ollama(&json);
-        assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
-            ContentBlock::Text { text } => assert_eq!(text, "Hello from Ollama!"),
-            other => panic!("expected Text, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ollama_tool_calls_with_object_arguments() {
-        let json = serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "read",
-                        "arguments": { "path": "main.rs" }
-                    }
-                }]
-            },
-            "done": true
-        });
-
-        let blocks = extract_content_ollama(&json);
-        // Empty content string is skipped
-        assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
-            ContentBlock::ToolUse { id, name, input } => {
-                assert_eq!(id, "ollama_call_0", "should generate synthetic ID");
-                assert_eq!(name, "read");
-                assert_eq!(input["path"], "main.rs");
-            }
-            other => panic!("expected ToolUse, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ollama_tool_calls_with_string_arguments() {
-        let json = serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "exec",
-                        "arguments": "{\"cmd\":\"ls -la\"}"
-                    }
-                }]
-            }
-        });
-
-        let blocks = extract_content_ollama(&json);
-        assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
-            ContentBlock::ToolUse { input, .. } => {
-                assert_eq!(input["cmd"], "ls -la");
-            }
-            other => panic!("expected ToolUse, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ollama_tool_calls_with_explicit_id() {
-        let json = serde_json::json!({
-            "message": {
-                "tool_calls": [{
-                    "id": "my_call",
-                    "function": {
-                        "name": "read",
-                        "arguments": { "path": "x" }
-                    }
-                }]
-            }
-        });
-
-        let blocks = extract_content_ollama(&json);
-        assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
-            ContentBlock::ToolUse { id, .. } => {
-                assert_eq!(id, "my_call", "explicit ID should be preserved");
-            }
-            other => panic!("expected ToolUse, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ollama_empty_response() {
-        let json = serde_json::json!({});
-        let blocks = extract_content_ollama(&json);
-        assert!(blocks.is_empty());
-    }
-
     // ── StopReason extraction ────────────────────────────────────
 
     #[test]
@@ -760,49 +553,6 @@ mod tests {
     fn stop_reason_anthropic_missing_defaults_end_turn() {
         let json = serde_json::json!({});
         assert_eq!(extract_stop_reason_anthropic(&json), StopReason::EndTurn);
-    }
-
-    #[test]
-    fn stop_reason_ollama_text_only() {
-        let json = serde_json::json!({
-            "message": { "content": "hi" },
-            "done_reason": "stop"
-        });
-        assert_eq!(extract_stop_reason_ollama(&json), StopReason::EndTurn);
-    }
-
-    #[test]
-    fn stop_reason_ollama_with_tool_calls() {
-        let json = serde_json::json!({
-            "message": {
-                "tool_calls": [{ "function": { "name": "read" } }]
-            },
-            "done_reason": "stop"
-        });
-        // tool_calls presence overrides done_reason
-        assert_eq!(extract_stop_reason_ollama(&json), StopReason::ToolUse);
-    }
-
-    #[test]
-    fn stop_reason_ollama_length() {
-        let json = serde_json::json!({
-            "message": { "content": "truncated..." },
-            "done_reason": "length"
-        });
-        assert_eq!(extract_stop_reason_ollama(&json), StopReason::MaxTokens);
-    }
-
-    #[test]
-    fn stop_reason_ollama_empty_tool_calls_not_tool_use() {
-        let json = serde_json::json!({
-            "message": { "tool_calls": [] },
-            "done_reason": "stop"
-        });
-        assert_eq!(
-            extract_stop_reason_ollama(&json),
-            StopReason::EndTurn,
-            "empty tool_calls should not trigger ToolUse"
-        );
     }
 
     // ── ContentBlock → ActionIntent conversion ───────────────────
@@ -982,36 +732,5 @@ mod tests {
         assert_eq!(intents[0].name, "grep");
         assert_eq!(intents[0].id, "toolu_abc");
         assert_eq!(content.text(), Some("Let me check."));
-    }
-
-    #[test]
-    fn e2e_ollama_response_to_intents() {
-        let json = serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "exec",
-                        "arguments": { "cmd": "cargo test" }
-                    }
-                }]
-            },
-            "done": true,
-            "done_reason": "stop"
-        });
-
-        let blocks = extract_content_ollama(&json);
-        let stop = extract_stop_reason_ollama(&json);
-        let intents = content_blocks_to_intents(&blocks);
-
-        assert_eq!(stop, StopReason::ToolUse);
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].name, "exec");
-        assert_eq!(intents[0].params["cmd"], "cargo test");
-        assert!(
-            intents[0].id.starts_with("ollama_call_"),
-            "should have synthetic ID"
-        );
     }
 }

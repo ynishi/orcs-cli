@@ -1,21 +1,28 @@
 //! Lua-exposed HTTP client for `orcs.http()`.
 //!
-//! Provides a blocking HTTP client (via `ureq`) exposed to Lua as
+//! Provides a blocking HTTP client (via `reqwest`) exposed to Lua as
 //! `orcs.http(method, url, opts)`. Gated by `Capability::HTTP`.
 //!
 //! # Design
 //!
 //! Rust owns the transport layer (TLS, timeout, error classification).
 //! Lua owns the application logic (request construction, response parsing).
+//! Async reqwest is bridged into sync Lua context via
+//! `tokio::task::block_in_place(|| handle.block_on(...))`.
 //!
 //! ```text
 //! Lua: orcs.http("POST", url, { headers={...}, body="...", timeout=30 })
 //!   → Capability::HTTP gate (ctx_fns / child)
-//!   → http_request_impl (Rust/ureq)
+//!   → http_request_impl (Rust/reqwest)
 //!   → { ok, status, headers, body, error, error_kind }
 //! ```
 
 use mlua::{Lua, Table};
+use std::time::Duration;
+
+use crate::llm_command::retry::{
+    classify_reqwest_error, read_body_limited, truncate_for_error, ReadBodyError,
+};
 
 /// Default timeout in seconds for HTTP requests.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -44,7 +51,7 @@ pub fn register_http_deny_stub(lua: &Lua, orcs_table: &Table) -> Result<(), mlua
     Ok(())
 }
 
-/// Executes an HTTP request using ureq. Called from capability-gated context.
+/// Executes an HTTP request using reqwest. Called from capability-gated context.
 ///
 /// # Arguments (from Lua)
 ///
@@ -105,81 +112,64 @@ pub fn http_request_impl(lua: &Lua, args: (String, String, Option<Table>)) -> ml
         .iter()
         .any(|(k, _)| k.to_lowercase() == "content-type");
 
-    // Build ureq agent with timeout
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-
-    // Execute request based on method.
-    // ureq v3 has separate types for WithBody (POST/PUT/PATCH) and WithoutBody (GET/DELETE/HEAD),
-    // so we handle them in separate branches.
+    // Validate method
     let method_upper = method.to_uppercase();
+    let reqwest_method = match method_upper.as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        "PATCH" => reqwest::Method::PATCH,
+        "HEAD" => reqwest::Method::HEAD,
+        _ => {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", format!("unsupported HTTP method: {method_upper}"))?;
+            result.set("error_kind", "invalid_method")?;
+            return Ok(result);
+        }
+    };
 
-    let response: Result<ureq::http::Response<ureq::Body>, ureq::Error> =
-        match method_upper.as_str() {
-            "GET" | "DELETE" | "HEAD" => {
-                let mut req = match method_upper.as_str() {
-                    "GET" => agent.get(&url),
-                    "DELETE" => agent.delete(&url),
-                    "HEAD" => agent.head(&url),
-                    other => {
-                        return Err(mlua::Error::runtime(format!(
-                            "internal error: unexpected method {other} in no-body branch"
-                        )));
-                    }
-                };
-                for (name, value) in &extra_headers {
-                    req = req.header(name.as_str(), value.as_str());
-                }
-                req.call()
-            }
-            "POST" | "PUT" | "PATCH" => {
-                let mut req = match method_upper.as_str() {
-                    "POST" => agent.post(&url),
-                    "PUT" => agent.put(&url),
-                    "PATCH" => agent.patch(&url),
-                    other => {
-                        return Err(mlua::Error::runtime(format!(
-                            "internal error: unexpected method {other} in with-body branch"
-                        )));
-                    }
-                };
-                for (name, value) in &extra_headers {
-                    req = req.header(name.as_str(), value.as_str());
-                }
-                // Default Content-Type to application/json when body is present
-                if !has_content_type && body.is_some() {
-                    req = req.header("Content-Type", "application/json");
-                }
-                match body {
-                    Some(ref body_str) => req.send(body_str.as_bytes()),
-                    None => req.send_empty(),
-                }
-            }
-            _ => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", format!("unsupported HTTP method: {method_upper}"))?;
-                result.set("error_kind", "invalid_method")?;
-                return Ok(result);
-            }
-        };
+    // Get shared client (reused across all HTTP requests within this Lua VM)
+    let client = crate::llm_command::get_or_init_http_client(lua)?;
 
-    match response {
+    // Get tokio runtime handle for async→sync bridge
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+        mlua::Error::RuntimeError("no tokio runtime available for async HTTP".into())
+    })?;
+
+    // Build request with per-request timeout
+    let mut req = client
+        .request(reqwest_method, &url)
+        .timeout(Duration::from_secs(timeout_secs));
+    for (name, value) in &extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    // Default Content-Type to application/json when body is present
+    if !has_content_type && body.is_some() {
+        req = req.header("Content-Type", "application/json");
+    }
+
+    if let Some(ref body_str) = body {
+        req = req.body(body_str.clone());
+    }
+
+    // Execute request via async→sync bridge (block_in_place allows nesting in multi-thread runtime)
+    match tokio::task::block_in_place(|| handle.block_on(req.send())) {
         Ok(resp) => build_success_response(lua, resp),
         Err(e) => build_error_response(lua, e),
     }
 }
 
-/// Builds a Lua table from a successful ureq response.
-fn build_success_response(
-    lua: &Lua,
-    mut resp: ureq::http::Response<ureq::Body>,
-) -> mlua::Result<Table> {
+/// Builds a Lua table from a successful reqwest response.
+///
+/// Uses [`read_body_limited`] to enforce `MAX_BODY_SIZE` during streaming,
+/// preventing unbounded memory allocation from oversized responses.
+fn build_success_response(lua: &Lua, resp: reqwest::Response) -> mlua::Result<Table> {
     let status = resp.status().as_u16();
 
-    // Collect response headers
+    // Collect response headers before consuming the body
     let headers_table = lua.create_table()?;
     for (name, value) in resp.headers() {
         if let Ok(v) = value.to_str() {
@@ -187,112 +177,50 @@ fn build_success_response(
         }
     }
 
-    // Read body with size limit
-    let body = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let reader = resp.body_mut().as_reader();
-        match reader.take(MAX_BODY_SIZE).read_to_end(&mut buf) {
-            Ok(n) if n as u64 >= MAX_BODY_SIZE => Err("response body exceeds size limit"),
-            Ok(_) => String::from_utf8(buf).map_err(|_| "response body is not valid UTF-8"),
-            Err(_) => Err("failed to read response body"),
-        }
-    };
-
+    // Read body with streaming size limit
     let result = lua.create_table()?;
     result.set("ok", true)?;
     result.set("status", status)?;
     result.set("headers", headers_table)?;
 
-    match body {
+    match read_body_limited(resp, MAX_BODY_SIZE) {
         Ok(body_str) => {
             result.set("body", body_str)?;
         }
-        Err(reason) => {
-            let is_too_large = reason.contains("size limit");
+        Err(ReadBodyError::TooLarge) => {
             result.set("body", "")?;
-            result.set("error", reason)?;
-            result.set(
-                "error_kind",
-                if is_too_large { "too_large" } else { "network" },
-            )?;
+            result.set("error", "response body exceeds size limit")?;
+            result.set("error_kind", "too_large")?;
+        }
+        Err(ReadBodyError::InvalidUtf8) => {
+            result.set("body", "")?;
+            result.set("error", "response body is not valid UTF-8")?;
+            result.set("error_kind", "network")?;
+        }
+        Err(ReadBodyError::NoRuntime) => {
+            result.set("body", "")?;
+            result.set("error", "no tokio runtime available for reading body")?;
+            result.set("error_kind", "network")?;
+        }
+        Err(ReadBodyError::Network(msg)) => {
+            result.set("body", "")?;
+            result.set("error", format!("failed to read response body: {msg}"))?;
+            result.set("error_kind", "network")?;
         }
     }
 
     Ok(result)
 }
 
-/// Builds a Lua error table from a ureq error.
-fn build_error_response(lua: &Lua, error: ureq::Error) -> mlua::Result<Table> {
-    let (error_kind, error_msg) = classify_error(&error);
+/// Builds a Lua error table from a reqwest error.
+fn build_error_response(lua: &Lua, error: reqwest::Error) -> mlua::Result<Table> {
+    let (error_kind, error_msg) = classify_reqwest_error(&error);
 
     let result = lua.create_table()?;
     result.set("ok", false)?;
     result.set("error", error_msg)?;
     result.set("error_kind", error_kind)?;
     Ok(result)
-}
-
-/// Classifies a ureq error into a kind string and message.
-fn classify_error(error: &ureq::Error) -> (&'static str, String) {
-    let msg = error.to_string();
-
-    // Check the error chain for specific IO errors
-    let io_err = find_io_error(error);
-
-    if let Some(io) = io_err {
-        let kind = io.kind();
-        match kind {
-            std::io::ErrorKind::TimedOut => return ("timeout", msg),
-            std::io::ErrorKind::ConnectionRefused => return ("connection_refused", msg),
-            std::io::ErrorKind::ConnectionReset => return ("connection_reset", msg),
-            std::io::ErrorKind::ConnectionAborted => return ("connection_aborted", msg),
-            _ => {}
-        }
-    }
-
-    // String-based heuristics for cases not covered by io::ErrorKind
-    let lower = msg.to_lowercase();
-    if lower.contains("timeout") || lower.contains("timed out") {
-        ("timeout", msg)
-    } else if lower.contains("dns")
-        || lower.contains("resolve")
-        || lower.contains("name resolution")
-    {
-        ("dns", msg)
-    } else if lower.contains("connection refused") {
-        ("connection_refused", msg)
-    } else if lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") {
-        ("tls", msg)
-    } else {
-        ("network", msg)
-    }
-}
-
-/// Walks the error source chain to find an `io::Error`.
-fn find_io_error(error: &ureq::Error) -> Option<&std::io::Error> {
-    let mut source: Option<&dyn std::error::Error> = Some(error);
-    while let Some(err) = source {
-        if let Some(io) = err.downcast_ref::<std::io::Error>() {
-            return Some(io);
-        }
-        source = err.source();
-    }
-    None
-}
-
-/// Truncates a string for safe inclusion in error messages.
-fn truncate_for_error(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        // Find a safe UTF-8 boundary
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
 }
 
 #[cfg(test)]
@@ -349,8 +277,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn connection_refused_returns_error_kind() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connection_refused_returns_error_kind() {
         let lua = Lua::new();
         // Port 1 is very unlikely to be open
         let opts = lua.create_table().expect("create opts");
@@ -372,8 +300,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dns_failure_returns_error_kind() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dns_failure_returns_error_kind() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("timeout", 3).expect("set timeout");
@@ -411,8 +339,8 @@ mod tests {
         assert_eq!(t, "あ"); // 3 bytes, not 4 (boundary)
     }
 
-    #[test]
-    fn opts_timeout_is_respected() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opts_timeout_is_respected() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
         opts.set("timeout", 1).expect("set timeout");
@@ -439,8 +367,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn headers_are_passed_through() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn headers_are_passed_through() {
         // This test verifies the code path that sets headers.
         // We can't test actual HTTP without a server, but we can verify
         // the opts parsing doesn't crash.

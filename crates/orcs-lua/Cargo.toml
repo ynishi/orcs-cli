@@ -46,8 +46,9 @@ parking_lot = "0.12"
 # Error handling
 thiserror = "2.0"
 
-# HTTP client (blocking, lightweight)
-ureq = { workspace = true }
+# HTTP client
+reqwest = { workspace = true }
+bytes = "1"
 
 # Logging
 tracing = "0.1"
@@ -55,8 +56,8 @@ tracing = "0.1"
 # ID generation
 uuid = { workspace = true }
 
-# Async runtime (for non-blocking process execution)
-tokio = { version = "1", features = ["process", "rt"] }
+# Async runtime (process execution + reqwest bridge)
+tokio = { version = "1", features = ["process", "rt", "rt-multi-thread"] }
 
 [features]
 test-utils = []

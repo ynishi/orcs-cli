@@ -2,7 +2,7 @@ use mlua::{Lua, Table};
 use orcs_types::intent::{ActionIntent, ContentBlock, MessageContent, StopReason};
 
 use super::provider::Provider;
-use super::retry::{classify_http_status, truncate_for_error};
+use super::retry::{classify_http_status, read_body_limited, truncate_for_error, ReadBodyError};
 use super::{LlmOpts, MAX_BODY_SIZE};
 use crate::llm_adapter;
 use crate::types::serde_json_to_lua;
@@ -26,16 +26,14 @@ pub(super) fn parse_provider_response(
     provider: Provider,
     json: &serde_json::Value,
 ) -> Result<ParsedLlmResponse, String> {
-    let blocks = match provider {
-        Provider::Ollama => llm_adapter::extract_content_ollama(json),
-        Provider::OpenAI => llm_adapter::extract_content_openai(json),
-        Provider::Anthropic => llm_adapter::extract_content_anthropic(json),
+    let blocks = match provider.wire_format() {
+        super::provider::WireFormat::OpenAI => llm_adapter::extract_content_openai(json),
+        super::provider::WireFormat::Anthropic => llm_adapter::extract_content_anthropic(json),
     };
 
-    let stop_reason = match provider {
-        Provider::Ollama => llm_adapter::extract_stop_reason_ollama(json),
-        Provider::OpenAI => llm_adapter::extract_stop_reason_openai(json),
-        Provider::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
+    let stop_reason = match provider.wire_format() {
+        super::provider::WireFormat::OpenAI => llm_adapter::extract_stop_reason_openai(json),
+        super::provider::WireFormat::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
     };
 
     let intents = llm_adapter::content_blocks_to_intents(&blocks);
@@ -75,39 +73,45 @@ pub(super) enum ResponseOrError {
 }
 
 /// Parse HTTP response body into ParsedLlmResponse or error table.
+///
+/// Uses [`read_body_limited`] to enforce `MAX_BODY_SIZE` during streaming,
+/// preventing unbounded memory allocation from oversized responses.
 pub(super) fn parse_response_body(
     lua: &Lua,
-    mut resp: ureq::http::Response<ureq::Body>,
+    resp: reqwest::Response,
     opts: &LlmOpts,
     session_id: &str,
 ) -> mlua::Result<ResponseOrError> {
     let status = resp.status().as_u16();
 
-    // Read body
-    let body_text = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let reader = resp.body_mut().as_reader();
-        match reader.take(MAX_BODY_SIZE).read_to_end(&mut buf) {
-            Ok(n) if n as u64 >= MAX_BODY_SIZE => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", "response body exceeds size limit")?;
-                result.set("error_kind", "too_large")?;
-                result.set("session_id", session_id)?;
-                return Ok(ResponseOrError::ErrorTable(result));
-            }
-            Ok(_) => String::from_utf8(buf).map_err(|_| {
-                mlua::Error::RuntimeError("LLM response body is not valid UTF-8".into())
-            })?,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", format!("failed to read response body: {}", e))?;
-                result.set("error_kind", "network")?;
-                result.set("session_id", session_id)?;
-                return Ok(ResponseOrError::ErrorTable(result));
-            }
+    // Read body with streaming size limit
+    let body_text = match read_body_limited(resp, MAX_BODY_SIZE) {
+        Ok(text) => text,
+        Err(ReadBodyError::TooLarge) => {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "response body exceeds size limit")?;
+            result.set("error_kind", "too_large")?;
+            result.set("session_id", session_id)?;
+            return Ok(ResponseOrError::ErrorTable(result));
+        }
+        Err(ReadBodyError::InvalidUtf8) => {
+            return Err(mlua::Error::RuntimeError(
+                "LLM response body is not valid UTF-8".into(),
+            ));
+        }
+        Err(ReadBodyError::NoRuntime) => {
+            return Err(mlua::Error::RuntimeError(
+                "no tokio runtime available for reading response body".into(),
+            ));
+        }
+        Err(ReadBodyError::Network(msg)) => {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", format!("failed to read response body: {}", msg))?;
+            result.set("error_kind", "network")?;
+            result.set("session_id", session_id)?;
+            return Ok(ResponseOrError::ErrorTable(result));
         }
     };
 
@@ -302,16 +306,19 @@ mod tests {
     use super::super::{DEFAULT_MAX_RETRIES, DEFAULT_MAX_TOOL_TURNS, DEFAULT_TIMEOUT_SECS};
     use super::*;
 
+    /// Ollama `/v1/chat/completions` returns OpenAI-compatible format.
     #[test]
     fn parse_ollama_response_success() {
         let json = serde_json::json!({
             "model": "llama3.2",
-            "message": {
-                "role": "assistant",
-                "content": "Hello! How can I help?"
-            },
-            "done": true,
-            "done_reason": "stop"
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help?"
+                },
+                "finish_reason": "stop"
+            }]
         });
         let parsed =
             parse_provider_response(Provider::Ollama, &json).expect("should parse ollama response");
@@ -325,10 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_ollama_response_empty_returns_empty_content() {
+    fn parse_ollama_empty_returns_empty_content() {
         let json = serde_json::json!({"model": "llama3.2"});
         let parsed = parse_provider_response(Provider::Ollama, &json)
-            .expect("should parse even with missing message");
+            .expect("should parse even with missing choices");
         assert_eq!(parsed.content, "", "empty response → empty content");
     }
 
@@ -447,21 +454,26 @@ mod tests {
         assert_eq!(parsed.intents[0].name, "grep");
     }
 
+    /// Ollama tool_calls via OpenAI-compatible wire format.
     #[test]
     fn parse_ollama_tool_calls_response() {
         let json = serde_json::json!({
             "model": "llama3.2",
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "exec",
-                        "arguments": { "cmd": "cargo test" }
-                    }
-                }]
-            },
-            "done": true
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_001",
+                        "type": "function",
+                        "function": {
+                            "name": "exec",
+                            "arguments": "{\"cmd\":\"cargo test\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
         });
         let parsed = parse_provider_response(Provider::Ollama, &json)
             .expect("should parse ollama tool_calls");

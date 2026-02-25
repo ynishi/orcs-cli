@@ -44,7 +44,7 @@ fn command_mode_at_shell_routes_but_needs_approval() {
 /// Sends a plain message in command mode (no @prefix).
 /// agent_mgr dispatches to llm-worker → mock HTTP LLM server → stdout.
 ///
-/// Uses a mock HTTP server returning Ollama-format JSON instantly.
+/// Uses a mock HTTP server returning OpenAI-compatible JSON instantly.
 /// Verifies: user input → agent_mgr → dispatch_llm → mock HTTP
 ///   → orcs.output(response) → Emitter → IOPort → stdout
 #[test]
@@ -96,7 +96,7 @@ fn command_mode_llm_pipeline() {
                 }
             }
 
-            let ollama_response = r#"{"model":"mock-model","message":{"role":"assistant","content":"CMD_MODE_RESPONSE_99"},"done":true,"done_reason":"stop"}"#;
+            let ollama_response = r#"{"model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"CMD_MODE_RESPONSE_99"},"finish_reason":"stop"}]}"#;
             let http_response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 ollama_response.len(),
