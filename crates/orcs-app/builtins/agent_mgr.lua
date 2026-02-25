@@ -725,8 +725,9 @@ return {
 --- Populated by register_agent(), queried on-demand by @prefix routing.
 local agent_registry = {}
 
---- Spawned agents: name → { fqn, config, persistent }.
---- Populated by spawn_agent(), used for @prefix routing and instance tracking.
+--- Spawned agents: channel_id → { name, fqn, channel_id, config, persistent }.
+--- Keyed by channel_id (Rust ChannelId UUID, unique and recovery-safe).
+--- Use find_spawned_by_name() for name-based lookup.
 local spawned_agents = {}
 
 --- Register an agent definition in the registry.
@@ -747,9 +748,19 @@ local function register_agent(name, config)
     return true
 end
 
+--- Find a spawned agent by name (returns the first match).
+--- Used by @prefix routing and invoke_agent.
+--- @param name string  Agent name to look up
+--- @return table|nil  Spawned agent info { name, fqn, channel_id, config, persistent }
+local function find_spawned_by_name(name)
+    for _, info in pairs(spawned_agents) do
+        if info.name == name then return info end
+    end
+    return nil
+end
+
 --- Spawn a CommonAgent instance.
---- If name matches a registered agent, uses that config as base.
---- Additional opts are merged (ad-hoc prompt enrichment).
+--- Instance is keyed by channel_id (Rust ChannelId UUID) for recovery safety.
 --- @param config table  Config with name (required), expertise, subscriptions, llm
 --- @param opts table|nil  Optional overrides (not yet used; reserved for ad-hoc prompt)
 --- @return table|nil, string|nil  spawn result, error message
@@ -776,18 +787,24 @@ local function spawn_agent(config, opts)
         return nil, "spawn_runner returned nil for agent '" .. config.name .. "'"
     end
     if result.ok then
-        spawned_agents[config.name] = {
+        local ch_id = result.channel_id
+        spawned_agents[ch_id] = {
+            name = config.name,
+            channel_id = ch_id,
             fqn = result.fqn,
             config = config,
             persistent = config.persistent or false,
         }
-        orcs.log("info", "spawned agent '" .. config.name .. "' (fqn=" .. result.fqn .. ")")
+        orcs.log("info", string.format(
+            "spawned agent '%s' (channel=%s, fqn=%s)", config.name, ch_id, result.fqn
+        ))
     end
     return result
 end
 
 --- Spawn a registered agent by name (on-demand).
 --- Looks up the registry, copies the config, and spawns.
+--- If an instance with the same name is already running, returns it.
 --- @param name string  Registered agent name
 --- @return table|nil, string|nil  spawn result, error message
 local function spawn_registered_agent(name)
@@ -795,9 +812,10 @@ local function spawn_registered_agent(name)
     if not reg then
         return nil, "agent not registered: " .. name
     end
-    if spawned_agents[name] then
+    local existing = find_spawned_by_name(name)
+    if existing then
         -- Already running — return existing info
-        return { ok = true, fqn = spawned_agents[name].fqn }
+        return { ok = true, fqn = existing.fqn }
     end
     -- Deep-copy config so spawn doesn't mutate registry
     local config = {}
@@ -813,7 +831,7 @@ local function spawn_registered_agent(name)
 end
 
 --- List registered agents (definitions).
---- @return table  Array of { name, expertise, has_llm_override }
+--- @return table  Array of { name, expertise, has_llm_override, spawned }
 local function list_registered_agents()
     local result = {}
     for name, config in pairs(agent_registry) do
@@ -821,7 +839,7 @@ local function list_registered_agents()
             name = name,
             expertise = config.expertise or "",
             has_llm_override = config.llm ~= nil,
-            spawned = spawned_agents[name] ~= nil,
+            spawned = find_spawned_by_name(name) ~= nil,
         }
     end
     table.sort(result, function(a, b) return a.name < b.name end)
@@ -829,17 +847,18 @@ local function list_registered_agents()
 end
 
 --- List spawned (running) agent instances.
---- @return table  Array of { name, fqn, persistent }
+--- @return table  Array of { channel_id, name, fqn, persistent }
 local function list_spawned_agents()
     local result = {}
-    for name, info in pairs(spawned_agents) do
+    for ch_id, info in pairs(spawned_agents) do
         result[#result + 1] = {
-            name = name,
+            channel_id = ch_id,
+            name = info.name,
             fqn = info.fqn,
             persistent = info.persistent,
         }
     end
-    table.sort(result, function(a, b) return a.name < b.name end)
+    table.sort(result, function(a, b) return a.channel_id < b.channel_id end)
     return result
 end
 
@@ -1245,9 +1264,9 @@ return {
                 return { success = false, error = spawn_err or "agent spawn failed" }
             end
 
-            local agent_info = spawned_agents[agent_name]
+            local agent_info = find_spawned_by_name(agent_name)
             if not agent_info then
-                return { success = false, error = "agent spawned but not found in registry" }
+                return { success = false, error = "agent spawned but not tracked" }
             end
 
             -- Forward message to the spawned agent via RPC
@@ -1303,13 +1322,13 @@ return {
             end
 
             -- Dynamic routing: check spawned agents first, then registry
-            local agent_info = spawned_agents[prefix]
+            local agent_info = find_spawned_by_name(prefix)
             if not agent_info and agent_registry[prefix] then
                 -- On-demand spawn from registry
                 orcs.log("info", "AgentMgr: on-demand spawn for @" .. prefix)
                 local spawn_result, spawn_err = spawn_registered_agent(prefix)
                 if spawn_result and spawn_result.ok then
-                    agent_info = spawned_agents[prefix]
+                    agent_info = find_spawned_by_name(prefix)
                 else
                     orcs.output_with_level(
                         "[AgentMgr] @" .. prefix .. " spawn failed: " .. (spawn_err or "unknown"),
