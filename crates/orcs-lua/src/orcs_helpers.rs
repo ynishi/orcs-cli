@@ -251,6 +251,9 @@ pub fn register_base_orcs_functions(
     // Register orcs.resolve_loop (provider-agnostic tool resolution loop)
     crate::resolve_loop::register_resolve_loop(lua, &orcs_table)?;
 
+    // Register orcs.sandbox_eval (must be before sandbox_lua_globals removes `load`/`debug`)
+    crate::sandbox_eval::register_sandbox_eval(lua, &orcs_table)?;
+
     // Disable dangerous Lua stdlib functions
     sandbox_lua_globals(lua)?;
 

@@ -99,6 +99,7 @@ mod loader;
 mod lua_env;
 pub mod orcs_helpers;
 pub(crate) mod resolve_loop;
+pub mod sandbox_eval;
 pub mod sanitize;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod scenario;
