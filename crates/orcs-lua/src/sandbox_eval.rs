@@ -45,6 +45,12 @@ pub fn register_sandbox_eval(lua: &Lua, orcs_table: &Table) -> LuaResult<()> {
 /// Core sandbox evaluation function exposed as `orcs.sandbox_eval(code)`.
 ///
 /// Returns a Lua table: `{ ok: bool, output: string, result?: string, error?: string }`
+///
+/// # Thread Safety
+///
+/// `set_hook` / `remove_hook` are called around `chunk.eval()`. This is safe because
+/// mlua's `Lua` is `!Send + !Sync`, so concurrent access from another thread is
+/// prevented at compile time.
 fn sandbox_eval(lua: &Lua, code: String) -> LuaResult<Table> {
     if code.is_empty() {
         return build_error(lua, "code must be a non-empty string", "");
@@ -76,11 +82,11 @@ fn sandbox_eval(lua: &Lua, code: String) -> LuaResult<Table> {
     // Clear hook immediately
     lua.remove_hook();
 
-    // Collect output
+    // Collect output (recover from poisoned mutex to avoid silent data loss)
     let output_str = output_buf
         .lock()
-        .map(|buf| buf.join("\n"))
-        .unwrap_or_default();
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .join("\n");
 
     match exec_result {
         Ok(value) => {

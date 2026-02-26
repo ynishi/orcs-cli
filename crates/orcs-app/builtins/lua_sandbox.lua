@@ -131,8 +131,8 @@ return {
         if reg and reg.ok then
             orcs.log("info", COMPONENT_ID .. ": initialized, lua_eval intent registered")
         else
-            orcs.log("warn", COMPONENT_ID .. ": lua_eval intent registration failed: "
-                .. ((reg and reg.error) or "unknown"))
+            local reason = (reg and reg.error) or "unknown"
+            error(COMPONENT_ID .. ": lua_eval intent registration failed: " .. reason)
         end
     end,
 
