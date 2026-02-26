@@ -492,9 +492,9 @@ fn register_context_functions(
     ctx: Box<dyn ChildContext>,
     sandbox: &Arc<dyn SandboxPolicy>,
 ) -> Result<(), mlua::Error> {
-    use crate::cap_tools::ContextWrapper;
+    use crate::context_wrapper::ContextWrapper;
 
-    // Store context in app_data (shared ContextWrapper used by cap_tools)
+    // Store context in app_data (shared ContextWrapper used by dispatch_rust_tool)
     lua.set_app_data(ContextWrapper(Arc::new(Mutex::new(ctx))));
 
     // Get or create orcs table
@@ -507,8 +507,8 @@ fn register_context_functions(
         }
     };
 
-    // Override file tools with capability-gated versions (shared implementation)
-    crate::cap_tools::register_capability_gated_tools(lua, &orcs_table, sandbox)?;
+    // Note: capability checks for file tools are handled by dispatch_rust_tool
+    // via ContextWrapper in app_data (set above or by caller).
 
     // orcs.exec(cmd) -> {ok, stdout, stderr, code}
     // Permission-checked override: replaces the deny-by-default from register_base_orcs_functions.

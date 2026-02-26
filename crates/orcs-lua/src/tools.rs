@@ -626,136 +626,127 @@ pub(crate) fn tool_load_lua(
 pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Result<(), LuaError> {
     let orcs_table: Table = lua.globals().get("orcs")?;
 
-    // orcs.read(path) -> { ok, content, size, error }
-    let sb = Arc::clone(&sandbox);
-    let read_fn = lua.create_function(move |lua, path: String| {
-        let result = lua.create_table()?;
-        match tool_read(&path, sb.as_ref()) {
-            Ok((content, size)) => {
-                result.set("ok", true)?;
-                result.set("content", content)?;
-                result.set("size", size)?;
-            }
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("read", read_fn)?;
+    // Ensure sandbox is in app_data (dispatch_rust_tool reads it at call time).
+    // Idempotent — register_base_orcs_functions also sets this.
+    lua.set_app_data(Arc::clone(&sandbox));
 
-    // orcs.write(path, content) -> { ok, bytes_written, error }
-    let sb = Arc::clone(&sandbox);
-    let write_fn = lua.create_function(move |lua, (path, content): (String, String)| {
-        let result = lua.create_table()?;
-        match tool_write(&path, &content, sb.as_ref()) {
-            Ok(bytes) => {
-                result.set("ok", true)?;
-                result.set("bytes_written", bytes)?;
-            }
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("write", write_fn)?;
+    // ── RustTool-backed positional wrappers ──────────────────────────
+    //
+    // The 7 file tools delegate to dispatch_rust_tool which provides:
+    //   - Capability checks (via ContextWrapper in app_data)
+    //   - Sandbox validation (via Arc<dyn SandboxPolicy> in app_data)
+    //   - Unified execution path (RustTool::execute)
+    //
+    // Tools are obtained from the IntentRegistry (single source of truth),
+    // avoiding duplicate Arc allocations from builtin_rust_tools().
+    {
+        use crate::tool_registry::{dispatch_rust_tool, ensure_registry};
 
-    // orcs.grep(pattern, path) -> { ok, matches[], count, error }
-    let sb = Arc::clone(&sandbox);
-    let grep_fn = lua.create_function(move |lua, (pattern, path): (String, String)| {
-        let result = lua.create_table()?;
-        match tool_grep(&pattern, &path, sb.as_ref()) {
-            Ok(grep_matches) => {
-                let matches_table = lua.create_table()?;
-                for (i, m) in grep_matches.iter().enumerate() {
-                    let entry = lua.create_table()?;
-                    entry.set("line_number", m.line_number)?;
-                    entry.set("line", m.line.as_str())?;
-                    matches_table.set(i + 1, entry)?;
+        let registry = ensure_registry(lua)?;
+
+        /// Retrieves a builtin tool by name from the registry.
+        /// Panics in debug builds if missing (programming error — should never happen).
+        fn get_tool(
+            registry: &crate::tool_registry::IntentRegistry,
+            name: &str,
+        ) -> Option<std::sync::Arc<dyn orcs_component::RustTool>> {
+            match registry.get_tool(name) {
+                Some(t) => Some(std::sync::Arc::clone(t)),
+                None => {
+                    debug_assert!(false, "builtin tool '{name}' missing from IntentRegistry");
+                    tracing::error!(
+                        "builtin tool '{name}' missing from IntentRegistry — orcs.{name}() unavailable"
+                    );
+                    None
                 }
-                result.set("ok", true)?;
-                result.set("matches", matches_table)?;
-                result.set("count", grep_matches.len())?;
-            }
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
             }
         }
-        Ok(result)
-    })?;
-    orcs_table.set("grep", grep_fn)?;
 
-    // orcs.glob(pattern, dir?) -> { ok, files[], count, error }
-    let sb = Arc::clone(&sandbox);
-    let glob_fn = lua.create_function(move |lua, (pattern, dir): (String, Option<String>)| {
-        let result = lua.create_table()?;
-        match tool_glob(&pattern, dir.as_deref(), sb.as_ref()) {
-            Ok(files) => {
-                let files_table = lua.create_table()?;
-                for (i, f) in files.iter().enumerate() {
-                    files_table.set(i + 1, f.as_str())?;
+        /// Registers a deny stub for `orcs.<name>()` that returns
+        /// `{ok=false, error="tool unavailable: <name>"}`.
+        /// Used when a builtin tool is unexpectedly missing from the registry.
+        fn register_deny_stub(
+            lua: &Lua,
+            orcs_table: &Table,
+            name: &str,
+        ) -> Result<(), mlua::Error> {
+            let tool_name = name.to_string();
+            let f = lua.create_function(move |lua, _args: mlua::MultiValue| {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", format!("tool unavailable: {tool_name}"))?;
+                Ok(result)
+            })?;
+            orcs_table.set(name, f)?;
+            Ok(())
+        }
+
+        /// Registers a Lua positional wrapper that delegates to `dispatch_rust_tool`.
+        /// Falls back to a deny stub if the tool is missing from the registry.
+        macro_rules! register_wrapper {
+            // orcs.name(arg) — single required String arg
+            ($tool:expr, $name:literal, |$arg:ident: String|) => {
+                if let Some(t) = $tool {
+                    let f = lua.create_function(move |lua, $arg: String| {
+                        let args = lua.create_table()?;
+                        args.set(stringify!($arg), $arg)?;
+                        dispatch_rust_tool(lua, &*t, &args)
+                    })?;
+                    orcs_table.set($name, f)?;
+                } else {
+                    register_deny_stub(lua, &orcs_table, $name)?;
                 }
-                result.set("ok", true)?;
-                result.set("files", files_table)?;
-                result.set("count", files.len())?;
-            }
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
+            };
+            // orcs.name(arg1, arg2) — two required String args
+            ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: String|) => {
+                if let Some(t) = $tool {
+                    let f = lua.create_function(move |lua, ($a1, $a2): (String, String)| {
+                        let args = lua.create_table()?;
+                        args.set(stringify!($a1), $a1)?;
+                        args.set(stringify!($a2), $a2)?;
+                        dispatch_rust_tool(lua, &*t, &args)
+                    })?;
+                    orcs_table.set($name, f)?;
+                } else {
+                    register_deny_stub(lua, &orcs_table, $name)?;
+                }
+            };
+            // orcs.name(arg1, arg2?) — one required + one optional String arg
+            ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: Option<String>|) => {
+                if let Some(t) = $tool {
+                    let f =
+                        lua.create_function(move |lua, ($a1, opt): (String, Option<String>)| {
+                            let args = lua.create_table()?;
+                            args.set(stringify!($a1), $a1)?;
+                            if let Some(v) = opt {
+                                args.set(stringify!($a2), v)?;
+                            }
+                            dispatch_rust_tool(lua, &*t, &args)
+                        })?;
+                    orcs_table.set($name, f)?;
+                } else {
+                    register_deny_stub(lua, &orcs_table, $name)?;
+                }
+            };
         }
-        Ok(result)
-    })?;
-    orcs_table.set("glob", glob_fn)?;
 
-    // orcs.mkdir(path) -> { ok, error }
-    let sb = Arc::clone(&sandbox);
-    let mkdir_fn = lua.create_function(move |lua, path: String| {
-        let result = lua.create_table()?;
-        match tool_mkdir(&path, sb.as_ref()) {
-            Ok(()) => result.set("ok", true)?,
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("mkdir", mkdir_fn)?;
+        let read_tool = get_tool(&registry, "read");
+        let write_tool = get_tool(&registry, "write");
+        let grep_tool = get_tool(&registry, "grep");
+        let glob_tool = get_tool(&registry, "glob");
+        let mkdir_tool = get_tool(&registry, "mkdir");
+        let remove_tool = get_tool(&registry, "remove");
+        let mv_tool = get_tool(&registry, "mv");
+        drop(registry);
 
-    // orcs.remove(path) -> { ok, error }
-    let sb = Arc::clone(&sandbox);
-    let remove_fn = lua.create_function(move |lua, path: String| {
-        let result = lua.create_table()?;
-        match tool_remove(&path, sb.as_ref()) {
-            Ok(()) => result.set("ok", true)?,
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("remove", remove_fn)?;
-
-    // orcs.mv(src, dst) -> { ok, error }
-    let sb = Arc::clone(&sandbox);
-    let mv_fn = lua.create_function(move |lua, (src, dst): (String, String)| {
-        let result = lua.create_table()?;
-        match tool_mv(&src, &dst, sb.as_ref()) {
-            Ok(()) => result.set("ok", true)?,
-            Err(e) => {
-                result.set("ok", false)?;
-                result.set("error", e)?;
-            }
-        }
-        Ok(result)
-    })?;
-    orcs_table.set("mv", mv_fn)?;
+        register_wrapper!(read_tool, "read", |path: String|);
+        register_wrapper!(write_tool, "write", |path: String, content: String|);
+        register_wrapper!(grep_tool, "grep", |pattern: String, path: String|);
+        register_wrapper!(glob_tool, "glob", |pattern: String, dir: Option<String>|);
+        register_wrapper!(mkdir_tool, "mkdir", |path: String|);
+        register_wrapper!(remove_tool, "remove", |path: String|);
+        register_wrapper!(mv_tool, "mv", |src: String, dst: String|);
+    }
 
     // orcs.scan_dir(config) -> table[]
     let sb = Arc::clone(&sandbox);

@@ -57,7 +57,7 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// An event that can be injected into a channel.
 ///
@@ -1107,8 +1107,11 @@ impl ChannelRunner {
                     let _ = io_tx.try_send_direct(output_event);
                 }
             }
+            Err(ComponentError::Aborted) => {
+                info!("component aborted");
+            }
             Err(e) => {
-                warn!(error = %e, "component returned error");
+                error!(error = %e, "component returned error");
             }
         }
     }

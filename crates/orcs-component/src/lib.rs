@@ -209,6 +209,7 @@ mod package;
 mod snapshot;
 mod status;
 pub mod testing;
+pub mod tool;
 mod traits;
 
 // Re-export core traits
@@ -250,6 +251,9 @@ pub use package::{
 
 // Re-export error types
 pub use error::ComponentError;
+
+// Re-export tool types
+pub use tool::{RustTool, ToolContext, ToolError};
 
 // Re-export EventCategory and SubscriptionEntry for convenience
 pub use orcs_event::{EventCategory, SubscriptionEntry};

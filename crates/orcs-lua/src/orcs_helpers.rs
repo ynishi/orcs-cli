@@ -76,6 +76,9 @@ pub fn register_base_orcs_functions(
     // Get or create orcs table
     let orcs_table = ensure_orcs_table(lua)?;
 
+    // Store sandbox in app_data for RustTool dispatch (dispatch_rust_tool).
+    lua.set_app_data(Arc::clone(&sandbox));
+
     // Register orcs.llm() deny stub (overridden by ctx_fns/child with Capability::LLM).
     crate::llm_command::register_llm_deny_stub(lua, &orcs_table)?;
 

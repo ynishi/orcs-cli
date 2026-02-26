@@ -56,6 +56,29 @@ local function format_for_prompt(m)
         end
     end
 
+    if m.agents then
+        local a = m.agents
+        -- Concierge info
+        local concierge = a.concierge_fqn or "none"
+        local agent_line = "Agents: concierge=" .. concierge
+        -- Provider/model info (from agent_mgr config, available for builtin concierge)
+        if a.llm_provider then
+            agent_line = agent_line .. string.format(
+                ", llm=%s/%s", a.llm_provider, a.llm_model or "default"
+            )
+        end
+        -- Delegate worker
+        agent_line = agent_line .. ", delegate=" .. (a.delegate_fqn and "ok" or "off")
+        -- Delegation stats
+        if a.delegation_count and a.delegation_count > 0 then
+            agent_line = agent_line .. string.format(
+                ", delegations=%d (completed=%d)",
+                a.delegation_count, a.delegation_completed or 0
+            )
+        end
+        parts[#parts + 1] = agent_line
+    end
+
     if m.timestamp and m.timestamp ~= "" then
         parts[#parts + 1] = "Time: " .. m.timestamp
     end
@@ -94,8 +117,9 @@ end
 
 -- === Metric Collection ===
 
---- Collect all metrics from available sources.
-local function collect_metrics()
+--- Collect base metrics (local only, no cross-component RPC).
+--- Safe to call during init() before other components are ready.
+local function collect_base_metrics()
     local m = {}
 
     -- Working directory
@@ -118,6 +142,20 @@ local function collect_metrics()
     -- Non-critical: if agent_mgr is slow or unavailable, skip gracefully.
     local agent_ok, agent_resp = pcall(orcs.request, "builtin::agent_mgr", "list_agents", {})
     if agent_ok and agent_resp and agent_resp.success and agent_resp.data then
+        m.agents = agent_resp.data
+    end
+
+    return m
+end
+
+--- Collect all metrics including cross-component agent info.
+--- Only call after all components are initialized (i.e., from RPC handlers).
+local function collect_metrics()
+    local m = collect_base_metrics()
+
+    -- Agent info (via RPC to agent_mgr)
+    local agent_resp = orcs.request("builtin::agent_mgr", "list_active", {})
+    if agent_resp and agent_resp.success and agent_resp.data then
         m.agents = agent_resp.data
     end
 
@@ -208,8 +246,9 @@ return {
             orcs.log("debug", "console_metrics: config received: " .. orcs.json_encode(cfg))
         end
 
-        -- Initial collection
-        metrics = collect_metrics()
+        -- Initial collection (base metrics only, no cross-component RPC
+        -- to avoid blocking on components that may still be initializing)
+        metrics = collect_base_metrics()
 
         local git_status = "no repo"
         if metrics.git and metrics.git.ok then

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 /// Registers child-context functions into the `orcs` Lua table.
 ///
-/// Also overrides file tools with capability-gated versions via `cap_tools`.
+/// Also stores `ContextWrapper` for capability-gated dispatch via `dispatch_rust_tool`.
 pub(super) fn register(
     lua: &Lua,
     ctx: Arc<Mutex<Box<dyn ChildContext>>>,
@@ -34,10 +34,9 @@ pub(super) fn register(
     let orcs_table: Table = lua.globals().get("orcs")?;
     let sandbox_root = sandbox.root().to_path_buf();
 
-    // ── Override file tools with capability-gated versions ──────────
-    // Store context in app_data for shared cap_tools implementation.
-    lua.set_app_data(crate::cap_tools::ContextWrapper(Arc::clone(&ctx)));
-    crate::cap_tools::register_capability_gated_tools(lua, &orcs_table, &sandbox)?;
+    // ── Store ChildContext for capability-gated dispatch ────────────
+    // dispatch_rust_tool reads ContextWrapper from app_data for capability checks.
+    lua.set_app_data(crate::context_wrapper::ContextWrapper(Arc::clone(&ctx)));
 
     // Override orcs.exec with permission-checked version
     // This replaces the basic exec from register_orcs_functions
@@ -573,6 +572,7 @@ pub(super) fn register(
 
     // orcs.spawn_runner(config) -> { ok, channel_id, fqn, error }
     // config = { script = "...", id = "optional-id", globals = { key = value, ... } }
+    //        or { builtin = "concierge.lua", id = "optional-id" }
     // Spawns a Component as a separate ChannelRunner for parallel execution.
     // The returned `fqn` can be used immediately with orcs.request(fqn, ...).
     // When `globals` is provided, each top-level key is set as a global variable
@@ -600,19 +600,26 @@ pub(super) fn register(
             return Ok(result_table);
         }
 
-        // Parse config - script is required
-        let script: String = config
-            .get("script")
-            .map_err(|_| mlua::Error::RuntimeError("config.script required".into()))?;
-
         // ID is optional
         let id: Option<String> = config.get("id").ok();
 
+        // Parse optional globals (only meaningful for script path, ignored for builtin)
         let globals_raw: mlua::Value = config.get("globals")?;
         let globals = parse_globals_from_lua(lua, globals_raw)?;
 
+        // Resolve script: builtin name takes precedence over inline script
+        let spawn_result = if let Ok(builtin_name) = config.get::<String>("builtin") {
+            ctx_guard.spawn_runner_from_builtin(&builtin_name, id.as_deref())
+        } else if let Ok(script) = config.get::<String>("script") {
+            ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref())
+        } else {
+            return Err(mlua::Error::RuntimeError(
+                "config.builtin or config.script required".into(),
+            ));
+        };
+
         let result_table = lua.create_table()?;
-        match ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref()) {
+        match spawn_result {
             Ok((channel_id, fqn)) => {
                 result_table.set("ok", true)?;
                 result_table.set("channel_id", channel_id.to_string())?;

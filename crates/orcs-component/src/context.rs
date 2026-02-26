@@ -126,6 +126,15 @@ pub trait ComponentLoader: Send + Sync {
         id: Option<&str>,
         globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Box<dyn crate::Component>, SpawnError>;
+
+    /// Resolves a builtin component name to its script content.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `None` (no builtins available).
+    fn resolve_builtin(&self, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Configuration for spawning a child.
@@ -524,6 +533,24 @@ pub trait ChildContext: Send + Sync + Debug {
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "runner spawning not supported by this context".into(),
+        ))
+    }
+
+    /// Spawns a ChannelRunner from a builtin component name.
+    ///
+    /// Resolves the builtin name to script content via the component loader,
+    /// then delegates to [`spawn_runner_from_script`](Self::spawn_runner_from_script).
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `SpawnError::Internal` indicating builtin spawning is not supported.
+    fn spawn_runner_from_builtin(
+        &self,
+        _name: &str,
+        _id: Option<&str>,
+    ) -> Result<(ChannelId, String), SpawnError> {
+        Err(SpawnError::Internal(
+            "builtin spawning not supported by this context".into(),
         ))
     }
 
