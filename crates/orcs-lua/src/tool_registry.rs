@@ -181,6 +181,10 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
             operation,
             timeout_ms,
         } => dispatch_component(lua, name, &component_fqn, &operation, args, timeout_ms),
+        IntentResolver::Mcp {
+            server_name,
+            tool_name,
+        } => dispatch_mcp(lua, name, &server_name, &tool_name, args),
     };
     let duration_ms = start.elapsed().as_millis() as u64;
     let ok = result
@@ -481,6 +485,30 @@ fn dispatch_component(
         result.set("error", error_msg)?;
     }
 
+    Ok(result)
+}
+
+/// Dispatches an MCP tool invocation.
+///
+/// Delegates to `McpClientManager` stored in Lua app_data.
+/// Returns `{ ok, content?, error?, duration_ms }`.
+fn dispatch_mcp(
+    lua: &Lua,
+    intent_name: &str,
+    server_name: &str,
+    tool_name: &str,
+    args: &Table,
+) -> mlua::Result<Table> {
+    // MCP dispatch requires async runtime + McpClientManager.
+    // Currently returns a placeholder; Phase 2 will wire this to McpClientManager.
+    let _ = (server_name, tool_name, args);
+    let result = lua.create_table()?;
+    set_error(
+        &result,
+        &format!(
+            "MCP dispatch not yet wired: {intent_name} (server={server_name}, tool={tool_name})"
+        ),
+    )?;
     Ok(result)
 }
 
