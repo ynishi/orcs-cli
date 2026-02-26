@@ -73,6 +73,10 @@ pub struct ChildContextImpl {
     /// Shared hook registry (propagated to child runners).
     hook_registry: Option<SharedHookRegistry>,
 
+    // -- MCP support --
+    /// Shared MCP client manager (propagated to child runners).
+    mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
+
     // -- Capability support --
     /// Effective capabilities for this context.
     /// Defaults to ALL; narrowed via `Capability::inherit` on spawn.
@@ -122,6 +126,7 @@ impl ChildContextImpl {
             component_channel_map: None,
             channel_id: None,
             hook_registry: None,
+            mcp_manager: None,
             capabilities: Capability::ALL,
         }
     }
@@ -376,6 +381,13 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the shared MCP client manager for propagation to child runners.
+    #[must_use]
+    pub fn with_mcp_manager(mut self, manager: Arc<orcs_mcp::McpClientManager>) -> Self {
+        self.mcp_manager = Some(manager);
+        self
+    }
+
     /// Sets the effective capabilities for this context.
     ///
     /// Defaults to [`Capability::ALL`]. Use this to restrict what
@@ -480,6 +492,7 @@ impl ChildContextImpl {
         let checker_clone = self.checker.clone();
         let grants_clone = self.grants.clone();
         let hook_registry_clone = self.hook_registry.clone();
+        let mcp_manager_clone = self.mcp_manager.clone();
 
         // Clone RPC resources so the spawned runner participates in the
         // event mesh and is reachable via FQN-based RPC.
@@ -579,6 +592,10 @@ impl ChildContextImpl {
             // Propagate hook registry to child runner
             if let Some(registry) = hook_registry_clone {
                 builder = builder.with_hook_registry(registry);
+            }
+            // Propagate MCP manager to child runner
+            if let Some(manager) = mcp_manager_clone {
+                builder = builder.with_mcp_manager(manager);
             }
 
             let (runner, handle) = builder.build();
@@ -1175,6 +1192,10 @@ impl ChildContext for ChildContextImpl {
                 .hook_registry
                 .as_ref()
                 .map(|r| Box::new(Arc::clone(r)) as Box<dyn std::any::Any + Send + Sync>),
+            "mcp_manager" => self
+                .mcp_manager
+                .as_ref()
+                .map(|m| Box::new(Arc::clone(m)) as Box<dyn std::any::Any + Send + Sync>),
             _ => None,
         }
     }

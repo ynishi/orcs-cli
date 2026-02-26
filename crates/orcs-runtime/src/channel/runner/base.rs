@@ -1294,6 +1294,8 @@ pub struct ChannelRunnerBuilder {
     component_channel_map: Option<crate::engine::SharedComponentChannelMap>,
     /// Shared hook registry for lifecycle hook dispatch.
     hook_registry: Option<SharedHookRegistry>,
+    /// Shared MCP client manager for MCP tool dispatch.
+    mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
     /// Per-component configuration from config file.
     component_config: serde_json::Value,
 }
@@ -1328,6 +1330,7 @@ impl ChannelRunnerBuilder {
             enable_request_channel: false,
             component_channel_map: None,
             hook_registry: None,
+            mcp_manager: None,
             component_config: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
@@ -1508,6 +1511,16 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the shared MCP client manager.
+    ///
+    /// When set, the runner propagates the manager to ChildContextImpl
+    /// so that MCP tools can be dispatched from Lua components.
+    #[must_use]
+    pub fn with_mcp_manager(mut self, manager: Arc<orcs_mcp::McpClientManager>) -> Self {
+        self.mcp_manager = Some(manager);
+        self
+    }
+
     /// Sets per-component configuration passed to `Component::init()`.
     ///
     /// The value comes from `[components.settings.<name>]` in the config file.
@@ -1560,6 +1573,9 @@ impl ChannelRunnerBuilder {
         }
         if let Some(reg) = &self.hook_registry {
             ctx = ctx.with_hook_registry(Arc::clone(reg));
+        }
+        if let Some(mgr) = &self.mcp_manager {
+            ctx = ctx.with_mcp_manager(Arc::clone(mgr));
         }
         ctx
     }

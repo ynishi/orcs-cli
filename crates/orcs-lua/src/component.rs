@@ -526,11 +526,20 @@ impl LuaComponent {
 
     /// Shared implementation for `set_child_context` (inherent + trait).
     ///
-    /// Extracts hook registry, registers ctx functions, and wires up hooks.
+    /// Extracts hook registry and MCP manager, registers ctx functions,
+    /// and wires up hooks and MCP tools.
     fn install_child_context(&mut self, ctx: Box<dyn ChildContext>) {
         let hook_registry = ctx
             .extension("hook_registry")
             .and_then(|any| any.downcast::<orcs_hook::SharedHookRegistry>().ok())
+            .map(|boxed| *boxed);
+
+        let mcp_manager = ctx
+            .extension("mcp_manager")
+            .and_then(|any| {
+                any.downcast::<std::sync::Arc<orcs_mcp::McpClientManager>>()
+                    .ok()
+            })
             .map(|boxed| *boxed);
 
         let ctx_arc = Arc::new(Mutex::new(ctx));
@@ -564,6 +573,43 @@ impl LuaComponent {
         });
         if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
             tracing::warn!("Failed to wrap tools with hooks: {}", e);
+        }
+
+        // Wire MCP client manager into Lua app_data and register MCP IntentDefs
+        if let Some(manager) = mcp_manager {
+            // Store manager in app_data for dispatch_mcp
+            lua.set_app_data(crate::tool_registry::SharedMcpManager(
+                std::sync::Arc::clone(&manager),
+            ));
+
+            // Register MCP IntentDefs into IntentRegistry
+            // Use block_in_place since intent_defs() is async
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let defs = tokio::task::block_in_place(|| handle.block_on(manager.intent_defs()));
+
+                if !defs.is_empty() {
+                    if let Some(mut registry) =
+                        lua.app_data_mut::<crate::tool_registry::IntentRegistry>()
+                    {
+                        for def in &defs {
+                            if let Err(e) = registry.register(def.clone()) {
+                                tracing::warn!(
+                                    intent = %def.name,
+                                    error = %e,
+                                    "Failed to register MCP intent"
+                                );
+                            }
+                        }
+                    } else {
+                        // IntentRegistry not yet created; store defs for deferred registration
+                        lua.set_app_data(crate::tool_registry::PendingMcpDefs(defs));
+                    }
+                    tracing::info!(
+                        component = %self.id.fqn(),
+                        "MCP client manager wired"
+                    );
+                }
+            }
         }
     }
 }

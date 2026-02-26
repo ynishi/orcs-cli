@@ -488,10 +488,24 @@ fn dispatch_component(
     Ok(result)
 }
 
+/// Wrapper for `Arc<McpClientManager>` stored in Lua `app_data`.
+///
+/// Each Lua VM holds a clone of the shared manager. Set during
+/// [`install_child_context`](crate::component) via the ChildContext
+/// extension mechanism.
+pub(crate) struct SharedMcpManager(pub Arc<orcs_mcp::McpClientManager>);
+
+/// Deferred MCP IntentDefs, stored when IntentRegistry doesn't exist yet.
+///
+/// Consumed by [`ensure_registry`] on first registry access.
+pub(crate) struct PendingMcpDefs(pub Vec<orcs_types::intent::IntentDef>);
+
 /// Dispatches an MCP tool invocation.
 ///
-/// Delegates to `McpClientManager` stored in Lua app_data.
-/// Returns `{ ok, content?, error?, duration_ms }`.
+/// Bridges async `McpClientManager::call_tool` into the sync Lua call
+/// context via `tokio::task::block_in_place`. Converts `CallToolResult`
+/// content to a Lua table matching the dispatch contract:
+/// `{ ok: bool, content?: string, error?: string }`.
 fn dispatch_mcp(
     lua: &Lua,
     intent_name: &str,
@@ -499,16 +513,52 @@ fn dispatch_mcp(
     tool_name: &str,
     args: &Table,
 ) -> mlua::Result<Table> {
-    // MCP dispatch requires async runtime + McpClientManager.
-    // Currently returns a placeholder; Phase 2 will wire this to McpClientManager.
-    let _ = (server_name, tool_name, args);
+    // Retrieve McpClientManager from app_data
+    let manager = match lua.app_data_ref::<SharedMcpManager>() {
+        Some(m) => Arc::clone(&m.0),
+        None => {
+            let result = lua.create_table()?;
+            set_error(
+                &result,
+                &format!("MCP client not initialized: {intent_name} (server={server_name})"),
+            )?;
+            return Ok(result);
+        }
+    };
+
+    // Convert Lua args → JSON for MCP call
+    let json_args = crate::types::lua_to_json(mlua::Value::Table(args.clone()), lua)?;
+
+    // Bridge async → sync via tokio runtime handle
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| mlua::Error::RuntimeError("no tokio runtime available for MCP call".into()))?;
+
+    let namespaced = format!("mcp:{server_name}:{tool_name}");
+    let call_result =
+        tokio::task::block_in_place(|| handle.block_on(manager.call_tool(&namespaced, json_args)));
+
+    // Convert CallToolResult → Lua table
     let result = lua.create_table()?;
-    set_error(
-        &result,
-        &format!(
-            "MCP dispatch not yet wired: {intent_name} (server={server_name}, tool={tool_name})"
-        ),
-    )?;
+    match call_result {
+        Ok(tool_result) => {
+            let is_error = tool_result.is_error.unwrap_or(false);
+            result.set("ok", !is_error)?;
+
+            // Extract text from Content items
+            let text = orcs_mcp::content_to_text(&tool_result.content);
+            if !text.is_empty() {
+                if is_error {
+                    result.set("error", text)?;
+                } else {
+                    result.set("content", text)?;
+                }
+            }
+        }
+        Err(e) => {
+            set_error(&result, &format!("MCP call failed: {e}"))?;
+        }
+    }
+
     Ok(result)
 }
 
@@ -519,6 +569,18 @@ pub(crate) fn ensure_registry(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, In
     if lua.app_data_ref::<IntentRegistry>().is_none() {
         lua.set_app_data(IntentRegistry::new());
     }
+
+    // Register any deferred MCP IntentDefs
+    if let Some(pending) = lua.remove_app_data::<PendingMcpDefs>() {
+        if let Some(mut registry) = lua.app_data_mut::<IntentRegistry>() {
+            for def in pending.0 {
+                if let Err(e) = registry.register(def) {
+                    tracing::warn!(error = %e, "Failed to register deferred MCP intent");
+                }
+            }
+        }
+    }
+
     lua.app_data_ref::<IntentRegistry>().ok_or_else(|| {
         mlua::Error::RuntimeError("IntentRegistry not available after initialization".into())
     })
