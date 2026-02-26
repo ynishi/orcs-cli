@@ -1308,12 +1308,14 @@ return {
                 return { success = false, error = "agent spawned but not tracked" }
             end
 
-            -- Forward message to the spawned agent via RPC
+            -- Forward message to the spawned agent via RPC.
+            -- Timeout: llm_timeout (seconds, from config.toml) → ms, default 120s.
+            local rpc_timeout = (component_settings.llm_timeout or 120) * 1000
             local resp = orcs.request(agent_info.fqn, "process", {
                 message = agent_message,
                 llm_config = extract_llm_config(),
                 prompt_placement = component_settings.prompt_placement or "both",
-            })
+            }, { timeout_ms = rpc_timeout })
             if resp and resp.success then
                 return {
                     success = true,
@@ -1378,11 +1380,13 @@ return {
             end
             if agent_info then
                 orcs.log("info", "AgentMgr routing @" .. prefix .. " -> " .. agent_info.fqn)
+                -- Timeout: llm_timeout (seconds, from config.toml) → ms, default 120s.
+                local rpc_timeout = (component_settings.llm_timeout or 120) * 1000
                 local resp = orcs.request(agent_info.fqn, "process", {
                     message = body,
                     llm_config = extract_llm_config(),
                     prompt_placement = component_settings.prompt_placement or "both",
-                })
+                }, { timeout_ms = rpc_timeout })
                 if resp and resp.success then
                     return {
                         success = true,
