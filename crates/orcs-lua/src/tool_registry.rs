@@ -1689,6 +1689,7 @@ mod tests {
             &self,
             _script: &str,
             _id: Option<&str>,
+            _globals: Option<&serde_json::Map<String, serde_json::Value>>,
         ) -> Result<(orcs_types::ChannelId, String), orcs_component::SpawnError> {
             Err(orcs_component::SpawnError::Internal("stub".into()))
         }

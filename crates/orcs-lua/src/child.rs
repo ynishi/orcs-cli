@@ -105,7 +105,15 @@ pub struct LuaChild {
 // 3. Lua callbacks are stored in the registry via RegistryKey, which is Send.
 // 4. No raw Lua values escape the Mutex guard scope.
 // 5. The remaining fields (id, status) are all Send+Sync.
+//
+// FOR AI: #[allow(unsafe_code)] MUST be placed on each `unsafe impl` individually.
+// DO NOT use crate-root #![allow(unsafe_code)] — that disables the unsafe_code lint
+// for the entire crate, silently allowing any future unsafe code to go undetected.
+// mlua's `Lua` type is !Send + !Sync, so these manual Send/Sync impls are the ONLY
+// places in this crate that require unsafe. Keep the allow scoped here exclusively.
+#[allow(unsafe_code)]
 unsafe impl Send for LuaChild {}
+#[allow(unsafe_code)]
 unsafe impl Sync for LuaChild {}
 
 impl LuaChild {
@@ -2029,7 +2037,7 @@ mod tests {
             let lua = Arc::new(Mutex::new(Lua::new()));
             let script = r#"
                 return {
-                    id = "llm-worker",
+                    id = "test-worker",
                     run = function(input)
                         local result = orcs.llm("hello")
                         return { success = true, data = {

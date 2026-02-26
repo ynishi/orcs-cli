@@ -957,7 +957,7 @@ mod tests {
             .expect("spawn-caller script should load");
 
         let captured = harness.inject_spawn_runner_mock(vec![(
-            "builtin::llm-worker".to_string(),
+            "agent::common-agent".to_string(),
             "ch-001".to_string(),
         )]);
 
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(args[0]["id"], "llm");
 
         // Verify returned fqn/channel_id
-        assert_eq!(result["fqn"], "builtin::llm-worker");
+        assert_eq!(result["fqn"], "agent::common-agent");
         assert_eq!(result["channel_id"], "ch-001");
     }
 

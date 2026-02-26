@@ -1,9 +1,11 @@
 pub mod layer_dep;
 pub mod no_panic;
+pub mod no_silent_err;
 pub mod no_unwrap;
 
 pub use layer_dep::check as check_layer_dep;
 pub use no_panic::NoPanicInLib;
+pub use no_silent_err::NoSilentErr;
 pub use no_unwrap::NoUnwrap;
 
 /// 全ルール一覧: (name, description)
@@ -19,5 +21,9 @@ pub const ALL_RULES: &[(&str, &str)] = &[
     (
         no_panic::NAME,
         "panic!/todo!/unimplemented! forbidden in library code",
+    ),
+    (
+        no_silent_err::NAME,
+        "`Err(_) => None` silently discards errors — propagate or handle explicitly",
     ),
 ];

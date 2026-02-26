@@ -571,10 +571,12 @@ pub(super) fn register(
     orcs_table.set("request_batch", request_batch_fn)?;
 
     // orcs.spawn_runner(config) -> { ok, channel_id, fqn, error }
-    // config = { script = "...", id = "optional-id" }
+    // config = { script = "...", id = "optional-id", globals = { key = value, ... } }
     //        or { builtin = "concierge.lua", id = "optional-id" }
     // Spawns a Component as a separate ChannelRunner for parallel execution.
     // The returned `fqn` can be used immediately with orcs.request(fqn, ...).
+    // When `globals` is provided, each top-level key is set as a global variable
+    // in the new VM before the script executes.
     let ctx_clone = Arc::clone(&ctx);
     let spawn_runner_fn = lua.create_function(move |lua, config: Table| {
         let ctx_guard = ctx_clone.lock();
@@ -601,11 +603,15 @@ pub(super) fn register(
         // ID is optional
         let id: Option<String> = config.get("id").ok();
 
+        // Parse optional globals (only meaningful for script path, ignored for builtin)
+        let globals_raw: mlua::Value = config.get("globals")?;
+        let globals = parse_globals_from_lua(lua, globals_raw)?;
+
         // Resolve script: builtin name takes precedence over inline script
         let spawn_result = if let Ok(builtin_name) = config.get::<String>("builtin") {
             ctx_guard.spawn_runner_from_builtin(&builtin_name, id.as_deref())
         } else if let Ok(script) = config.get::<String>("script") {
-            ctx_guard.spawn_runner_from_script(&script, id.as_deref())
+            ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref())
         } else {
             return Err(mlua::Error::RuntimeError(
                 "config.builtin or config.script required".into(),
@@ -633,4 +639,163 @@ pub(super) fn register(
         "Registered orcs.spawn_child, child_count, max_children, send_to_child, send_to_children_batch, request_batch, spawn_runner functions"
     );
     Ok(())
+}
+
+/// Parse a Lua value from `config.globals` into a typed `serde_json::Map`.
+///
+/// Design decisions (parse, don't validate):
+///   1. `Nil` (field absent) → `Ok(None)`.
+///   2. Serialization failure (functions, userdata, etc.) → `RuntimeError`
+///      so the Lua caller gets clear feedback.
+///   3. Non-object JSON values (array, string, …) → `RuntimeError` with
+///      the actual type name for diagnostics.
+///   4. Valid object table → `Ok(Some(map))`. Downstream functions accept
+///      the already-parsed `Map` and never need `unreachable!()` branches.
+fn parse_globals_from_lua(
+    lua: &mlua::Lua,
+    raw: mlua::Value,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, mlua::Error> {
+    match raw {
+        mlua::Value::Nil => Ok(None),
+        other => {
+            let val: serde_json::Value = lua.from_value(other).map_err(|e| {
+                mlua::Error::RuntimeError(format!(
+                    "config.globals must be a serializable table: {e}"
+                ))
+            })?;
+            match val {
+                serde_json::Value::Object(map) => Ok(Some(map)),
+                other => Err(mlua::Error::RuntimeError(format!(
+                    "config.globals must be a table (JSON object), got {}",
+                    match other {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Null => "null",
+                        // Object is already matched above; this arm is
+                        // unreachable. serde_json::Value is exhaustive
+                        // (not #[non_exhaustive]), so no wildcard needed.
+                        serde_json::Value::Object(_) => "object",
+                    }
+                ))),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_globals_nil_returns_none() {
+        let lua = mlua::Lua::new();
+        let result =
+            parse_globals_from_lua(&lua, mlua::Value::Nil).expect("Nil should return Ok(None)");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_globals_valid_table_returns_map() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set("name", "agent-1").expect("set name");
+        table.set("level", 42).expect("set level");
+
+        let result = parse_globals_from_lua(&lua, mlua::Value::Table(table))
+            .expect("valid table should succeed");
+        let map = result.expect("should be Some");
+        assert_eq!(map.get("name").and_then(|v| v.as_str()), Some("agent-1"));
+        assert_eq!(map.get("level").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    #[test]
+    fn parse_globals_nested_table_returns_nested_map() {
+        let lua = mlua::Lua::new();
+        let inner = lua.create_table().expect("create inner");
+        inner.set("model", "gpt-4").expect("set model");
+
+        let outer = lua.create_table().expect("create outer");
+        outer.set("config", inner).expect("set config");
+
+        let result = parse_globals_from_lua(&lua, mlua::Value::Table(outer))
+            .expect("nested table should succeed");
+        let map = result.expect("should be Some");
+        let config = map.get("config").expect("config key should exist");
+        assert_eq!(config.get("model").and_then(|v| v.as_str()), Some("gpt-4"));
+    }
+
+    #[test]
+    fn parse_globals_string_returns_error() {
+        let lua = mlua::Lua::new();
+        let val = mlua::Value::String(lua.create_string("not a table").expect("create string"));
+
+        let err = parse_globals_from_lua(&lua, val).expect_err("string should fail");
+        assert!(
+            err.to_string().contains("must be a table (JSON object)"),
+            "error message should mention type constraint, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("got string"),
+            "error message should include actual type, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_globals_array_table_returns_error() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().expect("create table");
+        table.set(1, "a").expect("set index 1");
+        table.set(2, "b").expect("set index 2");
+        table.set(3, "c").expect("set index 3");
+
+        let err = parse_globals_from_lua(&lua, mlua::Value::Table(table))
+            .expect_err("array table should fail");
+        assert!(
+            err.to_string().contains("got array"),
+            "error message should say 'got array', got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_globals_table_with_function_returns_error() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().expect("create table");
+        let func = lua
+            .create_function(|_, ()| Ok(()))
+            .expect("create function");
+        table.set("callback", func).expect("set function value");
+
+        let err = parse_globals_from_lua(&lua, mlua::Value::Table(table))
+            .expect_err("table with function should fail");
+        assert!(
+            err.to_string().contains("must be a serializable table"),
+            "error message should mention serialization, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_globals_number_returns_error() {
+        let lua = mlua::Lua::new();
+        let val = mlua::Value::Number(42.0);
+
+        let err = parse_globals_from_lua(&lua, val).expect_err("number should fail");
+        assert!(
+            err.to_string().contains("got number"),
+            "error message should say 'got number', got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_globals_boolean_returns_error() {
+        let lua = mlua::Lua::new();
+        let val = mlua::Value::Boolean(true);
+
+        let err = parse_globals_from_lua(&lua, val).expect_err("boolean should fail");
+        assert!(
+            err.to_string().contains("got boolean"),
+            "error message should say 'got boolean', got: {err}"
+        );
+    }
 }

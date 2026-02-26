@@ -605,7 +605,7 @@ mod tests {
         let lua = Lua::new();
         let table = lua.create_table().expect("create table");
         table.set("error", "llm call failed").expect("set error");
-        table.set("source", "llm-worker").expect("set source");
+        table.set("source", "common-agent").expect("set source");
         let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
         assert!(
             !resp.success,
@@ -620,7 +620,7 @@ mod tests {
         let lua = Lua::new();
         let table = lua.create_table().expect("create table");
         table.set("response", "hello").expect("set response");
-        table.set("source", "llm-worker").expect("set source");
+        table.set("source", "common-agent").expect("set source");
         let resp = LuaResponse::from_lua(Value::Table(table), &lua).expect("parse response");
         assert!(resp.success, "should infer success when no error field");
     }

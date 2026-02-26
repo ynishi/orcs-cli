@@ -76,12 +76,13 @@ fn profile_manager_initializes() {
 fn agent_mgr_ready_with_workers() {
     let tmp = tempfile::tempdir().expect("create temp dir for sandbox");
     let (stdout, _stderr) = spawn_and_wait_for(
-        "[AgentMgr] Ready (backend: builtin::concierge, delegate: ok)",
+        "[AgentMgr] Ready (backend: builtin::concierge, delegate: ok, agents: none)",
         &["-d"],
         tmp.path(),
     );
     assert!(
-        stdout.contains("[AgentMgr] Ready (backend: builtin::concierge, delegate: ok)"),
+        stdout
+            .contains("[AgentMgr] Ready (backend: builtin::concierge, delegate: ok, agents: none)"),
         "Expected Ready message with delegate status in stdout.\nstdout:\n{stdout}"
     );
 }

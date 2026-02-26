@@ -75,3 +75,12 @@ rustyline = { git = "https://github.com/ynishi/rustyline.git", rev = "5e11edf" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Restriction lints (allow-by-default) — cherry-picked per project policy.
+# These catch patterns that hide bugs or violate "parse, don't validate".
+#
+# unwrap_used / expect_used は orcs-lint OL002 が AST レベルで
+# テスト/プロダクション区別付きで検知済みのため、Clippy側では有効化しない。
+unreachable = "warn"
+panic = "warn"
