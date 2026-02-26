@@ -835,6 +835,97 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
     let tool_desc_fn = lua.create_function(|lua, ()| Ok(generate_descriptions(lua)))?;
     orcs_table.set("tool_descriptions", tool_desc_fn)?;
 
+    // ── MCP convenience APIs ────────────────────────────────────────
+
+    // orcs.mcp_servers() -> { ok, servers: [{name}] }
+    let mcp_servers_fn = lua.create_function(|lua, ()| {
+        let result = lua.create_table()?;
+
+        let manager = match lua.app_data_ref::<SharedMcpManager>() {
+            Some(m) => Arc::clone(&m.0),
+            None => {
+                result.set("ok", true)?;
+                result.set("servers", lua.create_table()?)?;
+                return Ok(result);
+            }
+        };
+
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            mlua::Error::RuntimeError("no tokio runtime available for mcp_servers".into())
+        })?;
+
+        let names = tokio::task::block_in_place(|| handle.block_on(manager.connected_servers()));
+
+        let servers = lua.create_table()?;
+        for (i, name) in names.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("name", name.as_str())?;
+            servers.set(i + 1, entry)?;
+        }
+
+        result.set("ok", true)?;
+        result.set("servers", servers)?;
+        Ok(result)
+    })?;
+    orcs_table.set("mcp_servers", mcp_servers_fn)?;
+
+    // orcs.mcp_tools(server_name?) -> { ok, tools: [{name, description, server, parameters}] }
+    let mcp_tools_fn = lua.create_function(|lua, server_filter: Option<String>| {
+        let result = lua.create_table()?;
+
+        let registry = match lua.app_data_ref::<IntentRegistry>() {
+            Some(r) => r,
+            None => {
+                result.set("ok", true)?;
+                result.set("tools", lua.create_table()?)?;
+                return Ok(result);
+            }
+        };
+
+        let tools = lua.create_table()?;
+        let mut idx = 0usize;
+
+        for def in registry.all() {
+            if let IntentResolver::Mcp {
+                ref server_name,
+                ref tool_name,
+            } = def.resolver
+            {
+                // Apply optional server name filter
+                if let Some(ref filter) = server_filter {
+                    if server_name != filter {
+                        continue;
+                    }
+                }
+
+                idx += 1;
+                let entry = lua.create_table()?;
+                entry.set("name", def.name.as_str())?;
+                entry.set("description", def.description.as_str())?;
+                entry.set("server", server_name.as_str())?;
+                entry.set("tool", tool_name.as_str())?;
+
+                let params_value = serde_json_to_lua(&def.parameters, lua)?;
+                entry.set("parameters", params_value)?;
+
+                tools.set(idx, entry)?;
+            }
+        }
+
+        result.set("ok", true)?;
+        result.set("tools", tools)?;
+        Ok(result)
+    })?;
+    orcs_table.set("mcp_tools", mcp_tools_fn)?;
+
+    // orcs.mcp_call(server, tool, args) -> { ok, content?, error? }
+    let mcp_call_fn =
+        lua.create_function(|lua, (server, tool, args): (String, String, Table)| {
+            let namespaced = format!("mcp:{server}:{tool}");
+            dispatch_mcp(lua, &namespaced, &server, &tool, &args)
+        })?;
+    orcs_table.set("mcp_call", mcp_call_fn)?;
+
     Ok(())
 }
 
@@ -1914,6 +2005,142 @@ mod tests {
         assert!(
             err.contains("permission denied"),
             "error should mention permission denied, got: {err}"
+        );
+    }
+
+    // --- MCP Lua API tests ---
+
+    #[test]
+    fn mcp_servers_returns_ok_without_manager() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load("return orcs.mcp_servers()")
+            .eval()
+            .expect("mcp_servers should return table");
+
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "mcp_servers without manager should return ok=true"
+        );
+        let servers: Table = result.get("servers").expect("should have servers");
+        assert_eq!(
+            servers.len().expect("servers length"),
+            0,
+            "servers list should be empty when no manager is set"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_returns_empty_without_mcp_intents() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load("return orcs.mcp_tools()")
+            .eval()
+            .expect("mcp_tools should return table");
+
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "mcp_tools should return ok=true"
+        );
+        let tools: Table = result.get("tools").expect("should have tools");
+        assert_eq!(
+            tools.len().expect("tools length"),
+            0,
+            "tools list should be empty when no MCP intents registered"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_filters_by_server() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Manually register MCP intents to test filtering
+        {
+            let mut registry = lua
+                .remove_app_data::<IntentRegistry>()
+                .expect("registry should exist");
+            let def_a = IntentDef {
+                name: "mcp:srv_a:tool1".into(),
+                description: "[MCP:srv_a] tool1 desc".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                resolver: IntentResolver::Mcp {
+                    server_name: "srv_a".into(),
+                    tool_name: "tool1".into(),
+                },
+            };
+            let def_b = IntentDef {
+                name: "mcp:srv_b:tool2".into(),
+                description: "[MCP:srv_b] tool2 desc".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                resolver: IntentResolver::Mcp {
+                    server_name: "srv_b".into(),
+                    tool_name: "tool2".into(),
+                },
+            };
+            registry.register(def_a).expect("register def_a");
+            registry.register(def_b).expect("register def_b");
+            lua.set_app_data(registry);
+        }
+
+        // Without filter: both tools
+        let all: Table = lua
+            .load("return orcs.mcp_tools()")
+            .eval()
+            .expect("mcp_tools() should succeed");
+        assert!(all.get::<bool>("ok").expect("should have ok"));
+        let all_tools: Table = all.get("tools").expect("should have tools");
+        assert_eq!(
+            all_tools.len().expect("all tools length"),
+            2,
+            "should list both MCP tools"
+        );
+
+        // With filter: only srv_a
+        let filtered: Table = lua
+            .load(r#"return orcs.mcp_tools("srv_a")"#)
+            .eval()
+            .expect("mcp_tools('srv_a') should succeed");
+        assert!(filtered.get::<bool>("ok").expect("should have ok"));
+        let filtered_tools: Table = filtered.get("tools").expect("should have tools");
+        assert_eq!(
+            filtered_tools.len().expect("filtered tools length"),
+            1,
+            "should list only srv_a tools"
+        );
+        let first: Table = filtered_tools.get(1).expect("first tool entry");
+        assert_eq!(
+            first.get::<String>("server").expect("should have server"),
+            "srv_a"
+        );
+        assert_eq!(
+            first.get::<String>("tool").expect("should have tool"),
+            "tool1"
+        );
+    }
+
+    #[test]
+    fn mcp_call_without_manager_returns_error() {
+        let (_, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load(r#"return orcs.mcp_call("srv", "tool", {})"#)
+            .eval()
+            .expect("mcp_call should return error table");
+
+        assert!(
+            !result.get::<bool>("ok").expect("should have ok"),
+            "mcp_call without manager should return ok=false"
+        );
+        let err: String = result.get("error").expect("should have error");
+        assert!(
+            err.contains("MCP client not initialized"),
+            "error should mention not initialized, got: {err}"
         );
     }
 }
