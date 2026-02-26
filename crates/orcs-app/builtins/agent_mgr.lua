@@ -961,12 +961,13 @@ local routes = {
 
 --- Parse @prefix from message. Returns (prefix, rest) or (nil, original).
 local function parse_route(message)
-    local prefix, rest = message:match("^@(%w+)%s+(.+)$")
+    -- [%w_%-] matches alphanumeric, underscore, and hyphen (e.g. "rust-reviewer")
+    local prefix, rest = message:match("^@([%w_%-]+)%s+(.+)$")
     if prefix then
         return prefix:lower(), rest
     end
     -- Also match bare @prefix without args
-    local bare = message:match("^@(%w+)%s*$")
+    local bare = message:match("^@([%w_%-]+)%s*$")
     if bare then
         return bare:lower(), ""
     end
