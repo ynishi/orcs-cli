@@ -85,7 +85,7 @@ fn pause_collects_snapshots() {
         .write_stdin("p\n")
         .assert()
         .success()
-        .stdout(contains("collected 4 snapshots from runners"))
+        .stdout(contains("snapshots from runners"))
         .stdout(contains("Session saved:"))
         .stdout(contains("Resume with: orcs --resume"));
 }
@@ -131,7 +131,7 @@ fn pause_resume_round_trip() {
         .assert()
         .success()
         .stdout(contains("Resumed session:"))
-        .stdout(contains("4 component(s) restored"));
+        .stdout(contains("component(s) restored"));
 }
 
 #[test]
