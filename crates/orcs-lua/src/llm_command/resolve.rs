@@ -248,11 +248,22 @@ pub(crate) fn dispatch_intents_to_results(
                 }
             }
             Err(e) => {
-                // Propagate Suspended so ChannelRunner can drive HIL approval.
-                if crate::is_suspended_error(&e) {
-                    return Err(e);
+                // Intent-level permission denial: convert to tool_result error
+                // so the LLM can adapt (e.g., delegate to an agent with the
+                // required permissions) instead of aborting the resolve loop.
+                if let Some((grant_pattern, description)) = crate::extract_suspended_info(&e) {
+                    (
+                        format!(
+                            "Permission denied: {description}. \
+                             You do not have '{grant_pattern}' permission. \
+                             Consider delegating this task to an agent that has \
+                             the required permissions."
+                        ),
+                        true,
+                    )
+                } else {
+                    (format!("dispatch error: {e}"), true)
                 }
-                (format!("dispatch error: {e}"), true)
             }
         };
 
