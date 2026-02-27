@@ -271,6 +271,7 @@ return {
             local opts = build_llm_opts(input)
             opts.session_id = input.session_id
             opts.resolve = true
+            opts.hil_intents = true  -- Propagate Suspended for HIL approval
             local llm_resp = orcs.llm(message, opts)
             if llm_resp and llm_resp.ok then
                 emit_success(message, llm_resp)
@@ -564,6 +565,7 @@ return {
         -- Enable tool-use auto-resolution: LLM tool_use calls (skills, builtins)
         -- are dispatched via IntentRegistry and results fed back automatically.
         llm_opts.resolve = true
+        llm_opts.hil_intents = true  -- Propagate Suspended for HIL approval
         -- Apply _agent_config.llm overrides (agent-specific LLM settings).
         -- Unconditional overwrite: keys in _agent_config.llm are explicitly
         -- specified by the user (config.toml agents.<name>.llm_*), so they

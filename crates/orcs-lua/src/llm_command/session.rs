@@ -124,6 +124,31 @@ pub(super) fn append_message(lua: &Lua, session_id: &str, role: Role, content: M
     }
 }
 
+/// Returns the current message count for a session.
+///
+/// Used to record a checkpoint before the resolve loop so that
+/// [`truncate_session`] can roll back on `Suspended` + `hil_intents`.
+pub(super) fn session_message_count(lua: &Lua, session_id: &str) -> usize {
+    lua.app_data_ref::<SessionStore>()
+        .map(|store| store.0.get(session_id).map_or(0, |h| h.len()))
+        .unwrap_or(0)
+}
+
+/// Truncate session history to the given length.
+///
+/// Called when `hil_intents = true` and a `ComponentError::Suspended`
+/// occurs during the resolve loop.  Removes all messages appended
+/// since the checkpoint so the conversation replays cleanly after
+/// ChannelRunner re-dispatches `on_request` following user approval.
+pub(super) fn truncate_session(lua: &Lua, session_id: &str, len: usize) {
+    if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
+        if let Some(history) = store.0.get_mut(session_id) {
+            history.truncate(len);
+        }
+        lua.set_app_data(store);
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -197,6 +222,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -226,6 +252,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -256,6 +283,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
 
         let msgs = build_messages(&lua, &sid, "second question", &opts);
@@ -337,5 +365,110 @@ mod tests {
             MessageContent::Blocks(b) => assert_eq!(b.len(), 2, "should have 2 content blocks"),
             _ => panic!("expected Blocks variant"),
         }
+    }
+
+    #[test]
+    fn session_message_count_returns_zero_for_missing() {
+        let lua = Lua::new();
+        ensure_session_store(&lua);
+        assert_eq!(
+            session_message_count(&lua, "nonexistent"),
+            0,
+            "missing session should have count 0"
+        );
+    }
+
+    #[test]
+    fn session_message_count_tracks_appends() {
+        let lua = Lua::new();
+        let sid = resolve_session_id(&lua, &None);
+
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            0,
+            "new session starts at 0"
+        );
+
+        append_message(&lua, &sid, Role::User, MessageContent::Text("hello".into()));
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            1,
+            "count should be 1 after one append"
+        );
+
+        append_message(
+            &lua,
+            &sid,
+            Role::Assistant,
+            MessageContent::Text("world".into()),
+        );
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            2,
+            "count should be 2 after two appends"
+        );
+    }
+
+    #[test]
+    fn truncate_session_rolls_back() {
+        let lua = Lua::new();
+        let sid = resolve_session_id(&lua, &None);
+
+        // Add 3 messages
+        for msg in &["first", "second", "third"] {
+            append_message(
+                &lua,
+                &sid,
+                Role::User,
+                MessageContent::Text((*msg).to_string()),
+            );
+        }
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            3,
+            "should have 3 messages"
+        );
+
+        // Truncate to 1
+        truncate_session(&lua, &sid, 1);
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            1,
+            "should have 1 message after truncate"
+        );
+
+        // Verify remaining message
+        let store = lua
+            .app_data_ref::<SessionStore>()
+            .expect("store should exist");
+        let history = store.0.get(&sid).expect("session should exist");
+        assert_eq!(
+            history[0].content.text().expect("should have text"),
+            "first",
+            "first message should be preserved"
+        );
+    }
+
+    #[test]
+    fn truncate_session_noop_on_missing() {
+        let lua = Lua::new();
+        ensure_session_store(&lua);
+
+        // Should not panic on missing session
+        truncate_session(&lua, "nonexistent", 0);
+    }
+
+    #[test]
+    fn truncate_session_to_zero() {
+        let lua = Lua::new();
+        let sid = resolve_session_id(&lua, &None);
+
+        append_message(&lua, &sid, Role::User, MessageContent::Text("msg".into()));
+        truncate_session(&lua, &sid, 0);
+        assert_eq!(
+            session_message_count(&lua, &sid),
+            0,
+            "should be empty after truncate to 0"
+        );
     }
 }

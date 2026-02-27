@@ -123,7 +123,7 @@ fn resolve_loop_impl(lua: &Lua, backend_fn: &Function, opts: &Table) -> mlua::Re
             );
         }
 
-        tool_results_content = Some(dispatch_intents_to_results(lua, &intents)?);
+        tool_results_content = Some(dispatch_intents_to_results(lua, &intents, false)?);
         log_dispatch(turn_number, &intents);
         turn_number += 1;
     }

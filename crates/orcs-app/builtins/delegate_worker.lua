@@ -88,6 +88,7 @@ local function handle_process(payload)
             if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
             if llm_config.timeout     then opts.timeout     = llm_config.timeout end
             opts.resolve = true  -- Enable tool-use for the delegate
+            opts.hil_intents = true  -- Propagate Suspended for HIL approval
 
             local resp = orcs.llm(prompt, opts)
             if resp and resp.ok then
@@ -129,13 +130,22 @@ local function handle_process(payload)
     busy = false
 
     if not ok then
-        orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. tostring(pcall_err), "error")
+        -- If Suspended for HIL approval, re-throw after cleanup.
+        -- pcall was only needed to guarantee busy=false; the ChannelRunner
+        -- needs the original ComponentError::Suspended (preserved as mlua
+        -- WrappedFailure userdata) to trigger the HIL approval flow.
+        local err_str = tostring(pcall_err)
+        if err_str:find("suspended pending approval:") then
+            error(pcall_err)
+        end
+
+        orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. err_str, "error")
         orcs.emit_event("DelegateResult", "completed", {
             request_id = request_id,
-            error = tostring(pcall_err),
+            error = err_str,
             success = false,
         })
-        orcs.log("error", "delegate-worker: task " .. request_id .. " threw: " .. tostring(pcall_err))
+        orcs.log("error", "delegate-worker: task " .. request_id .. " threw: " .. err_str)
     end
 
     return { success = true }

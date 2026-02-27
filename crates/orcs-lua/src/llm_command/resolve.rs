@@ -190,9 +190,19 @@ pub(super) fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> Mess
 /// Each intent is dispatched through the Lua `orcs.dispatch(name, params)` function.
 /// The result (or error) is wrapped into a `ContentBlock::ToolResult` for the next
 /// LLM turn.
+///
+/// When `hil_intents` is `true` and a dispatch fails with
+/// `ComponentError::Suspended`, the error is propagated immediately so the
+/// ChannelRunner can trigger the HIL approval flow.  The caller is
+/// responsible for rolling back the session before re-throwing.
+///
+/// When `hil_intents` is `false` (default), `Suspended` is caught and
+/// converted to an `is_error = true` tool_result so the LLM can adapt
+/// (e.g., delegate to an agent with the required permissions).
 pub(crate) fn dispatch_intents_to_results(
     lua: &Lua,
     intents: &[ActionIntent],
+    hil_intents: bool,
 ) -> mlua::Result<MessageContent> {
     let orcs: Table = lua.globals().get("orcs")?;
     let dispatch_fn: mlua::Function = orcs.get("dispatch")?;
@@ -248,10 +258,21 @@ pub(crate) fn dispatch_intents_to_results(
                 }
             }
             Err(e) => {
-                // Intent-level permission denial: convert to tool_result error
-                // so the LLM can adapt (e.g., delegate to an agent with the
-                // required permissions) instead of aborting the resolve loop.
                 if let Some((grant_pattern, description)) = crate::extract_suspended_info(&e) {
+                    if hil_intents {
+                        // HIL mode: propagate Suspended so the ChannelRunner
+                        // can trigger the approval flow.  The caller rolls
+                        // back the session before re-throwing.
+                        tracing::info!(
+                            grant_pattern = %grant_pattern,
+                            description = %description,
+                            "hil_intents: propagating Suspended for HIL approval"
+                        );
+                        return Err(e);
+                    }
+                    // Non-HIL: convert to tool_result error so the LLM can
+                    // adapt (e.g., delegate to an agent with the required
+                    // permissions) instead of aborting the resolve loop.
                     (
                         format!(
                             "Permission denied: {description}. \
@@ -598,6 +619,7 @@ mod tests {
             tools: false,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");
@@ -658,6 +680,7 @@ mod tests {
             tools: false,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");
@@ -698,7 +721,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {
@@ -829,7 +853,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "tool_call_1");
@@ -874,7 +899,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "tool_err_1");
@@ -950,7 +976,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "call_review");
@@ -1035,7 +1062,8 @@ mod tests {
             },
         ];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {
@@ -1114,7 +1142,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "call_unknown");
@@ -1140,7 +1169,8 @@ mod tests {
             .expect("register dispatch functions");
 
         let intents: Vec<ActionIntent> = vec![];
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {
