@@ -1128,6 +1128,24 @@ return {
                     payload.success and "completed" or "failed",
                     #delegation_results
                 ))
+
+                -- Notify user that the delegated task finished.
+                if payload.success then
+                    orcs.output("[AgentMgr] Delegate " .. request_id .. " completed.")
+                else
+                    orcs.output_with_level(
+                        "[AgentMgr] Delegate " .. request_id .. " failed: "
+                            .. (payload.error or "unknown"),
+                        "error"
+                    )
+                end
+
+                -- Auto-dispatch to concierge so it can report the delegation result.
+                -- dispatch_llm() calls fetch_delegation_context() which picks up
+                -- the just-stored result, then emits AgentTask (fire-and-forget).
+                local status = payload.success and "completed" or "failed"
+                dispatch_llm("[Delegate " .. request_id .. " " .. status
+                    .. "] Review the delegation result and briefly report to the user.")
             end
             return { success = true }
         end

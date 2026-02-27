@@ -103,7 +103,8 @@ local function handle_process(payload)
         last_cost = cost
 
         if not err then
-            orcs.output("[Delegate:" .. request_id .. "] " .. (summary or ""))
+            local display = (summary and summary ~= "") and summary or "(completed)"
+            orcs.output("[Delegate:" .. request_id .. "] " .. display)
             orcs.emit_event("DelegateResult", "completed", {
                 request_id = request_id,
                 summary = summary or "",
