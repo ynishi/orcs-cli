@@ -492,6 +492,7 @@ impl Default for ComponentsConfig {
             load: vec![
                 "agent_mgr".into(),
                 "skill_manager".into(),
+                "mcp_manager".into(),
                 "profile_manager".into(),
                 "foundation_manager".into(),
                 "console_metrics".into(),
