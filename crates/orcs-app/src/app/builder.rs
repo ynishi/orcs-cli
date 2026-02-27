@@ -182,6 +182,21 @@ impl OrcsAppBuilder {
             }
         }
 
+        // Connect to configured MCP servers (before component spawning so
+        // IntentDefs are available when components initialize).
+        if !config.mcp.is_empty() {
+            let manager = std::sync::Arc::new(orcs_mcp::McpClientManager::new(config.mcp.clone()));
+            let defs = manager.connect_all().await;
+            if !defs.is_empty() {
+                tracing::info!(
+                    tool_count = defs.len(),
+                    "MCP servers connected, {} tool(s) discovered",
+                    defs.len()
+                );
+            }
+            engine.set_mcp_manager(manager);
+        }
+
         // Auth context: principal + non-elevated session + checker.
         // Created before user script loading so user scripts get proper HIL.
         let principal = Principal::User(PrincipalId::new());

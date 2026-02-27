@@ -181,6 +181,10 @@ fn dispatch_tool(lua: &Lua, name: &str, args: &Table) -> mlua::Result<Table> {
             operation,
             timeout_ms,
         } => dispatch_component(lua, name, &component_fqn, &operation, args, timeout_ms),
+        IntentResolver::Mcp {
+            server_name,
+            tool_name,
+        } => dispatch_mcp(lua, name, &server_name, &tool_name, args),
     };
     let duration_ms = start.elapsed().as_millis() as u64;
     let ok = result
@@ -484,6 +488,95 @@ fn dispatch_component(
     Ok(result)
 }
 
+/// Wrapper for `Arc<McpClientManager>` stored in Lua `app_data`.
+///
+/// Each Lua VM holds a clone of the shared manager. Set during
+/// [`install_child_context`](crate::component) via the ChildContext
+/// extension mechanism.
+pub(crate) struct SharedMcpManager(pub Arc<orcs_mcp::McpClientManager>);
+
+/// Deferred MCP IntentDefs, stored when IntentRegistry doesn't exist yet.
+///
+/// Consumed by [`ensure_registry`] on first registry access.
+///
+/// # Invariant
+///
+/// `ensure_registry` is called by every dispatch and query path
+/// (`dispatch_tool`, `generate_descriptions`, `register_dispatch_functions`),
+/// so pending defs are guaranteed to be drained before any tool operation.
+/// If a new code path accesses `IntentRegistry` directly without calling
+/// `ensure_registry`, these defs would be silently dropped.
+pub(crate) struct PendingMcpDefs(pub Vec<orcs_types::intent::IntentDef>);
+
+/// Dispatches an MCP tool invocation.
+///
+/// Bridges async `McpClientManager::call_tool` into the sync Lua call
+/// context via `tokio::task::block_in_place`. Converts `CallToolResult`
+/// content to a Lua table matching the dispatch contract:
+/// `{ ok: bool, content?: string, error?: string }`.
+///
+/// # Runtime requirement
+///
+/// Requires a **multi-thread** tokio runtime (`block_in_place` panics on
+/// `current_thread`). The caller must not hold any `RwLock` on
+/// `McpClientManager` — `call_tool` acquires `tool_routes` and `servers`
+/// read locks internally.
+fn dispatch_mcp(
+    lua: &Lua,
+    intent_name: &str,
+    server_name: &str,
+    tool_name: &str,
+    args: &Table,
+) -> mlua::Result<Table> {
+    // Retrieve McpClientManager from app_data
+    let manager = match lua.app_data_ref::<SharedMcpManager>() {
+        Some(m) => Arc::clone(&m.0),
+        None => {
+            let result = lua.create_table()?;
+            set_error(
+                &result,
+                &format!("MCP client not initialized: {intent_name} (server={server_name})"),
+            )?;
+            return Ok(result);
+        }
+    };
+
+    // Convert Lua args → JSON for MCP call
+    let json_args = crate::types::lua_to_json(mlua::Value::Table(args.clone()), lua)?;
+
+    // Bridge async → sync via tokio runtime handle
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| mlua::Error::RuntimeError("no tokio runtime available for MCP call".into()))?;
+
+    let namespaced = format!("mcp:{server_name}:{tool_name}");
+    let call_result =
+        tokio::task::block_in_place(|| handle.block_on(manager.call_tool(&namespaced, json_args)));
+
+    // Convert CallToolResult → Lua table
+    let result = lua.create_table()?;
+    match call_result {
+        Ok(tool_result) => {
+            let is_error = tool_result.is_error.unwrap_or(false);
+            result.set("ok", !is_error)?;
+
+            // Extract text from Content items
+            let text = orcs_mcp::content_to_text(&tool_result.content);
+            if !text.is_empty() {
+                if is_error {
+                    result.set("error", text)?;
+                } else {
+                    result.set("content", text)?;
+                }
+            }
+        }
+        Err(e) => {
+            set_error(&result, &format!("MCP call failed: {e}"))?;
+        }
+    }
+
+    Ok(result)
+}
+
 // ── Registry Helpers ─────────────────────────────────────────────────
 
 /// Ensure IntentRegistry exists in app_data. Returns a reference.
@@ -491,6 +584,18 @@ pub(crate) fn ensure_registry(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, In
     if lua.app_data_ref::<IntentRegistry>().is_none() {
         lua.set_app_data(IntentRegistry::new());
     }
+
+    // Register any deferred MCP IntentDefs
+    if let Some(pending) = lua.remove_app_data::<PendingMcpDefs>() {
+        if let Some(mut registry) = lua.app_data_mut::<IntentRegistry>() {
+            for def in pending.0 {
+                if let Err(e) = registry.register(def) {
+                    tracing::warn!(error = %e, "Failed to register deferred MCP intent");
+                }
+            }
+        }
+    }
+
     lua.app_data_ref::<IntentRegistry>().ok_or_else(|| {
         mlua::Error::RuntimeError("IntentRegistry not available after initialization".into())
     })
@@ -745,6 +850,97 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
     let tool_desc_fn = lua.create_function(|lua, ()| Ok(generate_descriptions(lua)))?;
     orcs_table.set("tool_descriptions", tool_desc_fn)?;
 
+    // ── MCP convenience APIs ────────────────────────────────────────
+
+    // orcs.mcp_servers() -> { ok, servers: [{name}] }
+    let mcp_servers_fn = lua.create_function(|lua, ()| {
+        let result = lua.create_table()?;
+
+        let manager = match lua.app_data_ref::<SharedMcpManager>() {
+            Some(m) => Arc::clone(&m.0),
+            None => {
+                result.set("ok", true)?;
+                result.set("servers", lua.create_table()?)?;
+                return Ok(result);
+            }
+        };
+
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            mlua::Error::RuntimeError("no tokio runtime available for mcp_servers".into())
+        })?;
+
+        let names = tokio::task::block_in_place(|| handle.block_on(manager.connected_servers()));
+
+        let servers = lua.create_table()?;
+        for (i, name) in names.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("name", name.as_str())?;
+            servers.set(i + 1, entry)?;
+        }
+
+        result.set("ok", true)?;
+        result.set("servers", servers)?;
+        Ok(result)
+    })?;
+    orcs_table.set("mcp_servers", mcp_servers_fn)?;
+
+    // orcs.mcp_tools(server_name?) -> { ok, tools: [{name, description, server, parameters}] }
+    let mcp_tools_fn = lua.create_function(|lua, server_filter: Option<String>| {
+        let result = lua.create_table()?;
+
+        let registry = match lua.app_data_ref::<IntentRegistry>() {
+            Some(r) => r,
+            None => {
+                result.set("ok", true)?;
+                result.set("tools", lua.create_table()?)?;
+                return Ok(result);
+            }
+        };
+
+        let tools = lua.create_table()?;
+        let mut idx = 0usize;
+
+        for def in registry.all() {
+            if let IntentResolver::Mcp {
+                ref server_name,
+                ref tool_name,
+            } = def.resolver
+            {
+                // Apply optional server name filter
+                if let Some(ref filter) = server_filter {
+                    if server_name != filter {
+                        continue;
+                    }
+                }
+
+                idx += 1;
+                let entry = lua.create_table()?;
+                entry.set("name", def.name.as_str())?;
+                entry.set("description", def.description.as_str())?;
+                entry.set("server", server_name.as_str())?;
+                entry.set("tool", tool_name.as_str())?;
+
+                let params_value = serde_json_to_lua(&def.parameters, lua)?;
+                entry.set("parameters", params_value)?;
+
+                tools.set(idx, entry)?;
+            }
+        }
+
+        result.set("ok", true)?;
+        result.set("tools", tools)?;
+        Ok(result)
+    })?;
+    orcs_table.set("mcp_tools", mcp_tools_fn)?;
+
+    // orcs.mcp_call(server, tool, args) -> { ok, content?, error? }
+    let mcp_call_fn =
+        lua.create_function(|lua, (server, tool, args): (String, String, Table)| {
+            let namespaced = format!("mcp:{server}:{tool}");
+            dispatch_mcp(lua, &namespaced, &server, &tool, &args)
+        })?;
+    orcs_table.set("mcp_call", mcp_call_fn)?;
+
     Ok(())
 }
 
@@ -754,26 +950,17 @@ mod tests {
     use crate::orcs_helpers::register_base_orcs_functions;
     use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
-    fn test_sandbox() -> (PathBuf, Arc<dyn SandboxPolicy>) {
-        let dir = tempdir();
+    fn test_sandbox() -> (TempDir, std::path::PathBuf, Arc<dyn SandboxPolicy>) {
+        let td = TempDir::new().expect("should create temp dir");
+        let dir = td
+            .path()
+            .canonicalize()
+            .expect("should canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
-        (dir, Arc::new(sandbox))
-    }
-
-    fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-registry-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("should create temp dir");
-        dir.canonicalize().expect("should canonicalize temp dir")
+        (td, dir, Arc::new(sandbox))
     }
 
     fn setup_lua(sandbox: Arc<dyn SandboxPolicy>) -> Lua {
@@ -872,7 +1059,7 @@ mod tests {
 
     #[test]
     fn dispatch_read() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("test.txt"), "hello dispatch").expect("should write test file");
 
         let lua = setup_lua(sandbox);
@@ -895,7 +1082,7 @@ mod tests {
 
     #[test]
     fn dispatch_write_and_read() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let path = root.join("written.txt");
 
         let lua = setup_lua(sandbox);
@@ -922,7 +1109,7 @@ mod tests {
 
     #[test]
     fn dispatch_grep() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("search.txt"), "line one\nline two\nthird")
             .expect("should write search file");
 
@@ -941,7 +1128,7 @@ mod tests {
 
     #[test]
     fn dispatch_glob() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("a.rs"), "").expect("write a.rs");
         fs::write(root.join("b.rs"), "").expect("write b.rs");
         fs::write(root.join("c.txt"), "").expect("write c.txt");
@@ -961,7 +1148,7 @@ mod tests {
 
     #[test]
     fn dispatch_mkdir_remove() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let dir_path = root.join("sub/deep");
 
         let lua = setup_lua(sandbox);
@@ -985,7 +1172,7 @@ mod tests {
 
     #[test]
     fn dispatch_mv() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         let src = root.join("src.txt");
         let dst = root.join("dst.txt");
         fs::write(&src, "move me").expect("write src");
@@ -1007,7 +1194,7 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_tool() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1024,7 +1211,7 @@ mod tests {
 
     #[test]
     fn dispatch_missing_required_arg() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Missing required arg returns {ok: false, error: "..."} (not a Lua error).
@@ -1048,7 +1235,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_returns_all() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let schemas: Table = lua
@@ -1096,7 +1283,7 @@ mod tests {
 
     #[test]
     fn dispatch_exec_uses_registered_exec() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Default exec is deny-stub
@@ -1113,7 +1300,7 @@ mod tests {
 
     #[test]
     fn intent_defs_returns_all() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let defs: Table = lua
@@ -1145,7 +1332,7 @@ mod tests {
 
     #[test]
     fn register_intent_adds_to_registry() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1181,7 +1368,7 @@ mod tests {
 
     #[test]
     fn register_intent_duplicate_fails() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1211,7 +1398,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_no_request_fn_returns_error() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register a Component intent without providing orcs.request
@@ -1246,7 +1433,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_success_normalized() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register a Component intent
@@ -1307,7 +1494,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_failure_normalized() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register + mock failing request
@@ -1345,7 +1532,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_forwards_all_args() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         lua.load(
@@ -1381,7 +1568,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_name_errors() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1405,7 +1592,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_description_errors() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1432,7 +1619,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_component_errors() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1459,7 +1646,7 @@ mod tests {
 
     #[test]
     fn register_intent_defaults_operation_to_execute() {
-        let (_, sandbox) = test_sandbox();
+        let (_td, _, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register without specifying operation
@@ -1604,7 +1791,7 @@ mod tests {
 
     #[test]
     fn grep_dispatch_preserves_integer_line_number() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("nums.txt"), "alpha\nbeta\nalpha again\n")
             .expect("should write test file");
 
@@ -1700,7 +1887,7 @@ mod tests {
 
     #[test]
     fn dispatch_rust_tool_denies_without_capability() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("secret.txt"), "classified").expect("should write test file");
 
         let lua = setup_lua(sandbox);
@@ -1733,7 +1920,7 @@ mod tests {
 
     #[test]
     fn dispatch_rust_tool_allows_with_capability() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("allowed.txt"), "public data").expect("should write test file");
 
         let lua = setup_lua(sandbox);
@@ -1762,7 +1949,7 @@ mod tests {
 
     #[test]
     fn positional_write_denied_with_read_only_cap() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
 
         let lua = setup_lua(sandbox);
 
@@ -1797,7 +1984,7 @@ mod tests {
 
     #[test]
     fn positional_read_denied_without_capability() {
-        let (root, sandbox) = test_sandbox();
+        let (_td, root, sandbox) = test_sandbox();
         fs::write(root.join("pos_secret.txt"), "restricted").expect("should write test file");
 
         let lua = setup_lua(sandbox);
@@ -1824,6 +2011,142 @@ mod tests {
         assert!(
             err.contains("permission denied"),
             "error should mention permission denied, got: {err}"
+        );
+    }
+
+    // --- MCP Lua API tests ---
+
+    #[test]
+    fn mcp_servers_returns_ok_without_manager() {
+        let (_td, _, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load("return orcs.mcp_servers()")
+            .eval()
+            .expect("mcp_servers should return table");
+
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "mcp_servers without manager should return ok=true"
+        );
+        let servers: Table = result.get("servers").expect("should have servers");
+        assert_eq!(
+            servers.len().expect("servers length"),
+            0,
+            "servers list should be empty when no manager is set"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_returns_empty_without_mcp_intents() {
+        let (_td, _, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load("return orcs.mcp_tools()")
+            .eval()
+            .expect("mcp_tools should return table");
+
+        assert!(
+            result.get::<bool>("ok").expect("should have ok"),
+            "mcp_tools should return ok=true"
+        );
+        let tools: Table = result.get("tools").expect("should have tools");
+        assert_eq!(
+            tools.len().expect("tools length"),
+            0,
+            "tools list should be empty when no MCP intents registered"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_filters_by_server() {
+        let (_td, _, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        // Manually register MCP intents to test filtering
+        {
+            let mut registry = lua
+                .remove_app_data::<IntentRegistry>()
+                .expect("registry should exist");
+            let def_a = IntentDef {
+                name: "mcp:srv_a:tool1".into(),
+                description: "[MCP:srv_a] tool1 desc".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                resolver: IntentResolver::Mcp {
+                    server_name: "srv_a".into(),
+                    tool_name: "tool1".into(),
+                },
+            };
+            let def_b = IntentDef {
+                name: "mcp:srv_b:tool2".into(),
+                description: "[MCP:srv_b] tool2 desc".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                resolver: IntentResolver::Mcp {
+                    server_name: "srv_b".into(),
+                    tool_name: "tool2".into(),
+                },
+            };
+            registry.register(def_a).expect("register def_a");
+            registry.register(def_b).expect("register def_b");
+            lua.set_app_data(registry);
+        }
+
+        // Without filter: both tools
+        let all: Table = lua
+            .load("return orcs.mcp_tools()")
+            .eval()
+            .expect("mcp_tools() should succeed");
+        assert!(all.get::<bool>("ok").expect("should have ok"));
+        let all_tools: Table = all.get("tools").expect("should have tools");
+        assert_eq!(
+            all_tools.len().expect("all tools length"),
+            2,
+            "should list both MCP tools"
+        );
+
+        // With filter: only srv_a
+        let filtered: Table = lua
+            .load(r#"return orcs.mcp_tools("srv_a")"#)
+            .eval()
+            .expect("mcp_tools('srv_a') should succeed");
+        assert!(filtered.get::<bool>("ok").expect("should have ok"));
+        let filtered_tools: Table = filtered.get("tools").expect("should have tools");
+        assert_eq!(
+            filtered_tools.len().expect("filtered tools length"),
+            1,
+            "should list only srv_a tools"
+        );
+        let first: Table = filtered_tools.get(1).expect("first tool entry");
+        assert_eq!(
+            first.get::<String>("server").expect("should have server"),
+            "srv_a"
+        );
+        assert_eq!(
+            first.get::<String>("tool").expect("should have tool"),
+            "tool1"
+        );
+    }
+
+    #[test]
+    fn mcp_call_without_manager_returns_error() {
+        let (_td, _, sandbox) = test_sandbox();
+        let lua = setup_lua(sandbox);
+
+        let result: Table = lua
+            .load(r#"return orcs.mcp_call("srv", "tool", {})"#)
+            .eval()
+            .expect("mcp_call should return error table");
+
+        assert!(
+            !result.get::<bool>("ok").expect("should have ok"),
+            "mcp_call without manager should return ok=false"
+        );
+        let err: String = result.get("error").expect("should have error");
+        assert!(
+            err.contains("MCP client not initialized"),
+            "error should mention not initialized, got: {err}"
         );
     }
 }

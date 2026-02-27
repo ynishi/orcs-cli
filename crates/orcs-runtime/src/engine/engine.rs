@@ -133,6 +133,8 @@ pub struct OrcsEngine {
     board: SharedBoard,
     /// Shared hook registry (injected into all spawned runners).
     hook_registry: Option<SharedHookRegistry>,
+    /// Shared MCP client manager (injected into all spawned runners).
+    mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
 }
 
 impl OrcsEngine {
@@ -185,7 +187,16 @@ impl OrcsEngine {
             io_channel,
             board: board::shared_board(),
             hook_registry: None,
+            mcp_manager: None,
         }
+    }
+
+    /// Sets the shared MCP client manager for all spawned runners.
+    ///
+    /// Must be called before spawning runners to ensure they receive
+    /// the manager.
+    pub fn set_mcp_manager(&mut self, manager: Arc<orcs_mcp::McpClientManager>) {
+        self.mcp_manager = Some(manager);
     }
 
     /// Sets the shared hook registry for all spawned runners.
@@ -210,6 +221,17 @@ impl OrcsEngine {
     ) -> crate::channel::ChannelRunnerBuilder {
         match &self.hook_registry {
             Some(reg) => builder.with_hook_registry(Arc::clone(reg)),
+            None => builder,
+        }
+    }
+
+    /// Applies the MCP manager to a ChannelRunnerBuilder if configured.
+    fn apply_mcp_manager(
+        &self,
+        builder: crate::channel::ChannelRunnerBuilder,
+    ) -> crate::channel::ChannelRunnerBuilder {
+        match &self.mcp_manager {
+            Some(mgr) => builder.with_mcp_manager(Arc::clone(mgr)),
             None => builder,
         }
     }
@@ -256,7 +278,9 @@ impl OrcsEngine {
             component,
         )
         .with_request_channel();
-        let (runner, handle) = self.apply_hook_registry(builder).build();
+        let (runner, handle) = self
+            .apply_mcp_manager(self.apply_hook_registry(builder))
+            .build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!("Spawned runner for channel {}", channel_id);
@@ -318,7 +342,9 @@ impl OrcsEngine {
             builder = builder.with_output_channel(tx);
         }
 
-        let (runner, handle) = self.apply_hook_registry(builder).build();
+        let (runner, handle) = self
+            .apply_mcp_manager(self.apply_hook_registry(builder))
+            .build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -389,7 +415,9 @@ impl OrcsEngine {
             builder = builder.with_component_loader(loader);
         }
 
-        let (runner, handle) = self.apply_hook_registry(builder).build();
+        let (runner, handle) = self
+            .apply_mcp_manager(self.apply_hook_registry(builder))
+            .build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -579,7 +607,9 @@ impl OrcsEngine {
         .with_session_arc(session)
         .with_checker(checker)
         .with_request_channel();
-        let (runner, handle) = self.apply_hook_registry(builder).build();
+        let (runner, handle) = self
+            .apply_mcp_manager(self.apply_hook_registry(builder))
+            .build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(
@@ -699,7 +729,9 @@ impl OrcsEngine {
             builder = builder.with_initial_snapshot(snapshot);
         }
 
-        let (runner, handle) = self.apply_hook_registry(builder).build();
+        let (runner, handle) = self
+            .apply_mcp_manager(self.apply_hook_registry(builder))
+            .build();
 
         let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
         info!(

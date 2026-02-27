@@ -136,6 +136,14 @@ mod tests {
     }
 
     #[test]
+    fn files_contains_mcp_manager_init() {
+        let has = FILES
+            .iter()
+            .any(|(path, _)| *path == "mcp_manager/init.lua");
+        assert!(has, "builtins should include mcp_manager/init.lua");
+    }
+
+    #[test]
     fn versioned_dir_includes_version() {
         let dir = versioned_dir(Path::new("/base"));
         let dir_str = dir.to_string_lossy();

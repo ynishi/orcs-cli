@@ -3,6 +3,7 @@
 //! All types implement [`Default`] for compile-time fallback values.
 
 use orcs_hook::HooksConfig;
+use orcs_mcp::McpConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,6 +51,9 @@ pub struct OrcsConfig {
 
     /// Hooks configuration.
     pub hooks: HooksConfig,
+
+    /// MCP (Model Context Protocol) server configuration.
+    pub mcp: McpConfig,
 }
 
 impl OrcsConfig {
@@ -139,6 +143,7 @@ impl OrcsConfig {
         self.scripts.merge(&other.scripts);
         self.components.merge(&other.components);
         self.hooks.merge(&other.hooks);
+        self.mcp.merge(&other.mcp);
     }
 }
 
@@ -487,6 +492,7 @@ impl Default for ComponentsConfig {
             load: vec![
                 "agent_mgr".into(),
                 "skill_manager".into(),
+                "mcp_manager".into(),
                 "profile_manager".into(),
                 "foundation_manager".into(),
                 "console_metrics".into(),

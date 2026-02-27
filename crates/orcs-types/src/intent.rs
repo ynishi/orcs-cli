@@ -221,6 +221,17 @@ pub enum IntentResolver {
         /// Defaults to `DEFAULT_TIMEOUT_MS` (30s) when `None`.
         timeout_ms: Option<u64>,
     },
+
+    /// MCP server tool dispatch.
+    ///
+    /// The tool is invoked via JSON-RPC `tools/call` on the named server.
+    /// `McpClientManager` handles the actual protocol communication.
+    Mcp {
+        /// MCP server name (key in `[mcp.servers]` config).
+        server_name: String,
+        /// Original tool name on the MCP server (before namespacing).
+        tool_name: String,
+    },
 }
 
 // ── IntentDef ────────────────────────────────────────────────────────

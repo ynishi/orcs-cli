@@ -18,6 +18,7 @@ mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async", "se
 orcs-component = { workspace = true }
 orcs-event = { workspace = true }
 orcs-hook = { workspace = true }
+orcs-mcp = { workspace = true }
 orcs-runtime = { workspace = true }
 orcs-types = { workspace = true }
 

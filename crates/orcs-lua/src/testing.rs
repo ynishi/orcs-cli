@@ -472,6 +472,127 @@ impl LuaTestHarness {
         captured
     }
 
+    /// Injects mock MCP functions (`orcs.mcp_servers`, `orcs.mcp_tools`, `orcs.mcp_call`).
+    ///
+    /// - `orcs.mcp_servers()` returns `{ok = true, servers = servers}`
+    /// - `orcs.mcp_tools(server?)` returns `{ok = true, tools = tools}`
+    /// - `orcs.mcp_call(server, tool, args)` captures call args and returns
+    ///   `{ok = true, content = [{type = "text", text = <response>}]}` from the queue
+    ///
+    /// # Arguments
+    ///
+    /// * `servers` - List of server name strings
+    /// * `tools` - List of `{server, tool, description}` objects
+    /// * `call_responses` - Queue of text responses for `mcp_call`
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to captured `mcp_call` arguments for assertion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Lua state is unavailable.
+    pub fn inject_mcp_mocks(
+        &self,
+        servers: Vec<String>,
+        tools: Vec<Value>,
+        call_responses: Vec<String>,
+    ) -> Arc<Mutex<Vec<Value>>> {
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let servers = Arc::new(servers);
+        let tools = Arc::new(tools);
+        let call_responses = Arc::new(Mutex::new(VecDeque::from(call_responses)));
+
+        self.component().with_lua(|lua| {
+            let orcs: mlua::Table = lua
+                .globals()
+                .get("orcs")
+                .expect("orcs global table missing");
+
+            // orcs.mcp_servers()
+            let servers_clone = Arc::clone(&servers);
+            let servers_fn = lua
+                .create_function(move |lua, ()| {
+                    let result = lua.create_table()?;
+                    result.set("ok", true)?;
+                    let list = lua.create_table()?;
+                    for (i, name) in servers_clone.iter().enumerate() {
+                        list.set(i + 1, name.as_str())?;
+                    }
+                    result.set("servers", list)?;
+                    Ok(result)
+                })
+                .expect("create mock mcp_servers function");
+            orcs.set("mcp_servers", servers_fn)
+                .expect("set mock orcs.mcp_servers");
+
+            // orcs.mcp_tools(server?)
+            let tools_clone = Arc::clone(&tools);
+            let tools_fn = lua
+                .create_function(move |lua, server_filter: Option<String>| {
+                    let result = lua.create_table()?;
+                    result.set("ok", true)?;
+                    let list = lua.create_table()?;
+                    let mut idx = 1;
+                    for tool_val in tools_clone.iter() {
+                        let matches = match &server_filter {
+                            Some(s) => tool_val.get("server").and_then(|v| v.as_str()) == Some(s),
+                            None => true,
+                        };
+                        if matches {
+                            let lua_val = lua.to_value(tool_val)?;
+                            list.set(idx, lua_val)?;
+                            idx += 1;
+                        }
+                    }
+                    result.set("tools", list)?;
+                    Ok(result)
+                })
+                .expect("create mock mcp_tools function");
+            orcs.set("mcp_tools", tools_fn)
+                .expect("set mock orcs.mcp_tools");
+
+            // orcs.mcp_call(server, tool, args)
+            let responses = Arc::clone(&call_responses);
+            let call_fn = lua
+                .create_function(
+                    move |lua, (server, tool, args): (String, String, mlua::Value)| {
+                        let json_args: Value = lua.from_value(args)?;
+                        captured_clone
+                            .lock()
+                            .expect("captured mutex")
+                            .push(serde_json::json!({
+                                "server": server,
+                                "tool": tool,
+                                "args": json_args,
+                            }));
+
+                        let result = lua.create_table()?;
+                        let mut resps = responses.lock().expect("responses mutex");
+                        if let Some(text) = resps.pop_front() {
+                            result.set("ok", true)?;
+                            let content = lua.create_table()?;
+                            let item = lua.create_table()?;
+                            item.set("type", "text")?;
+                            item.set("text", text)?;
+                            content.set(1, item)?;
+                            result.set("content", content)?;
+                        } else {
+                            result.set("ok", false)?;
+                            result.set("error", "mock: no more mcp_call responses")?;
+                        }
+                        Ok(result)
+                    },
+                )
+                .expect("create mock mcp_call function");
+            orcs.set("mcp_call", call_fn)
+                .expect("set mock orcs.mcp_call");
+        });
+
+        captured
+    }
+
     /// Injects no-op stubs for output-related `orcs.*` functions.
     ///
     /// Stubs the following functions that require EventEmitter (not available
