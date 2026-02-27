@@ -10,7 +10,9 @@
 //! [mcp.servers.custom]
 //! command = "/usr/local/bin/my-mcp-server"
 //! args = ["--stdio"]
-//! env = { API_KEY = "from-env" }
+//! env = { DEBUG = "1" }
+//! # Note: Do NOT put secrets (API keys, tokens) in env.
+//! # They are stored in plaintext. Use host environment variables instead.
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,18 @@ impl McpConfig {
 /// Configuration for a single MCP server.
 ///
 /// Follows the same schema as Claude Desktop's `mcpServers` entries.
+///
+/// # Security
+///
+/// **Do not hardcode secrets** (API keys, tokens) in the `env` field.
+/// Pass them via the host environment instead:
+///
+/// ```toml
+/// [mcp.servers.api]
+/// command = "my-mcp-server"
+/// # API_KEY is inherited from the host process environment.
+/// # Do NOT write: env = { API_KEY = "sk-xxxx" }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
     /// Command to execute (e.g., "npx", "/usr/local/bin/server").
@@ -55,6 +69,9 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
 
     /// Environment variables to set for the server process.
+    ///
+    /// **Warning**: Values are stored in plaintext. Do not put secrets here;
+    /// use the host environment or a secret manager instead.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }

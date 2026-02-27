@@ -27,6 +27,11 @@ pub use rmcp::model::CallToolResult;
 ///
 /// Concatenates all `Text` variant content. Non-text content
 /// (images, resources, audio) is represented as `[<type>]` placeholder.
+///
+/// # rmcp version dependency
+///
+/// Relies on `rmcp::model::Content: Deref<Target = RawContent>` (rmcp 0.16).
+/// If upgrading rmcp, verify this `Deref` impl is preserved.
 pub fn content_to_text(content: &[rmcp::model::Content]) -> String {
     use rmcp::model::RawContent;
     use std::ops::Deref;

@@ -231,7 +231,7 @@ local function handle_recommend(payload)
     -- Parse LLM response
     local content = llm_resp.content or ""
     local stripped = content:gsub("```json%s*", ""):gsub("```%s*", "")
-    local json_str = stripped:match("%[.*%]")
+    local json_str = stripped:match("%[.-%]")
     if not json_str then
         orcs.log("warn", "MCPManager recommend: could not parse LLM response, fallback")
         return { success = true, data = {}, count = 0, fallback = true }

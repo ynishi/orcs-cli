@@ -142,6 +142,11 @@ impl McpClientManager {
     ///
     /// Returns all discovered IntentDefs. Servers that fail to connect
     /// are logged as warnings but do not prevent other servers from connecting.
+    ///
+    /// Connections are made sequentially because `connect()` acquires
+    /// write locks on `servers` and `tool_routes`. If server count grows
+    /// significantly, consider refactoring to collect results in parallel
+    /// and batch-insert under a single write lock.
     pub async fn connect_all(&self) -> Vec<IntentDef> {
         let server_names: Vec<String> = self.config.servers.keys().cloned().collect();
         let mut all_defs = Vec::new();
@@ -159,6 +164,10 @@ impl McpClientManager {
     }
 
     /// Call an MCP tool by its namespaced name (`mcp:<server>:<tool>`).
+    ///
+    /// The `servers` read lock is released before the actual RPC call so that
+    /// `connect` / `disconnect` are not blocked during long-running tool
+    /// invocations.
     pub async fn call_tool(
         &self,
         namespaced_name: &str,
@@ -176,13 +185,19 @@ impl McpClientManager {
             (route.server_name.clone(), original)
         };
 
-        // Get service handle
-        let servers = self.servers.read().await;
-        let connected = servers
-            .get(&server_name)
-            .ok_or_else(|| McpError::NotConnected {
-                name: server_name.clone(),
-            })?;
+        // Clone the Peer handle and drop the read lock before the RPC call.
+        // Peer<R> is Clone (backed by mpsc::Sender), so this is cheap.
+        let peer = {
+            let servers = self.servers.read().await;
+            let connected = servers
+                .get(&server_name)
+                .ok_or_else(|| McpError::NotConnected {
+                    name: server_name.clone(),
+                })?;
+            use std::ops::Deref;
+            connected.service.deref().clone()
+        };
+        // `servers` lock is dropped here.
 
         let args_map = match arguments {
             serde_json::Value::Object(map) => Some(map),
@@ -190,8 +205,7 @@ impl McpClientManager {
             _ => Some(serde_json::Map::new()),
         };
 
-        let result = connected
-            .service
+        let result = peer
             .call_tool(CallToolRequestParams {
                 meta: None,
                 name: original_tool_name.into(),
@@ -321,14 +335,24 @@ fn mcp_tool_to_intent_def(
     }
 }
 
-/// Extract original tool name from namespaced name "mcp:<server>:<tool>".
+/// Extract original tool name from namespaced name `"mcp:<server>:<tool>"`.
+///
+/// Returns the `<tool>` portion. If the name does not match the expected
+/// format, logs a warning and returns the input as-is (defensive fallback).
 fn extract_original_tool_name(namespaced: &str) -> String {
-    // "mcp:server:tool_name" → "tool_name"
-    namespaced
+    match namespaced
         .strip_prefix("mcp:")
         .and_then(|rest| rest.find(':').map(|i| &rest[i + 1..]))
-        .unwrap_or(namespaced)
-        .to_string()
+    {
+        Some(tool) => tool.to_string(),
+        None => {
+            warn!(
+                name = namespaced,
+                "unexpected MCP tool name format, expected 'mcp:<server>:<tool>'"
+            );
+            namespaced.to_string()
+        }
+    }
 }
 
 #[cfg(test)]

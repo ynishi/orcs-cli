@@ -498,6 +498,14 @@ pub(crate) struct SharedMcpManager(pub Arc<orcs_mcp::McpClientManager>);
 /// Deferred MCP IntentDefs, stored when IntentRegistry doesn't exist yet.
 ///
 /// Consumed by [`ensure_registry`] on first registry access.
+///
+/// # Invariant
+///
+/// `ensure_registry` is called by every dispatch and query path
+/// (`dispatch_tool`, `generate_descriptions`, `register_dispatch_functions`),
+/// so pending defs are guaranteed to be drained before any tool operation.
+/// If a new code path accesses `IntentRegistry` directly without calling
+/// `ensure_registry`, these defs would be silently dropped.
 pub(crate) struct PendingMcpDefs(pub Vec<orcs_types::intent::IntentDef>);
 
 /// Dispatches an MCP tool invocation.
@@ -506,6 +514,13 @@ pub(crate) struct PendingMcpDefs(pub Vec<orcs_types::intent::IntentDef>);
 /// context via `tokio::task::block_in_place`. Converts `CallToolResult`
 /// content to a Lua table matching the dispatch contract:
 /// `{ ok: bool, content?: string, error?: string }`.
+///
+/// # Runtime requirement
+///
+/// Requires a **multi-thread** tokio runtime (`block_in_place` panics on
+/// `current_thread`). The caller must not hold any `RwLock` on
+/// `McpClientManager` — `call_tool` acquires `tool_routes` and `servers`
+/// read locks internally.
 fn dispatch_mcp(
     lua: &Lua,
     intent_name: &str,

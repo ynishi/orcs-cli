@@ -551,39 +551,21 @@ impl LuaComponent {
             tracing::warn!("Failed to register child context functions: {}", e);
         }
 
-        let Some(registry) = hook_registry else {
-            return;
-        };
-
-        if let Err(e) =
-            crate::hook_helpers::register_hook_function(&lua, registry.clone(), self.id.clone())
-        {
-            tracing::warn!("Failed to register orcs.hook(): {}", e);
-        } else {
-            tracing::debug!(component = %self.id.fqn(), "orcs.hook() registered");
-        }
-
-        if let Err(e) = crate::hook_helpers::register_unhook_function(&lua, registry.clone()) {
-            tracing::warn!("Failed to register orcs.unhook(): {}", e);
-        }
-
-        lua.set_app_data(crate::tools::ToolHookContext {
-            registry,
-            component_id: self.id.clone(),
-        });
-        if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
-            tracing::warn!("Failed to wrap tools with hooks: {}", e);
-        }
-
-        // Wire MCP client manager into Lua app_data and register MCP IntentDefs
+        // Wire MCP client manager into Lua app_data and register MCP IntentDefs.
+        // This must run regardless of hook_registry presence — MCP and hooks
+        // are independent features.
         if let Some(manager) = mcp_manager {
             // Store manager in app_data for dispatch_mcp
             lua.set_app_data(crate::tool_registry::SharedMcpManager(
                 std::sync::Arc::clone(&manager),
             ));
 
-            // Register MCP IntentDefs into IntentRegistry
-            // Use block_in_place since intent_defs() is async
+            // Register MCP IntentDefs into IntentRegistry.
+            //
+            // SAFETY(runtime): block_in_place requires a multi-thread tokio runtime.
+            // This is guaranteed by OrcsApp which uses #[tokio::main].
+            // No RwLock on McpClientManager is held by the caller at this point;
+            // intent_defs() acquires tool_routes read lock internally.
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let defs = tokio::task::block_in_place(|| handle.block_on(manager.intent_defs()));
 
@@ -610,6 +592,31 @@ impl LuaComponent {
                     );
                 }
             }
+        }
+
+        // Hook registration — optional, does not block MCP.
+        let Some(registry) = hook_registry else {
+            return;
+        };
+
+        if let Err(e) =
+            crate::hook_helpers::register_hook_function(&lua, registry.clone(), self.id.clone())
+        {
+            tracing::warn!("Failed to register orcs.hook(): {}", e);
+        } else {
+            tracing::debug!(component = %self.id.fqn(), "orcs.hook() registered");
+        }
+
+        if let Err(e) = crate::hook_helpers::register_unhook_function(&lua, registry.clone()) {
+            tracing::warn!("Failed to register orcs.unhook(): {}", e);
+        }
+
+        lua.set_app_data(crate::tools::ToolHookContext {
+            registry,
+            component_id: self.id.clone(),
+        });
+        if let Err(e) = crate::tools::wrap_tools_with_hooks(&lua) {
+            tracing::warn!("Failed to wrap tools with hooks: {}", e);
         }
     }
 }
