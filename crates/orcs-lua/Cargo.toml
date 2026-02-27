@@ -12,7 +12,7 @@ categories = ["development-tools"]
 
 [dependencies]
 # Lua bindings
-mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async", "serialize"] }
+mlua = { version = "0.11", features = ["lua54", "vendored", "send", "async", "serialize"] }
 
 # Internal crates
 orcs-component = { workspace = true }
@@ -67,6 +67,7 @@ test-utils = []
 tokio = { workspace = true }
 orcs-hook = { workspace = true, features = ["test-utils"] }
 orcs-lua = { path = ".", features = ["test-utils"] }
+mlua-lspec = "0.1"
 
 [lints]
 workspace = true

@@ -74,7 +74,7 @@ fn sandbox_eval(lua: &Lua, code: String) -> LuaResult<Table> {
                 "instruction limit exceeded ({MAX_INSTRUCTIONS})"
             )))
         },
-    );
+    )?;
 
     // Execute
     let exec_result: LuaResult<Value> = chunk.eval();
