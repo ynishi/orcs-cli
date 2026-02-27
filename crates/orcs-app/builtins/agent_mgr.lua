@@ -1009,6 +1009,20 @@ local function dispatch_llm(message)
         return { success = false, error = "no LLM backend available" }
     end
 
+    -- Liveness check: non-blocking channel probe via orcs.is_alive().
+    -- Zero-cost (no RPC roundtrip) — checks if the runner's event channel is open.
+    -- Guard: orcs.is_alive may not exist on older runtimes without supervision support.
+    if orcs.is_alive and not orcs.is_alive(concierge_fqn) then
+        orcs.log("error", "concierge '" .. concierge_fqn .. "' channel is closed (runner stopped)")
+        orcs.output_with_level(
+            "[AgentMgr] concierge '" .. concierge_fqn
+            .. "' is no longer running. LLM dispatch disabled.",
+            "error"
+        )
+        concierge_fqn = nil
+        return { success = false, error = "concierge became unreachable" }
+    end
+
     -- Gather history in parent context (board_recent unavailable to child workers)
     local history_context = fetch_history_context()
 
@@ -1416,8 +1430,40 @@ return {
                 orcs.log("error", "failed to spawn concierge: " .. (result.error or ""))
             end
         else
-            concierge_fqn = concierge
-            orcs.log("info", "concierge='" .. concierge .. "': using external agent")
+            -- External concierge: verify the component is reachable before trusting the FQN.
+            -- Without this guard, a stale or misconfigured FQN causes AgentTask events to
+            -- silently vanish (emit_event returns delivered=true due to self-channel counting).
+            orcs.log("info", "concierge='" .. concierge .. "': verifying external agent...")
+            local probe_ok, probe_err = pcall(function()
+                local resp = orcs.request(concierge, "ping", {}, { timeout_ms = 5000 })
+                if resp and resp.success then
+                    concierge_fqn = concierge
+    
+                    orcs.log("info", "concierge='" .. concierge .. "': external agent verified")
+                else
+                    local err_msg = (resp and resp.error) or "no response"
+                    orcs.log("error", string.format(
+                        "concierge='%s': external agent unreachable (%s). "
+                        .. "LLM dispatch will be disabled until a valid concierge is available.",
+                        concierge, err_msg
+                    ))
+                    orcs.output_with_level(
+                        "[AgentMgr] external concierge '" .. concierge
+                        .. "' is not responding. Check config or component status.",
+                        "warn"
+                    )
+                    -- concierge_fqn remains nil → dispatch_llm will return an error
+                end
+            end)
+            if not probe_ok then
+                orcs.log("error", "concierge probe failed: " .. tostring(probe_err))
+                orcs.output_with_level(
+                    "[AgentMgr] external concierge '" .. concierge
+                    .. "' probe threw an error. LLM dispatch disabled.",
+                    "warn"
+                )
+                -- concierge_fqn remains nil
+            end
         end
 
         -- Spawn delegate-worker agent (handles DelegateTask events).

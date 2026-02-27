@@ -250,6 +250,16 @@ impl ChannelHandle {
         self.request_tx.is_some()
     }
 
+    /// Returns `true` if the runner behind this handle is still alive.
+    ///
+    /// Checks `mpsc::Sender::is_closed()` on the event channel. The channel
+    /// is closed when the receiver (ChannelRunner) is dropped, indicating
+    /// that the runner has stopped.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        !self.event_tx.is_closed()
+    }
+
     /// Sends an RPC request to the bound Component.
     ///
     /// The request is delivered to the ChannelRunner's `request_rx` and
@@ -2649,5 +2659,23 @@ mod tests {
             .expect("send cancel");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         teardown(manager_task, world_tx).await;
+    }
+
+    // === ChannelHandle::is_alive tests ===
+
+    #[test]
+    fn handle_is_alive_while_receiver_exists() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<InboundEvent>(32);
+        let handle = ChannelHandle::new(ChannelId::new(), tx);
+
+        assert!(
+            handle.is_alive(),
+            "handle should be alive while receiver exists"
+        );
+        drop(rx);
+        assert!(
+            !handle.is_alive(),
+            "handle should not be alive after receiver is dropped"
+        );
     }
 }
