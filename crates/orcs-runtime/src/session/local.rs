@@ -195,18 +195,18 @@ pub fn default_session_path() -> PathBuf {
 mod tests {
     use super::super::SyncMode;
     use super::*;
-    use tempfile::TempDir;
+    use crate::WorkDir;
 
-    async fn test_store() -> (LocalFileStore, TempDir) {
-        let temp = TempDir::new().expect("should create temp dir");
+    async fn test_store() -> (LocalFileStore, WorkDir) {
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for store test");
         let store =
-            LocalFileStore::new(temp.path().to_path_buf()).expect("should create local file store");
-        (store, temp)
+            LocalFileStore::new(wd.path().to_path_buf()).expect("should create local file store");
+        (store, wd)
     }
 
     #[tokio::test]
     async fn save_and_load() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         let mut asset = SessionAsset::new();
         asset.add_turn(super::super::ConversationTurn::user("test"));
@@ -228,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_not_found() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         let result = store.load("nonexistent").await;
         assert!(matches!(result, Err(StorageError::NotFound(_))));
@@ -236,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         // Create multiple sessions
         for i in 0..3 {
@@ -258,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_session() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         let asset = SessionAsset::new();
         store
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_not_found() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         let result = store.delete("nonexistent").await;
         assert!(matches!(result, Err(StorageError::NotFound(_))));
@@ -292,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn exists() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
 
         let asset = SessionAsset::new();
         assert!(!store
@@ -312,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_status_is_offline() {
-        let (store, _temp) = test_store().await;
+        let (store, _wd) = test_store().await;
         let status = store.sync_status();
         assert_eq!(status.mode, SyncMode::Offline);
     }

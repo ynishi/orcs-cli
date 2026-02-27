@@ -159,41 +159,41 @@ mod tests {
 
     #[test]
     fn ensure_expanded_creates_files() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let written = ensure_expanded(tmp.path()).expect("expansion should succeed");
+        let wd = orcs_runtime::WorkDir::temporary().expect("should create temp WorkDir");
+        let written = ensure_expanded(wd.path()).expect("expansion should succeed");
 
         assert_eq!(written.len(), FILES.len(), "should write all files");
 
         // Verify directory component exists
-        let sm_init = versioned_dir(tmp.path()).join("skill_manager/init.lua");
+        let sm_init = versioned_dir(wd.path()).join("skill_manager/init.lua");
         assert!(sm_init.exists(), "skill_manager/init.lua should exist");
     }
 
     #[test]
     fn ensure_expanded_skips_existing_version() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        ensure_expanded(tmp.path()).expect("first expansion");
+        let wd = orcs_runtime::WorkDir::temporary().expect("should create temp WorkDir");
+        ensure_expanded(wd.path()).expect("first expansion");
 
-        let second = ensure_expanded(tmp.path()).expect("second expansion");
+        let second = ensure_expanded(wd.path()).expect("second expansion");
         assert!(second.is_empty(), "should skip existing version");
     }
 
     #[test]
     fn force_expand_overwrites_existing() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
+        let wd = orcs_runtime::WorkDir::temporary().expect("should create temp WorkDir");
 
         // First expansion
-        let first = ensure_expanded(tmp.path()).expect("initial expansion");
+        let first = ensure_expanded(wd.path()).expect("initial expansion");
         assert_eq!(first.len(), FILES.len(), "should write all files initially");
 
         // Tamper with a file to verify it gets overwritten
-        let echo_path = versioned_dir(tmp.path()).join("echo.lua");
+        let echo_path = versioned_dir(wd.path()).join("echo.lua");
         std::fs::write(&echo_path, "-- tampered").expect("should write tamper");
         let tampered = std::fs::read_to_string(&echo_path).expect("should read tampered");
         assert_eq!(tampered, "-- tampered");
 
         // Force expand should overwrite
-        let forced = force_expand(tmp.path()).expect("force expansion");
+        let forced = force_expand(wd.path()).expect("force expansion");
         assert_eq!(forced.len(), FILES.len(), "should write all files again");
 
         // Verify tampered file is restored
@@ -206,13 +206,13 @@ mod tests {
 
     #[test]
     fn force_expand_works_on_empty_dir() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
+        let wd = orcs_runtime::WorkDir::temporary().expect("should create temp WorkDir");
 
         // Force expand on fresh directory (no existing version)
-        let written = force_expand(tmp.path()).expect("force expansion on empty");
+        let written = force_expand(wd.path()).expect("force expansion on empty");
         assert_eq!(written.len(), FILES.len(), "should write all files");
 
-        let sm_init = versioned_dir(tmp.path()).join("skill_manager/init.lua");
+        let sm_init = versioned_dir(wd.path()).join("skill_manager/init.lua");
         assert!(sm_init.exists(), "skill_manager/init.lua should exist");
     }
 }
