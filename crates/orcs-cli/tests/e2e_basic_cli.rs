@@ -128,8 +128,30 @@ fn all_component_routes_registered() {
         .stdout(contains("agent_mgr"))
         .stdout(contains("profile_manager"))
         .stdout(contains("skill_manager"))
+        .stdout(contains("mcp_manager"))
         .stdout(contains("shell"))
         .stdout(contains("tool"));
+}
+
+#[test]
+fn mcp_manager_initializes() {
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.arg("-d")
+        .write_stdin("q\n")
+        .assert()
+        .success()
+        .stdout(contains("mcp::mcp_manager"))
+        .stdout(contains("MCPManager initialized"));
+}
+
+#[test]
+fn at_mcp_manager_routes() {
+    let (mut cmd, _guard) = orcs_cmd();
+    cmd.arg("-d")
+        .write_stdin("@mcp_manager status\nq\n")
+        .assert()
+        .success()
+        .stdout(contains("Routed @mcp_manager to channel"));
 }
 
 // ─── Shutdown ───────────────────────────────────────────────────
