@@ -60,14 +60,16 @@ uuid = { workspace = true }
 # Async runtime (process execution + reqwest bridge)
 tokio = { version = "1", features = ["process", "rt", "rt-multi-thread"] }
 
+# Test framework (optional, gated by test-utils)
+mlua-lspec = { version = "0.1", optional = true }
+
 [features]
-test-utils = []
+test-utils = ["mlua-lspec"]
 
 [dev-dependencies]
 tokio = { workspace = true }
 orcs-hook = { workspace = true, features = ["test-utils"] }
 orcs-lua = { path = ".", features = ["test-utils"] }
-mlua-lspec = "0.1"
 
 [lints]
 workspace = true
