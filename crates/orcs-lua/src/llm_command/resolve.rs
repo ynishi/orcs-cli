@@ -1154,6 +1154,99 @@ mod tests {
         );
     }
 
+    // ── dispatch_intents_to_results hil_intents Suspended tests ─────────
+
+    /// Helper: set up a Lua VM with `orcs.dispatch` that throws
+    /// `ComponentError::Suspended` on every call.
+    fn setup_lua_with_suspended_dispatch() -> Lua {
+        use orcs_component::ComponentError;
+        use std::sync::Arc;
+
+        let lua = Lua::new();
+        let orcs = lua.create_table().expect("create orcs table");
+
+        let dispatch_fn = lua
+            .create_function(
+                |_, (_name, _params): (String, mlua::Value)| -> mlua::Result<mlua::Value> {
+                    Err(mlua::Error::ExternalError(Arc::new(
+                        ComponentError::Suspended {
+                            approval_id: "test-ap-001".into(),
+                            grant_pattern: "intent:file_write".into(),
+                            pending_request: serde_json::json!({
+                                "description": "Write to /tmp/secret.txt",
+                                "command": "intent:file_write",
+                            }),
+                        },
+                    )))
+                },
+            )
+            .expect("create suspended dispatch");
+
+        orcs.set("dispatch", dispatch_fn)
+            .expect("set mock dispatch");
+        lua.globals().set("orcs", orcs).expect("set orcs global");
+
+        lua
+    }
+
+    #[test]
+    fn dispatch_suspended_hil_true_propagates_error() {
+        let lua = setup_lua_with_suspended_dispatch();
+
+        let intents = vec![ActionIntent {
+            id: "call_write".to_string(),
+            name: "file_write".to_string(),
+            params: serde_json::json!({"path": "/tmp/secret.txt"}),
+            meta: Default::default(),
+        }];
+
+        // hil_intents=true: Suspended should propagate as Err
+        let result = dispatch_intents_to_results(&lua, &intents, true);
+        assert!(
+            result.is_err(),
+            "hil_intents=true should propagate Suspended as Err"
+        );
+
+        let err = result.expect_err("already asserted Err");
+        let info = crate::extract_suspended_info(&err);
+        assert!(info.is_some(), "error should be extractable as Suspended");
+        let (pattern, desc) = info.expect("already asserted Some");
+        assert_eq!(pattern, "intent:file_write");
+        assert_eq!(desc, "Write to /tmp/secret.txt");
+    }
+
+    #[test]
+    fn dispatch_suspended_hil_false_converts_to_permission_denied() {
+        let lua = setup_lua_with_suspended_dispatch();
+
+        let intents = vec![ActionIntent {
+            id: "call_write".to_string(),
+            name: "file_write".to_string(),
+            params: serde_json::json!({"path": "/tmp/secret.txt"}),
+            meta: Default::default(),
+        }];
+
+        // hil_intents=false: Suspended should be caught and converted to tool_result
+        let result = dispatch_intents_to_results(&lua, &intents, false)
+            .expect("hil_intents=false should return Ok with error tool_result");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "call_write");
+        assert_eq!(is_error, Some(true), "should be an error tool_result");
+        assert!(
+            content.contains("Permission denied"),
+            "should contain 'Permission denied', got: {content}"
+        );
+        assert!(
+            content.contains("intent:file_write"),
+            "should mention the grant pattern, got: {content}"
+        );
+        assert!(
+            content.contains("Write to /tmp/secret.txt"),
+            "should mention the operation description, got: {content}"
+        );
+    }
+
     #[test]
     fn dispatch_intents_empty_returns_empty_blocks() {
         use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};

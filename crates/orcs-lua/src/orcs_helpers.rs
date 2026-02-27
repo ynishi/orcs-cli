@@ -254,6 +254,25 @@ pub fn register_base_orcs_functions(
     // Register orcs.sandbox_eval (must be before sandbox_lua_globals removes `load`/`debug`)
     crate::sandbox_eval::register_sandbox_eval(lua, &orcs_table)?;
 
+    // orcs.suspended_info(err) -> {grant_pattern, description} | nil
+    // Type-safe check for ComponentError::Suspended via mlua Value::Error downcast.
+    // Replaces fragile string matching in Lua pcall error handlers.
+    {
+        let suspended_info_fn =
+            lua.create_function(|lua, err_val: mlua::Value| -> mlua::Result<mlua::Value> {
+                if let mlua::Value::Error(ref err) = err_val {
+                    if let Some((pattern, desc)) = crate::extract_suspended_info(err) {
+                        let t = lua.create_table()?;
+                        t.set("grant_pattern", pattern)?;
+                        t.set("description", desc)?;
+                        return Ok(mlua::Value::Table(t));
+                    }
+                }
+                Ok(mlua::Value::Nil)
+            })?;
+        orcs_table.set("suspended_info", suspended_info_fn)?;
+    }
+
     // Disable dangerous Lua stdlib functions
     sandbox_lua_globals(lua)?;
 
@@ -829,5 +848,99 @@ value = 123
             .expect("should complete toml roundtrip");
         assert!(result.contains("roundtrip"));
         assert!(result.contains("123"));
+    }
+
+    // ── orcs.suspended_info tests ─────────────────────────────────────
+
+    #[test]
+    fn suspended_info_returns_table_for_suspended_error() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_policy())
+            .expect("should register base functions for suspended_info test");
+
+        // Simulate pcall catching a ComponentError::Suspended thrown from Rust.
+        // We create a Rust function that throws Suspended, call it via pcall,
+        // then pass the captured error to orcs.suspended_info.
+        let throw_suspended = lua
+            .create_function(|_, ()| -> mlua::Result<()> {
+                Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                    orcs_component::ComponentError::Suspended {
+                        approval_id: "ap-test".into(),
+                        grant_pattern: "intent:write".into(),
+                        pending_request: serde_json::json!({
+                            "description": "Write to /tmp/test.txt",
+                        }),
+                    },
+                )))
+            })
+            .expect("create throw_suspended function");
+        lua.globals()
+            .set("throw_suspended", throw_suspended)
+            .expect("set throw_suspended global");
+
+        let result: Table = lua
+            .load(
+                r#"
+                local ok, err = pcall(throw_suspended)
+                assert(not ok, "pcall should fail")
+                local info = orcs.suspended_info(err)
+                assert(info ~= nil, "suspended_info should return table")
+                return info
+                "#,
+            )
+            .eval()
+            .expect("suspended_info should return table for Suspended error");
+
+        assert_eq!(
+            result
+                .get::<String>("grant_pattern")
+                .expect("should have grant_pattern"),
+            "intent:write"
+        );
+        assert_eq!(
+            result
+                .get::<String>("description")
+                .expect("should have description"),
+            "Write to /tmp/test.txt"
+        );
+    }
+
+    #[test]
+    fn suspended_info_returns_nil_for_non_suspended_error() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_policy())
+            .expect("should register base functions for suspended_info nil test");
+
+        let result: mlua::Value = lua
+            .load(
+                r#"
+                local ok, err = pcall(function() error("plain lua error") end)
+                return orcs.suspended_info(err)
+                "#,
+            )
+            .eval()
+            .expect("suspended_info should succeed for plain error");
+
+        assert!(
+            matches!(result, mlua::Value::Nil),
+            "should return nil for non-Suspended error"
+        );
+    }
+
+    #[test]
+    fn suspended_info_returns_nil_for_non_error_value() {
+        let lua = Lua::new();
+        register_base_orcs_functions(&lua, test_policy())
+            .expect("should register base functions for suspended_info non-error test");
+
+        let result: mlua::Value = lua
+            .load(r#"return orcs.suspended_info("just a string")"#)
+            .eval()
+            .expect("suspended_info should succeed for string value");
+
+        assert!(
+            matches!(result, mlua::Value::Nil),
+            "should return nil for non-error value"
+        );
     }
 }

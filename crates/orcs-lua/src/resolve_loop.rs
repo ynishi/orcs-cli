@@ -123,6 +123,8 @@ fn resolve_loop_impl(lua: &Lua, backend_fn: &Function, opts: &Table) -> mlua::Re
             );
         }
 
+        // resolve_loop has no session management, so always hil_intents=false:
+        // Suspended is converted to an error tool_result instead of propagating.
         tool_results_content = Some(dispatch_intents_to_results(lua, &intents, false)?);
         log_dispatch(turn_number, &intents);
         turn_number += 1;

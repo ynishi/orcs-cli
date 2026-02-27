@@ -134,11 +134,15 @@ local function handle_process(payload)
         -- pcall was only needed to guarantee busy=false; the ChannelRunner
         -- needs the original ComponentError::Suspended (preserved as mlua
         -- WrappedFailure userdata) to trigger the HIL approval flow.
-        local err_str = tostring(pcall_err)
-        if err_str:find("suspended pending approval:") then
+        -- Type-safe check via Rust downcast (no fragile string matching).
+        local suspended = orcs.suspended_info(pcall_err)
+        if suspended then
+            orcs.log("info", "delegate-worker: task " .. request_id
+                .. " suspended for HIL approval: " .. suspended.description)
             error(pcall_err)
         end
 
+        local err_str = tostring(pcall_err)
         orcs.output_with_level("[Delegate:" .. request_id .. "] Error: " .. err_str, "error")
         orcs.emit_event("DelegateResult", "completed", {
             request_id = request_id,
