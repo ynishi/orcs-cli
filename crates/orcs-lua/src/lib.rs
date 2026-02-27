@@ -123,17 +123,108 @@ pub use orcs_helpers::{ensure_orcs_table, register_base_orcs_functions};
 pub use tools::register_tool_functions;
 pub use types::{LuaRequest, LuaResponse, LuaSignal};
 
-/// Checks if an `mlua::Error` wraps a `ComponentError::Suspended`.
+/// Extracts `(grant_pattern, description)` from a `ComponentError::Suspended`
+/// wrapped inside an `mlua::Error`.
 ///
 /// Recurses through `CallbackError` wrappers since mlua nests callback errors.
-/// Used by resolve_loop, dispatch_intents_to_results, and LuaComponent to
-/// propagate suspension errors to the ChannelRunner.
-pub(crate) fn is_suspended_error(err: &mlua::Error) -> bool {
+/// Used by `dispatch_intents_to_results` to convert intent-level permission
+/// denials into LLM-visible tool_result errors instead of aborting the
+/// resolve loop.
+pub(crate) fn extract_suspended_info(err: &mlua::Error) -> Option<(String, String)> {
     match err {
         mlua::Error::ExternalError(ext) => ext
             .downcast_ref::<orcs_component::ComponentError>()
-            .is_some_and(|ce| matches!(ce, orcs_component::ComponentError::Suspended { .. })),
-        mlua::Error::CallbackError { cause, .. } => is_suspended_error(cause),
-        _ => false,
+            .and_then(|ce| match ce {
+                orcs_component::ComponentError::Suspended {
+                    grant_pattern,
+                    pending_request,
+                    ..
+                } => {
+                    let desc = pending_request
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown operation")
+                        .to_string();
+                    Some((grant_pattern.clone(), desc))
+                }
+                _ => None,
+            }),
+        mlua::Error::CallbackError { cause, .. } => extract_suspended_info(cause),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod extract_suspended_info_tests {
+    use super::*;
+    use orcs_component::ComponentError;
+    use std::sync::Arc;
+
+    #[test]
+    fn extracts_grant_pattern_and_description() {
+        let err = mlua::Error::ExternalError(Arc::new(ComponentError::Suspended {
+            approval_id: "ap-001".into(),
+            grant_pattern: "intent:write".into(),
+            pending_request: serde_json::json!({
+                "command": "intent:write",
+                "description": "Write to file: /tmp/test.txt",
+            }),
+        }));
+        let result = extract_suspended_info(&err);
+        assert!(result.is_some(), "should extract from Suspended");
+        let (pattern, desc) = result.expect("already asserted Some");
+        assert_eq!(pattern, "intent:write");
+        assert_eq!(desc, "Write to file: /tmp/test.txt");
+    }
+
+    #[test]
+    fn extracts_through_callback_error() {
+        let inner = mlua::Error::ExternalError(Arc::new(ComponentError::Suspended {
+            approval_id: "ap-002".into(),
+            grant_pattern: "intent:remove".into(),
+            pending_request: serde_json::json!({
+                "description": "Remove file: /tmp/old.txt",
+            }),
+        }));
+        let err = mlua::Error::CallbackError {
+            traceback: "stack trace".into(),
+            cause: Arc::new(inner),
+        };
+        let (pattern, desc) =
+            extract_suspended_info(&err).expect("should extract through CallbackError");
+        assert_eq!(pattern, "intent:remove");
+        assert_eq!(desc, "Remove file: /tmp/old.txt");
+    }
+
+    #[test]
+    fn falls_back_to_unknown_when_no_description() {
+        let err = mlua::Error::ExternalError(Arc::new(ComponentError::Suspended {
+            approval_id: "ap-003".into(),
+            grant_pattern: "intent:mkdir".into(),
+            pending_request: serde_json::json!({"command": "intent:mkdir"}),
+        }));
+        let (pattern, desc) =
+            extract_suspended_info(&err).expect("should extract even without description");
+        assert_eq!(pattern, "intent:mkdir");
+        assert_eq!(desc, "unknown operation");
+    }
+
+    #[test]
+    fn returns_none_for_non_suspended() {
+        let err =
+            mlua::Error::ExternalError(Arc::new(ComponentError::ExecutionFailed("timeout".into())));
+        assert!(
+            extract_suspended_info(&err).is_none(),
+            "ExecutionFailed should not match"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_runtime_error() {
+        let err = mlua::Error::RuntimeError("some error".into());
+        assert!(
+            extract_suspended_info(&err).is_none(),
+            "RuntimeError should not match"
+        );
     }
 }

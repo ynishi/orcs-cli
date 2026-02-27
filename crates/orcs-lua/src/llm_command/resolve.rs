@@ -190,9 +190,19 @@ pub(super) fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> Mess
 /// Each intent is dispatched through the Lua `orcs.dispatch(name, params)` function.
 /// The result (or error) is wrapped into a `ContentBlock::ToolResult` for the next
 /// LLM turn.
+///
+/// When `hil_intents` is `true` and a dispatch fails with
+/// `ComponentError::Suspended`, the error is propagated immediately so the
+/// ChannelRunner can trigger the HIL approval flow.  The caller is
+/// responsible for rolling back the session before re-throwing.
+///
+/// When `hil_intents` is `false` (default), `Suspended` is caught and
+/// converted to an `is_error = true` tool_result so the LLM can adapt
+/// (e.g., delegate to an agent with the required permissions).
 pub(crate) fn dispatch_intents_to_results(
     lua: &Lua,
     intents: &[ActionIntent],
+    hil_intents: bool,
 ) -> mlua::Result<MessageContent> {
     let orcs: Table = lua.globals().get("orcs")?;
     let dispatch_fn: mlua::Function = orcs.get("dispatch")?;
@@ -248,11 +258,33 @@ pub(crate) fn dispatch_intents_to_results(
                 }
             }
             Err(e) => {
-                // Propagate Suspended so ChannelRunner can drive HIL approval.
-                if crate::is_suspended_error(&e) {
-                    return Err(e);
+                if let Some((grant_pattern, description)) = crate::extract_suspended_info(&e) {
+                    if hil_intents {
+                        // HIL mode: propagate Suspended so the ChannelRunner
+                        // can trigger the approval flow.  The caller rolls
+                        // back the session before re-throwing.
+                        tracing::info!(
+                            grant_pattern = %grant_pattern,
+                            description = %description,
+                            "hil_intents: propagating Suspended for HIL approval"
+                        );
+                        return Err(e);
+                    }
+                    // Non-HIL: convert to tool_result error so the LLM can
+                    // adapt (e.g., delegate to an agent with the required
+                    // permissions) instead of aborting the resolve loop.
+                    (
+                        format!(
+                            "Permission denied: {description}. \
+                             You do not have '{grant_pattern}' permission. \
+                             Consider delegating this task to an agent that has \
+                             the required permissions."
+                        ),
+                        true,
+                    )
+                } else {
+                    (format!("dispatch error: {e}"), true)
                 }
-                (format!("dispatch error: {e}"), true)
             }
         };
 
@@ -587,6 +619,7 @@ mod tests {
             tools: false,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");
@@ -647,6 +680,7 @@ mod tests {
             tools: false,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");
@@ -687,7 +721,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {
@@ -818,7 +853,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "tool_call_1");
@@ -863,7 +899,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "tool_err_1");
@@ -939,7 +976,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "call_review");
@@ -1024,7 +1062,8 @@ mod tests {
             },
         ];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {
@@ -1103,7 +1142,8 @@ mod tests {
             meta: Default::default(),
         }];
 
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         let (tool_use_id, content, is_error) = expect_single_tool_result(result);
         assert_eq!(tool_use_id, "call_unknown");
@@ -1111,6 +1151,99 @@ mod tests {
         assert!(
             content.contains("unknown intent"),
             "error should mention unknown intent, got: {content}"
+        );
+    }
+
+    // ── dispatch_intents_to_results hil_intents Suspended tests ─────────
+
+    /// Helper: set up a Lua VM with `orcs.dispatch` that throws
+    /// `ComponentError::Suspended` on every call.
+    fn setup_lua_with_suspended_dispatch() -> Lua {
+        use orcs_component::ComponentError;
+        use std::sync::Arc;
+
+        let lua = Lua::new();
+        let orcs = lua.create_table().expect("create orcs table");
+
+        let dispatch_fn = lua
+            .create_function(
+                |_, (_name, _params): (String, mlua::Value)| -> mlua::Result<mlua::Value> {
+                    Err(mlua::Error::ExternalError(Arc::new(
+                        ComponentError::Suspended {
+                            approval_id: "test-ap-001".into(),
+                            grant_pattern: "intent:file_write".into(),
+                            pending_request: serde_json::json!({
+                                "description": "Write to /tmp/secret.txt",
+                                "command": "intent:file_write",
+                            }),
+                        },
+                    )))
+                },
+            )
+            .expect("create suspended dispatch");
+
+        orcs.set("dispatch", dispatch_fn)
+            .expect("set mock dispatch");
+        lua.globals().set("orcs", orcs).expect("set orcs global");
+
+        lua
+    }
+
+    #[test]
+    fn dispatch_suspended_hil_true_propagates_error() {
+        let lua = setup_lua_with_suspended_dispatch();
+
+        let intents = vec![ActionIntent {
+            id: "call_write".to_string(),
+            name: "file_write".to_string(),
+            params: serde_json::json!({"path": "/tmp/secret.txt"}),
+            meta: Default::default(),
+        }];
+
+        // hil_intents=true: Suspended should propagate as Err
+        let result = dispatch_intents_to_results(&lua, &intents, true);
+        assert!(
+            result.is_err(),
+            "hil_intents=true should propagate Suspended as Err"
+        );
+
+        let err = result.expect_err("already asserted Err");
+        let info = crate::extract_suspended_info(&err);
+        assert!(info.is_some(), "error should be extractable as Suspended");
+        let (pattern, desc) = info.expect("already asserted Some");
+        assert_eq!(pattern, "intent:file_write");
+        assert_eq!(desc, "Write to /tmp/secret.txt");
+    }
+
+    #[test]
+    fn dispatch_suspended_hil_false_converts_to_permission_denied() {
+        let lua = setup_lua_with_suspended_dispatch();
+
+        let intents = vec![ActionIntent {
+            id: "call_write".to_string(),
+            name: "file_write".to_string(),
+            params: serde_json::json!({"path": "/tmp/secret.txt"}),
+            meta: Default::default(),
+        }];
+
+        // hil_intents=false: Suspended should be caught and converted to tool_result
+        let result = dispatch_intents_to_results(&lua, &intents, false)
+            .expect("hil_intents=false should return Ok with error tool_result");
+
+        let (tool_use_id, content, is_error) = expect_single_tool_result(result);
+        assert_eq!(tool_use_id, "call_write");
+        assert_eq!(is_error, Some(true), "should be an error tool_result");
+        assert!(
+            content.contains("Permission denied"),
+            "should contain 'Permission denied', got: {content}"
+        );
+        assert!(
+            content.contains("intent:file_write"),
+            "should mention the grant pattern, got: {content}"
+        );
+        assert!(
+            content.contains("Write to /tmp/secret.txt"),
+            "should mention the operation description, got: {content}"
         );
     }
 
@@ -1129,7 +1262,8 @@ mod tests {
             .expect("register dispatch functions");
 
         let intents: Vec<ActionIntent> = vec![];
-        let result = dispatch_intents_to_results(&lua, &intents).expect("dispatch should succeed");
+        let result =
+            dispatch_intents_to_results(&lua, &intents, false).expect("dispatch should succeed");
 
         match result {
             MessageContent::Blocks(blocks) => {

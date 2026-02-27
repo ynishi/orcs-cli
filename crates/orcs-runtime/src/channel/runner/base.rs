@@ -894,22 +894,8 @@ impl ChannelRunner {
             warn!("no GrantPolicy configured, cannot grant pattern");
         }
 
-        // 2. Re-dispatch the original request.
-        let result = {
-            let mut comp = self.component.lock().await;
-            comp.on_request(&pending.original_request)
-        };
-
-        match result {
-            Ok(response) => {
-                debug!(response = ?response, "re-dispatched request succeeded after approval");
-            }
-            Err(e) => {
-                warn!(error = %e, "re-dispatched request failed after approval");
-            }
-        }
-
-        // 3. Notify user that approval was accepted.
+        // 2. Notify user that the approval was accepted (before re-dispatch so
+        //    the confirmation appears before any output from the re-dispatched request).
         if let Some(io_tx) = &self.io_output_tx {
             let event = Event {
                 category: EventCategory::Output,
@@ -921,6 +907,77 @@ impl ChannelRunner {
                 }),
             };
             let _ = io_tx.try_send_direct(event);
+        }
+
+        // 3. Re-dispatch the original request.
+        let result = {
+            let mut comp = self.component.lock().await;
+            comp.on_request(&pending.original_request)
+        };
+
+        match result {
+            Ok(response) => {
+                debug!(response = ?response, "re-dispatched request succeeded after approval");
+            }
+            Err(ComponentError::Suspended {
+                approval_id: new_approval_id,
+                grant_pattern: new_grant_pattern,
+                pending_request: new_pending_request,
+            }) => {
+                // Cascading approval: re-dispatch hit a different permission gate.
+                // Enter a new approval cycle with the same original request so that
+                // accumulated grants will all be in effect on the next re-dispatch.
+                info!(
+                    approval_id = %new_approval_id,
+                    grant_pattern = %new_grant_pattern,
+                    "re-dispatch triggered cascading approval"
+                );
+
+                self.pending_approval = Some(PendingApproval {
+                    approval_id: new_approval_id.clone(),
+                    grant_pattern: new_grant_pattern,
+                    original_request: pending.original_request,
+                });
+
+                send_transition(
+                    &self.world_tx,
+                    self.id,
+                    StateTransition::AwaitApproval {
+                        request_id: new_approval_id.clone(),
+                    },
+                )
+                .await;
+
+                let description = new_pending_request
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("command execution")
+                    .to_string();
+                let command = new_pending_request
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if let Some(io_tx) = &self.io_output_tx {
+                    let output_event = Event {
+                        category: EventCategory::Output,
+                        operation: "approval_request".to_string(),
+                        source: self.component_id.clone(),
+                        payload: serde_json::json!({
+                            "type": "approval_request",
+                            "approval_id": new_approval_id,
+                            "operation": "exec",
+                            "description": format!("{}: {}", description, command),
+                            "source": self.component_id.fqn(),
+                        }),
+                    };
+                    let _ = io_tx.try_send_direct(output_event);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "re-dispatched request failed after approval");
+            }
         }
     }
 

@@ -564,6 +564,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -598,6 +599,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -626,6 +628,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let messages = vec![
             Message {
@@ -665,6 +668,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let messages = vec![
             Message {
@@ -708,6 +712,7 @@ mod tests {
             tools: true,
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
         };
         let messages = vec![Message {
             role: Role::User,

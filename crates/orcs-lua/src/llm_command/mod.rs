@@ -55,7 +55,7 @@ pub(crate) mod retry;
 mod session;
 
 use mlua::{Lua, Table};
-use orcs_types::intent::StopReason;
+use orcs_types::intent::{ContentBlock, MessageContent, StopReason};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -66,8 +66,8 @@ use resolve::{
 };
 use retry::{build_classified_error_result, build_error_result, send_with_retry, SendError};
 use session::{
-    append_message, build_messages, ensure_session_store, resolve_session_id, update_session,
-    Message, SessionStore,
+    append_message, build_messages, ensure_session_store, resolve_session_id,
+    session_message_count, truncate_session, update_session, Message, SessionStore,
 };
 
 /// Default timeout in seconds for LLM requests.
@@ -136,6 +136,18 @@ pub(super) struct LlmOpts {
     pub resolve: bool,
     /// Maximum number of tool-loop turns before stopping (default: 10).
     pub max_tool_turns: u32,
+    /// Whether to propagate `Suspended` errors for HIL approval instead of
+    /// converting them to `tool_result` errors (default: false).
+    ///
+    /// When `true`, intent permission denials bubble up as
+    /// `ComponentError::Suspended`, allowing the ChannelRunner to trigger
+    /// the HIL approval flow.  The session is rolled back so the LLM
+    /// conversation replays cleanly after the user grants permission.
+    ///
+    /// When `false` (default), `Suspended` is caught and returned as an
+    /// `is_error = true` tool_result so the LLM can adapt (e.g., delegate
+    /// to an agent with the required permissions).
+    pub hil_intents: bool,
 }
 
 impl LlmOpts {
@@ -195,6 +207,11 @@ impl LlmOpts {
             .and_then(|o| o.get::<u32>("max_tool_turns").ok())
             .unwrap_or(DEFAULT_MAX_TOOL_TURNS);
 
+        let hil_intents = opts
+            .and_then(|o| o.get::<Option<bool>>("hil_intents").ok())
+            .flatten()
+            .unwrap_or(false);
+
         Ok(Self {
             provider,
             base_url,
@@ -209,6 +226,7 @@ impl LlmOpts {
             tools,
             resolve,
             max_tool_turns,
+            hil_intents,
         })
     }
 }
@@ -504,6 +522,11 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     // ── First turn: build messages from history + prompt ──
     let mut messages = build_messages(lua, &session_id, &prompt, &llm_opts);
 
+    // Checkpoint: record session length so hil_intents can roll back on Suspended.
+    // Messages appended during the resolve loop (assistant tool_use, user tool_result)
+    // are removed on rollback, allowing a clean replay after ChannelRunner re-dispatch.
+    let session_checkpoint = session_message_count(lua, &session_id);
+
     // ── Tool loop ──
     // Each iteration: build body → send → parse → if tool_use && resolve → dispatch → append results → repeat
     for tool_turn in 0..=llm_opts.max_tool_turns {
@@ -574,8 +597,46 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 assistant_blocks,
             );
 
-            // Dispatch each intent and collect tool results
-            let tool_result_content = dispatch_intents_to_results(lua, &parsed_resp.intents)?;
+            // Dispatch each intent and collect tool results.
+            //
+            // hil_intents=true: Suspended propagates → session rolled back →
+            //   ChannelRunner triggers HIL → user approves → on_request replays.
+            //
+            // hil_intents=false: Suspended caught → error tool_results synthesized
+            //   so the session stays consistent (every tool_use has a matching
+            //   tool_result), preventing API 400 on session resume.
+            let tool_result_content = match dispatch_intents_to_results(
+                lua,
+                &parsed_resp.intents,
+                llm_opts.hil_intents,
+            ) {
+                Ok(content) => content,
+                Err(e) => {
+                    if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
+                        // HIL mode: roll back session to the checkpoint so the
+                        // conversation replays cleanly after approval + re-dispatch.
+                        truncate_session(lua, &session_id, session_checkpoint);
+                        return Err(e);
+                    }
+                    // Non-HIL: synthesize error tool_results for session consistency.
+                    let error_blocks: Vec<ContentBlock> = parsed_resp
+                        .intents
+                        .iter()
+                        .map(|intent| ContentBlock::ToolResult {
+                            tool_use_id: intent.id.clone(),
+                            content: format!("dispatch error: {e}"),
+                            is_error: Some(true),
+                        })
+                        .collect();
+                    let fallback = MessageContent::Blocks(error_blocks);
+                    messages.push(session::Message {
+                        role: orcs_types::intent::Role::User,
+                        content: fallback.clone(),
+                    });
+                    append_message(lua, &session_id, orcs_types::intent::Role::User, fallback);
+                    return Err(e);
+                }
+            };
             messages.push(session::Message {
                 role: orcs_types::intent::Role::User,
                 content: tool_result_content.clone(),

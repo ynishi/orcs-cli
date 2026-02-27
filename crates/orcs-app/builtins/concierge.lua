@@ -54,7 +54,7 @@ end
 
 --- Output LLM response to IO and emit observability event.
 local function emit_success(message, llm_resp)
-    orcs.output(llm_resp.content or "")
+    orcs.output("[Concierge] " .. (llm_resp.content or ""))
     orcs.emit_event("Extension", "llm_response", {
         message = message,
         response = llm_resp.content,
@@ -368,6 +368,7 @@ local function handle_process(input)
         local resume_sid = input.session_id or session_id
         if resume_sid and resume_sid ~= "" then
             orcs.log("info", "concierge: resuming session " .. resume_sid:sub(1, 20))
+            orcs.output("[Concierge] Thinking...")
             local opts = build_llm_opts(input)
             opts.session_id = resume_sid
             opts.resolve = true
@@ -438,6 +439,7 @@ local function handle_process(input)
         ))
 
         -- Call LLM with tool-use auto-resolution
+        orcs.output("[Concierge] Thinking...")
         local llm_opts = build_llm_opts(input)
         llm_opts.resolve = true
         local llm_resp = orcs.llm(prompt, llm_opts)

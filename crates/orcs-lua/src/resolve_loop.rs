@@ -82,10 +82,20 @@ fn resolve_loop_impl(lua: &Lua, backend_fn: &Function, opts: &Table) -> mlua::Re
         let response = match backend_fn.call::<Table>(turn) {
             Ok(resp) => resp,
             Err(e) => {
-                // Propagate suspension errors so ChannelRunner can drive the
-                // HIL approval flow (exec_argv permission grants, etc.).
-                if crate::is_suspended_error(&e) {
-                    return Err(e);
+                // Intent-level permission denial: surface as a resolve_loop
+                // error result so the caller (Lua) can handle gracefully
+                // (e.g., the LLM decides to delegate to an agent).
+                if let Some((grant_pattern, description)) = crate::extract_suspended_info(&e) {
+                    return build_result(
+                        lua,
+                        false,
+                        &last_content,
+                        turn_number,
+                        Some(format!(
+                            "Permission denied: {description}. \
+                             Missing '{grant_pattern}' permission."
+                        )),
+                    );
                 }
                 return build_result(
                     lua,
@@ -113,7 +123,9 @@ fn resolve_loop_impl(lua: &Lua, backend_fn: &Function, opts: &Table) -> mlua::Re
             );
         }
 
-        tool_results_content = Some(dispatch_intents_to_results(lua, &intents)?);
+        // resolve_loop has no session management, so always hil_intents=false:
+        // Suspended is converted to an error tool_result instead of propagating.
+        tool_results_content = Some(dispatch_intents_to_results(lua, &intents, false)?);
         log_dispatch(turn_number, &intents);
         turn_number += 1;
     }
