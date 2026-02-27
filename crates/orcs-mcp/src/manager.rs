@@ -57,6 +57,15 @@ impl McpClientManager {
     ///
     /// Spawns the server process, completes the MCP initialization
     /// handshake, discovers tools, and registers them.
+    ///
+    /// # Concurrency
+    ///
+    /// **Not safe for concurrent calls with the same server name.**
+    /// The existence check (read lock) and insertion (write lock) are
+    /// separated by `spawn_and_initialize`, creating a TOCTOU window.
+    /// `connect_all` calls sequentially, so this is safe in practice.
+    /// If parallel connect is needed in the future, refactor to hold
+    /// a write lock across the entire operation.
     pub async fn connect(&self, name: &str) -> Result<Vec<IntentDef>, McpError> {
         let server_config =
             self.config
