@@ -67,6 +67,7 @@ test-utils = []
 tokio = { workspace = true }
 orcs-hook = { workspace = true, features = ["test-utils"] }
 orcs-lua = { path = ".", features = ["test-utils"] }
+mlua-lspec = "0.1"
 
 [lints]
 workspace = true
