@@ -71,11 +71,7 @@ fn command_mode_llm_pipeline() {
 
             let mut request = Vec::new();
             let mut buf = [0u8; 4096];
-            loop {
-                let n = match stream.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
+            while let Ok(n) = stream.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
@@ -107,7 +103,7 @@ fn command_mode_llm_pipeline() {
         }
     });
 
-    let child = Command::new(&bin)
+    let child = Command::new(bin)
         .arg("-d")
         .arg("--sandbox")
         .arg(tmp.path())
@@ -127,11 +123,8 @@ fn command_mode_llm_pipeline() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     drop(server_thread);
 
-    // Dump for debugging
-    let dump_dir = std::env::temp_dir().join("orcs_cmd_mode_dump");
-    std::fs::create_dir_all(&dump_dir).expect("create dump dir");
-    std::fs::write(dump_dir.join("stdout.txt"), stdout.as_bytes()).expect("write stdout dump");
-    std::fs::write(dump_dir.join("stderr.txt"), stderr.as_bytes()).expect("write stderr dump");
+    // Dump output for post-mortem inspection (auto-cleaned unless ORCS_TEST_DUMP_DIR is set).
+    let _dump = common::dump_test_output("cmd_mode", &stdout, &stderr);
 
     eprintln!("=== CMD_MODE DEBUG ===");
     eprintln!("exit_status={:?}", output.status);

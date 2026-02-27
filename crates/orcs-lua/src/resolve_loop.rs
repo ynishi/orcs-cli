@@ -286,21 +286,17 @@ mod tests {
     use super::*;
     use crate::orcs_helpers::register_base_orcs_functions;
     use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+    use orcs_runtime::WorkDir;
     use std::sync::Arc;
 
-    fn test_sandbox() -> (std::path::PathBuf, Arc<dyn SandboxPolicy>) {
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-resolve-loop-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("should create temp dir");
-        let dir = dir.canonicalize().expect("should canonicalize temp dir");
+    fn test_sandbox() -> (WorkDir, Arc<dyn SandboxPolicy>) {
+        let wd = WorkDir::temporary().expect("should create temp work dir");
+        let dir = wd
+            .path()
+            .canonicalize()
+            .expect("should canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
-        (dir, Arc::new(sandbox))
+        (wd, Arc::new(sandbox))
     }
 
     fn setup_lua(sandbox: Arc<dyn SandboxPolicy>) -> Lua {
@@ -316,7 +312,7 @@ mod tests {
 
     #[test]
     fn single_turn_no_tool_calls() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -357,10 +353,11 @@ mod tests {
 
     #[test]
     fn multi_turn_with_tool_calls() {
-        let (root, sandbox) = test_sandbox();
+        let (wd, sandbox) = test_sandbox();
 
         // Write a test file for the read tool
-        std::fs::write(root.join("test.txt"), "file content here").expect("should write test file");
+        std::fs::write(wd.path().join("test.txt"), "file content here")
+            .expect("should write test file");
 
         let lua = setup_lua(sandbox);
 
@@ -395,7 +392,7 @@ mod tests {
             }})
             return result
             "#,
-            path = root.join("test.txt").display()
+            path = wd.path().join("test.txt").display()
         );
 
         let result: Table = lua.load(&code).eval().expect("resolve_loop should succeed");
@@ -422,7 +419,7 @@ mod tests {
 
     #[test]
     fn max_turns_exceeded() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -461,7 +458,7 @@ mod tests {
 
     #[test]
     fn backend_error_returns_error() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -491,7 +488,7 @@ mod tests {
 
     #[test]
     fn missing_prompt_errors() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -514,7 +511,7 @@ mod tests {
 
     #[test]
     fn tools_table_contains_registry_entries() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Verify tools are passed to backend_fn
@@ -554,7 +551,7 @@ mod tests {
 
     #[test]
     fn tool_call_without_id_gets_auto_generated() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -601,7 +598,7 @@ mod tests {
 
     #[test]
     fn dynamically_registered_intent_available_in_tools() {
-        let (_, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua

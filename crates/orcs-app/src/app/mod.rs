@@ -905,9 +905,10 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
     use orcs_runtime::NoOpResolver;
+    use orcs_runtime::WorkDir;
     use std::path::PathBuf;
 
-    fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
+    fn test_policy() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
@@ -943,7 +944,7 @@ mod tests {
     #[tokio::test]
     async fn builder_default() {
         let app = OrcsApp::builder(NoOpResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed with NoOpResolver");
@@ -962,7 +963,7 @@ mod tests {
         }
 
         let app = OrcsApp::builder(VerboseResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed with VerboseResolver");
@@ -972,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn app_engine_access() {
         let app = OrcsApp::builder(NoOpResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed");
@@ -982,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn app_engine_parallel_access() {
         let app = OrcsApp::builder(NoOpResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed");
@@ -995,7 +996,7 @@ mod tests {
     #[tokio::test]
     async fn app_session_id() {
         let app = OrcsApp::builder(NoOpResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed");
@@ -1005,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn app_new_session_not_resumed() {
         let app = OrcsApp::builder(NoOpResolver)
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed");
@@ -1015,8 +1016,8 @@ mod tests {
 
     #[tokio::test]
     async fn app_save_and_load_session() {
-        let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).expect("create temp dir for session test");
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for session test");
+        let temp_dir = wd.path().to_path_buf();
 
         struct SessionResolver {
             session_dir: PathBuf,
@@ -1033,7 +1034,7 @@ mod tests {
             let mut app = OrcsApp::builder(SessionResolver {
                 session_dir: temp_dir.clone(),
             })
-            .with_sandbox(test_sandbox())
+            .with_sandbox(test_policy())
             .build()
             .await
             .expect("builder should succeed with SessionResolver");
@@ -1048,7 +1049,7 @@ mod tests {
         let app = OrcsApp::builder(SessionResolver {
             session_dir: temp_dir.clone(),
         })
-        .with_sandbox(test_sandbox())
+        .with_sandbox(test_policy())
         .resume(&session_id)
         .build()
         .await
@@ -1056,14 +1057,12 @@ mod tests {
 
         assert!(app.is_resumed());
         assert_eq!(app.session_id(), session_id);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[tokio::test]
     async fn app_resume_nonexistent_session_fails() {
-        let temp_dir = std::env::temp_dir().join(format!("orcs-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for resume test");
+        let temp_dir = wd.path().to_path_buf();
 
         struct SessionResolver {
             session_dir: PathBuf,
@@ -1079,14 +1078,12 @@ mod tests {
         let result = OrcsApp::builder(SessionResolver {
             session_dir: temp_dir.clone(),
         })
-        .with_sandbox(test_sandbox())
+        .with_sandbox(test_policy())
         .resume("nonexistent-session-id")
         .build()
         .await;
 
         assert!(result.is_err());
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[tokio::test]
@@ -1109,7 +1106,7 @@ mod tests {
         let mut app = OrcsApp::builder(ToggleResolver {
             debug: Arc::clone(&flag),
         })
-        .with_sandbox(test_sandbox())
+        .with_sandbox(test_policy())
         .build()
         .await
         .expect("builder should succeed with ToggleResolver");

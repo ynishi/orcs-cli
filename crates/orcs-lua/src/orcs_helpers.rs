@@ -478,14 +478,14 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
+    fn test_policy() -> Arc<dyn orcs_runtime::sandbox::SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
     #[test]
     fn register_base_functions() {
         let lua = Lua::new();
-        let result = register_base_orcs_functions(&lua, test_sandbox());
+        let result = register_base_orcs_functions(&lua, test_policy());
         assert!(result.is_ok());
 
         // Verify orcs table exists
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn register_is_idempotent() {
         let lua = Lua::new();
-        let sb = test_sandbox();
+        let sb = test_policy();
 
         // Register twice
         register_base_orcs_functions(&lua, Arc::clone(&sb))
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn log_function_works() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for log test");
 
         // Should not panic
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn exec_denied_without_context() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for exec denied test");
 
         let result: mlua::Table = lua
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn json_parse_object() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for json_parse object test");
 
         let result: Table = lua
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn json_parse_array() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for json_parse array test");
 
         let result: Table = lua
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn json_parse_invalid_returns_error() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for json_parse invalid test");
 
         let result = lua
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn json_encode_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for json_encode test");
 
         let result: String = lua
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn json_roundtrip() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for json roundtrip test");
 
         let result: String = lua
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn toml_parse_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for toml_parse table test");
 
         let result: Table = lua
@@ -719,7 +719,7 @@ debug = true
     #[test]
     fn toml_parse_array() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for toml_parse array test");
 
         let result: Table = lua
@@ -756,7 +756,7 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn toml_parse_invalid_returns_error() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for toml_parse invalid test");
 
         let result = lua
@@ -768,7 +768,7 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn toml_encode_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for toml_encode test");
 
         let result: String = lua
@@ -782,7 +782,7 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn git_info_returns_table() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox()).expect("register should succeed");
+        register_base_orcs_functions(&lua, test_policy()).expect("register should succeed");
 
         let result: Table = lua
             .load("return orcs.git_info()")
@@ -812,7 +812,7 @@ activate = ["rust-dev", "git-workflow"]
     #[test]
     fn toml_roundtrip() {
         let lua = Lua::new();
-        register_base_orcs_functions(&lua, test_sandbox())
+        register_base_orcs_functions(&lua, test_policy())
             .expect("should register base functions for toml roundtrip test");
 
         let result: String = lua

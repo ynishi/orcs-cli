@@ -795,7 +795,7 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    fn test_policy() -> Arc<dyn SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn run_inline_scenario_pass() {
-        let runner = ScenarioRunner::new(test_sandbox());
+        let runner = ScenarioRunner::new(test_policy());
         let result = runner
             .run_inline(
                 r#"
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn run_inline_scenario_with_failure() {
-        let runner = ScenarioRunner::new(test_sandbox());
+        let runner = ScenarioRunner::new(test_policy());
         let result = runner
             .run_inline(
                 r#"
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn run_inline_veto_scenario() {
-        let runner = ScenarioRunner::new(test_sandbox());
+        let runner = ScenarioRunner::new(test_policy());
         let result = runner
             .run_inline(
                 r#"
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn run_inline_embedded_component() {
-        let runner = ScenarioRunner::new(test_sandbox());
+        let runner = ScenarioRunner::new(test_policy());
         let result = runner
             .run_inline(
                 r#"
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn fresh_harness_per_scenario() {
-        let runner = ScenarioRunner::new(test_sandbox());
+        let runner = ScenarioRunner::new(test_policy());
         let result = runner
             .run_inline(
                 r#"

@@ -1076,19 +1076,20 @@ pub(crate) fn wrap_tools_with_hooks(lua: &Lua) -> Result<(), LuaError> {
 mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
+    use orcs_runtime::WorkDir;
     use std::fs;
     use std::path::PathBuf;
 
     /// Creates a ProjectSandbox backed by a temp dir.
-    /// Returns (TempDir, PathBuf, Sandbox). TempDir must be held alive for the test duration.
-    fn test_sandbox() -> (tempfile::TempDir, PathBuf, Arc<dyn SandboxPolicy>) {
-        let td = tempfile::tempdir().expect("should create temp directory");
-        let root = td
+    /// Returns (WorkDir, PathBuf, Sandbox). WorkDir must be held alive for the test duration.
+    fn test_sandbox() -> (WorkDir, PathBuf, Arc<dyn SandboxPolicy>) {
+        let wd = WorkDir::temporary().expect("should create temporary work directory");
+        let root = wd
             .path()
             .canonicalize()
-            .expect("should canonicalize temp dir path");
+            .expect("should canonicalize work dir path");
         let sandbox = ProjectSandbox::new(&root).expect("should create project sandbox");
-        (td, root, Arc::new(sandbox))
+        (wd, root, Arc::new(sandbox))
     }
 
     // ─── tool_read ──────────────────────────────────────────────────
@@ -1609,7 +1610,7 @@ mod tests {
         #[test]
         fn glob_skips_symlink_outside_sandbox() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside = WorkDir::temporary().expect("should create outside temp work dir");
             let outside_canon = outside
                 .path()
                 .canonicalize()
@@ -1630,7 +1631,7 @@ mod tests {
         #[test]
         fn grep_dir_skips_symlink_outside_sandbox() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside = WorkDir::temporary().expect("should create outside temp work dir");
             let outside_canon = outside
                 .path()
                 .canonicalize()
@@ -1653,7 +1654,7 @@ mod tests {
         #[test]
         fn write_via_symlink_escape_rejected() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside = WorkDir::temporary().expect("should create outside temp work dir");
             let outside_canon = outside
                 .path()
                 .canonicalize()
@@ -1676,7 +1677,7 @@ mod tests {
         #[test]
         fn read_via_symlink_escape_rejected() {
             let (_td, root, sandbox) = test_sandbox();
-            let outside = tempfile::tempdir().expect("should create outside temp dir");
+            let outside = WorkDir::temporary().expect("should create outside temp work dir");
             let outside_canon = outside
                 .path()
                 .canonicalize()
@@ -1705,9 +1706,9 @@ mod tests {
         use orcs_hook::{HookPoint, HookRegistry};
         use orcs_types::ComponentId;
 
-        fn setup_lua_with_hooks() -> (Lua, orcs_hook::SharedHookRegistry, tempfile::TempDir) {
-            let td = tempfile::tempdir().expect("should create temp dir for hooks");
-            let root = td
+        fn setup_lua_with_hooks() -> (Lua, orcs_hook::SharedHookRegistry, WorkDir) {
+            let wd = WorkDir::temporary().expect("should create work dir for hooks");
+            let root = wd
                 .path()
                 .canonicalize()
                 .expect("should canonicalize hook test root");
@@ -1731,7 +1732,7 @@ mod tests {
 
             wrap_tools_with_hooks(&lua).expect("should wrap tools with hooks");
 
-            (lua, registry, td)
+            (lua, registry, wd)
         }
 
         #[test]
@@ -2022,8 +2023,8 @@ mod tests {
         #[test]
         fn no_context_tools_work_normally() {
             // Setup WITHOUT ToolHookContext in app_data
-            let td = tempfile::tempdir().expect("should create temp dir");
-            let root = td.path().canonicalize().expect("should canonicalize root");
+            let wd = WorkDir::temporary().expect("should create work dir");
+            let root = wd.path().canonicalize().expect("should canonicalize root");
             let sandbox: Arc<dyn SandboxPolicy> =
                 Arc::new(ProjectSandbox::new(&root).expect("should create sandbox"));
 

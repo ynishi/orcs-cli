@@ -272,7 +272,7 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    fn test_policy() -> Arc<dyn SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn create_lua_returns_working_vm() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua should succeed");
 
         // orcs.* should be available
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn create_lua_has_require() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn create_lua_has_package() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn sandbox_io_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua.load(r#"return type(io)"#).eval().expect("eval");
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn sandbox_loadfile_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua.load(r#"return type(loadfile)"#).eval().expect("eval");
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn sandbox_debug_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua.load(r#"return type(debug)"#).eval().expect("eval");
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn sandbox_cpath_empty() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua.load(r#"return package.cpath"#).eval().expect("eval");
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn sandbox_path_empty() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua.load(r#"return package.path"#).eval().expect("eval");
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn sandbox_os_execute_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn sandbox_os_remove_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn sandbox_dofile_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn sandbox_load_removed() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn sandbox_os_safe_functions_preserved() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn require_nonexistent_errors() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result = lua.load(r#"require("nonexistent_module_xyz")"#).exec();
@@ -622,13 +622,13 @@ mod tests {
 
     #[test]
     fn with_search_paths_batch() {
-        let env = LuaEnv::new(test_sandbox()).with_search_paths(["/a", "/b", "/c"]);
+        let env = LuaEnv::new(test_policy()).with_search_paths(["/a", "/b", "/c"]);
         assert_eq!(env.search_paths().len(), 3);
     }
 
     #[test]
     fn search_paths_empty_by_default() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         assert!(env.search_paths().is_empty());
     }
 
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn orcs_log_works() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         lua.load(r#"orcs.log("info", "hello from LuaEnv")"#)
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn orcs_pwd_works() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: String = lua
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn orcs_json_parse_works() {
-        let env = LuaEnv::new(test_sandbox());
+        let env = LuaEnv::new(test_policy());
         let lua = env.create_lua().expect("create_lua");
 
         let result: i64 = lua

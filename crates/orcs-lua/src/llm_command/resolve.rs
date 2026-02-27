@@ -663,19 +663,12 @@ mod tests {
     #[test]
     fn dispatch_intents_serializes_internal_tool_result() {
         use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use orcs_runtime::WorkDir;
         use std::sync::Arc;
 
         // Create sandbox
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-dispatch-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let dir = dir.canonicalize().expect("canonicalize");
+        let wd = WorkDir::temporary().expect("create temp work dir");
+        let dir = wd.path().canonicalize().expect("canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
         let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
 
@@ -967,19 +960,12 @@ mod tests {
     #[test]
     fn dispatch_intents_multiple_intents_returns_multiple_tool_results() {
         use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+        use orcs_runtime::WorkDir;
         use std::sync::Arc;
 
         // Create sandbox with a test file for Internal tool (read)
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-multi-intent-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let dir = dir.canonicalize().expect("canonicalize");
+        let wd = WorkDir::temporary().expect("create temp work dir");
+        let dir = wd.path().canonicalize().expect("canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
         let sandbox: Arc<dyn SandboxPolicy> = Arc::new(sandbox);
 

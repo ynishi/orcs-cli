@@ -11,7 +11,7 @@ use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -139,7 +139,7 @@ mod status {
 
     #[test]
     fn initial_status_returns_idle() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         let result = harness
@@ -160,7 +160,7 @@ mod status {
 
     #[test]
     fn status_reflects_processing_state() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // Process a message
@@ -188,7 +188,7 @@ mod status {
 
     #[test]
     fn turn_count_increments_per_process() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         for i in 1..=3 {
@@ -219,7 +219,7 @@ mod busy_guard {
 
     #[test]
     fn empty_message_is_accepted_regardless() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // Empty message should return success without setting busy
@@ -255,7 +255,7 @@ mod pcall_safety {
 
     #[test]
     fn busy_resets_after_lua_error() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // Trigger a Lua error during processing
@@ -284,7 +284,7 @@ mod pcall_safety {
 
     #[test]
     fn processing_resumes_after_error() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // First: trigger error
@@ -319,7 +319,7 @@ mod tracking {
 
     #[test]
     fn tracking_preserves_provider_when_config_absent() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // First call: set provider/model via config
@@ -353,7 +353,7 @@ mod tracking {
 
     #[test]
     fn tracking_updates_when_config_present() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // First call with one provider
@@ -392,7 +392,7 @@ mod unknown_ops {
 
     #[test]
     fn unknown_operation_returns_error() {
-        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         let result = harness.request(ext_cat(), "nonexistent", json!({}));

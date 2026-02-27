@@ -1233,10 +1233,10 @@ mod tests {
     #[tokio::test]
     async fn snapshots_persist_via_store_after_graceful_shutdown() {
         use crate::session::{LocalFileStore, SessionAsset, SessionStore};
-        use tempfile::TempDir;
+        use crate::WorkDir;
 
-        let temp_dir = TempDir::new().expect("create temp dir");
-        let store = LocalFileStore::new(temp_dir.path().to_path_buf()).expect("create store");
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for store test");
+        let store = LocalFileStore::new(wd.path().to_path_buf()).expect("create store");
 
         let (world, io) = test_world();
         let mut engine = OrcsEngine::new(world, io);

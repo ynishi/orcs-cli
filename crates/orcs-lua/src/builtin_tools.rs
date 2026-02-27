@@ -279,24 +279,16 @@ mod tests {
     use super::*;
     use orcs_component::tool::ToolContext;
     use orcs_runtime::sandbox::ProjectSandbox;
-    use std::path::PathBuf;
+    use orcs_runtime::WorkDir;
 
-    fn test_sandbox() -> (PathBuf, Arc<dyn orcs_runtime::sandbox::SandboxPolicy>) {
-        let dir = std::env::temp_dir().join(format!(
-            "orcs-builtin-tools-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("should create temp dir");
+    fn test_sandbox() -> (WorkDir, Arc<dyn orcs_runtime::sandbox::SandboxPolicy>) {
+        let wd = WorkDir::temporary().expect("should create temp work dir");
+        let dir = wd
+            .path()
+            .canonicalize()
+            .expect("should canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("should create sandbox");
-        (dir, Arc::new(sandbox))
-    }
-
-    fn cleanup(dir: &std::path::Path) {
-        let _ = std::fs::remove_dir_all(dir);
+        (wd, Arc::new(sandbox))
     }
 
     // ── Identity tests ──────────────────────────────────────────
@@ -385,8 +377,8 @@ mod tests {
 
     #[test]
     fn read_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
-        let file_path = dir.join("hello.txt");
+        let (wd, sandbox) = test_sandbox();
+        let file_path = wd.path().join("hello.txt");
         std::fs::write(&file_path, "hello world").expect("should write test file");
 
         let tool = ReadTool;
@@ -397,12 +389,11 @@ mod tests {
 
         assert_eq!(result["content"], "hello world");
         assert_eq!(result["size"], 11);
-        cleanup(&dir);
     }
 
     #[test]
     fn read_tool_missing_file() {
-        let (dir, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let tool = ReadTool;
         let ctx = ToolContext::new(sandbox.as_ref());
 
@@ -413,12 +404,11 @@ mod tests {
             !err.message().is_empty(),
             "error message should not be empty"
         );
-        cleanup(&dir);
     }
 
     #[test]
     fn read_tool_missing_arg() {
-        let (dir, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let tool = ReadTool;
         let ctx = ToolContext::new(sandbox.as_ref());
 
@@ -430,12 +420,11 @@ mod tests {
             "error should mention 'path', got: {}",
             err.message()
         );
-        cleanup(&dir);
     }
 
     #[test]
     fn write_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
+        let (wd, sandbox) = test_sandbox();
         let tool = WriteTool;
         let ctx = ToolContext::new(sandbox.as_ref());
 
@@ -446,15 +435,14 @@ mod tests {
         assert_eq!(result["bytes_written"], 7);
 
         let content =
-            std::fs::read_to_string(dir.join("out.txt")).expect("should read written file");
+            std::fs::read_to_string(wd.path().join("out.txt")).expect("should read written file");
         assert_eq!(content, "written");
-        cleanup(&dir);
     }
 
     #[test]
     fn grep_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
-        std::fs::write(dir.join("data.txt"), "foo\nbar\nfoo bar\n")
+        let (wd, sandbox) = test_sandbox();
+        std::fs::write(wd.path().join("data.txt"), "foo\nbar\nfoo bar\n")
             .expect("should write test file");
 
         let tool = GrepTool;
@@ -464,15 +452,14 @@ mod tests {
             .expect("grep should succeed");
 
         assert_eq!(result["count"], 2);
-        cleanup(&dir);
     }
 
     #[test]
     fn glob_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
-        std::fs::write(dir.join("a.rs"), "").expect("should write a.rs");
-        std::fs::write(dir.join("b.rs"), "").expect("should write b.rs");
-        std::fs::write(dir.join("c.txt"), "").expect("should write c.txt");
+        let (wd, sandbox) = test_sandbox();
+        std::fs::write(wd.path().join("a.rs"), "").expect("should write a.rs");
+        std::fs::write(wd.path().join("b.rs"), "").expect("should write b.rs");
+        std::fs::write(wd.path().join("c.txt"), "").expect("should write c.txt");
 
         let tool = GlobTool;
         let ctx = ToolContext::new(sandbox.as_ref());
@@ -481,26 +468,24 @@ mod tests {
             .expect("glob should succeed");
 
         assert_eq!(result["count"], 2);
-        cleanup(&dir);
     }
 
     #[test]
     fn mkdir_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
+        let (wd, sandbox) = test_sandbox();
         let tool = MkdirTool;
         let ctx = ToolContext::new(sandbox.as_ref());
 
         tool.execute(json!({"path": "sub/nested"}), &ctx)
             .expect("mkdir should succeed");
 
-        assert!(dir.join("sub/nested").is_dir());
-        cleanup(&dir);
+        assert!(wd.path().join("sub/nested").is_dir());
     }
 
     #[test]
     fn remove_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
-        let file_path = dir.join("to_remove.txt");
+        let (wd, sandbox) = test_sandbox();
+        let file_path = wd.path().join("to_remove.txt");
         std::fs::write(&file_path, "delete me").expect("should write file");
 
         let tool = RemoveTool;
@@ -509,24 +494,22 @@ mod tests {
             .expect("remove should succeed");
 
         assert!(!file_path.exists());
-        cleanup(&dir);
     }
 
     #[test]
     fn mv_tool_execute() {
-        let (dir, sandbox) = test_sandbox();
-        std::fs::write(dir.join("src.txt"), "moved").expect("should write src file");
+        let (wd, sandbox) = test_sandbox();
+        std::fs::write(wd.path().join("src.txt"), "moved").expect("should write src file");
 
         let tool = MvTool;
         let ctx = ToolContext::new(sandbox.as_ref());
         tool.execute(json!({"src": "src.txt", "dst": "dst.txt"}), &ctx)
             .expect("mv should succeed");
 
-        assert!(!dir.join("src.txt").exists());
+        assert!(!wd.path().join("src.txt").exists());
         assert_eq!(
-            std::fs::read_to_string(dir.join("dst.txt")).expect("should read dst"),
+            std::fs::read_to_string(wd.path().join("dst.txt")).expect("should read dst"),
             "moved"
         );
-        cleanup(&dir);
     }
 }

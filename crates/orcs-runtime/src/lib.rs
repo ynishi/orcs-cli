@@ -111,6 +111,7 @@ pub mod engine;
 pub mod io;
 pub mod sandbox;
 pub mod session;
+pub mod work_dir;
 
 // Re-exports for convenience
 pub use auth::{
@@ -149,3 +150,4 @@ pub use session::{
 
 // Re-export Principal from orcs_types (it's part of the public API)
 pub use orcs_types::Principal;
+pub use work_dir::WorkDir;

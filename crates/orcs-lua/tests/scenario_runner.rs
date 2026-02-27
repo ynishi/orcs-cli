@@ -11,12 +11,12 @@ use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use std::path::Path;
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
 fn runner() -> ScenarioRunner {
-    ScenarioRunner::new(test_sandbox())
+    ScenarioRunner::new(test_policy())
 }
 
 fn scenarios_dir() -> std::path::PathBuf {

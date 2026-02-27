@@ -10,7 +10,7 @@ use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -144,7 +144,7 @@ fn mock_skills() -> serde_json::Value {
 }
 
 fn setup_harness(placement: &str) -> (LuaTestHarness, Arc<std::sync::Mutex<Vec<String>>>) {
-    let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_sandbox())
+    let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
         .expect("should load prompt-assembler script");
     harness.init().expect("init should succeed");
 
@@ -303,7 +303,7 @@ mod placement {
     #[test]
     fn default_is_both() {
         // Omit prompt_placement entirely → defaults to "both"
-        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
 
@@ -343,7 +343,7 @@ mod edge_cases {
 
     #[test]
     fn no_skills_no_tools_message_only() {
-        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
 
@@ -379,7 +379,7 @@ mod edge_cases {
 
     #[test]
     fn empty_history_omits_history_section() {
-        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
 
@@ -408,7 +408,7 @@ mod edge_cases {
 
     #[test]
     fn llm_mock_returns_configured_response() {
-        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
 

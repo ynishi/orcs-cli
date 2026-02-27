@@ -94,3 +94,6 @@ pub use orcs_runtime::{
 
 // Re-export sandbox types
 pub use orcs_runtime::{ProjectSandbox, SandboxError, SandboxPolicy};
+
+// Re-export work directory type
+pub use orcs_runtime::WorkDir;

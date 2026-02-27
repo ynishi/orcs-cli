@@ -72,6 +72,55 @@ pub fn orcs_cmd_with_builtins(dir: &str) -> assert_cmd::Command {
     cmd
 }
 
+/// Dump stdout/stderr to a directory for post-mortem debugging.
+///
+/// By default, output is written to a [`tempfile::TempDir`] that is
+/// automatically cleaned up when the returned guard is dropped.
+///
+/// Set `ORCS_TEST_DUMP_DIR` to a path to persist dumps there instead:
+///
+/// ```sh
+/// ORCS_TEST_DUMP_DIR=/tmp/orcs-debug cargo test -- dispatch_llm
+/// ```
+///
+/// Returns a guard that keeps the dump directory alive.  Bind it to `_guard`
+/// in the caller so the directory survives until the test function ends.
+pub fn dump_test_output(label: &str, stdout: &str, stderr: &str) -> DumpGuard {
+    let (dir_path, _guard) = match std::env::var("ORCS_TEST_DUMP_DIR") {
+        Ok(base) => {
+            let dir = std::path::PathBuf::from(base).join(label);
+            std::fs::create_dir_all(&dir).expect("create persistent dump dir");
+            (dir, None)
+        }
+        Err(_) => {
+            let td = tempfile::tempdir().expect("create temp dump dir");
+            let dir = td.path().to_path_buf();
+            (dir, Some(td))
+        }
+    };
+
+    std::fs::write(dir_path.join("stdout.txt"), stdout.as_bytes()).expect("write stdout dump");
+    std::fs::write(dir_path.join("stderr.txt"), stderr.as_bytes()).expect("write stderr dump");
+
+    eprintln!("dump_dir={}", dir_path.display());
+
+    DumpGuard {
+        _guard,
+        path: dir_path,
+    }
+}
+
+/// RAII guard that keeps a temporary dump directory alive.
+///
+/// When `ORCS_TEST_DUMP_DIR` is set, `_guard` is `None` and the directory
+/// persists after the test.  Otherwise the [`tempfile::TempDir`] inside
+/// `_guard` deletes the directory on drop.
+pub struct DumpGuard {
+    _guard: Option<tempfile::TempDir>,
+    #[allow(dead_code)]
+    path: std::path::PathBuf,
+}
+
 /// Extract session ID from stdout containing "Session saved: <UUID>".
 pub fn extract_session_id(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
@@ -117,7 +166,7 @@ pub fn spawn_and_wait_for(
 
     let bin = assert_cmd::cargo::cargo_bin!("orcs");
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = Command::new(bin);
     cmd.arg("--sandbox").arg(sandbox_dir).args(extra_args);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -166,6 +215,7 @@ pub fn spawn_and_wait_for(
 
     let stdout = stdout_thread.join().expect("join stdout thread");
     let stderr = stderr_thread.join().expect("join stderr thread");
+    let _ = child.wait();
 
     assert!(
         found && stdout.contains(gate),

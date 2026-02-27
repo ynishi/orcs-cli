@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -63,7 +63,7 @@ mod read {
             "#,
             file_path
         );
-        LuaTestHarness::from_script(&script, test_sandbox())
+        LuaTestHarness::from_script(&script, test_policy())
             .expect("should create read test harness from script")
     }
 
@@ -140,7 +140,7 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
@@ -174,7 +174,7 @@ mod write {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create subdir write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
@@ -226,7 +226,7 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create grep test harness");
         let result = h
             .request(EventCategory::Echo, "grep", json!(null))
@@ -259,7 +259,7 @@ mod grep {
             path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create regex grep test harness");
         let result = h
             .request(EventCategory::Echo, "grep", json!(null))
@@ -296,7 +296,7 @@ mod glob {
             dir_path
         );
 
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create glob test harness");
         let result = h
             .request(EventCategory::Echo, "glob", json!(null))
@@ -319,7 +319,7 @@ mod glob {
             }
         "#;
 
-        let mut h = LuaTestHarness::from_script(script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(script, test_policy())
             .expect("should create glob cwd test harness");
         let result = h
             .request(EventCategory::Echo, "glob", json!(null))
@@ -358,7 +358,7 @@ fn write_read_roundtrip() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+    let mut h = LuaTestHarness::from_script(&script, test_policy())
         .expect("should create roundtrip test harness");
     let result = h
         .request(EventCategory::Echo, "test", json!(null))
@@ -390,7 +390,7 @@ fn write_then_grep() {
         path = path
     );
 
-    let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+    let mut h = LuaTestHarness::from_script(&script, test_policy())
         .expect("should create write-then-grep test harness");
     let result = h
         .request(EventCategory::Echo, "test", json!(null))
@@ -496,7 +496,7 @@ mod capability_gating {
         fs::write(&file, "cap-gated content").expect("should write capability test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create capability read test harness");
 
         // Set ChildContext with READ capability
@@ -518,7 +518,7 @@ mod capability_gating {
         fs::write(&file, "should not read").expect("should write deny-read test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create deny-read test harness");
 
         // Set ChildContext with WRITE only (no READ)
@@ -544,7 +544,7 @@ mod capability_gating {
         let file = dir.join("cap_write_deny.txt");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create deny-write test harness");
 
         // Set ChildContext with READ only (no WRITE)
@@ -573,7 +573,7 @@ mod capability_gating {
         fs::write(&file, "should survive").expect("should write deny-delete test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create deny-delete test harness");
 
         // Set ChildContext with READ | WRITE (no DELETE)
@@ -605,7 +605,7 @@ mod capability_gating {
         fs::write(&file, "sandbox only").expect("should write sandbox-only test file");
 
         let script = cap_test_script(&escape_path(&file));
-        let mut h = LuaTestHarness::from_script(&script, test_sandbox())
+        let mut h = LuaTestHarness::from_script(&script, test_policy())
             .expect("should create sandbox-only test harness");
 
         // No set_child_context — base tools active
