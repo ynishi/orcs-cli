@@ -55,7 +55,7 @@ pub(crate) mod retry;
 mod session;
 
 use mlua::{Lua, Table};
-use orcs_types::intent::StopReason;
+use orcs_types::intent::{ContentBlock, MessageContent, StopReason};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -574,8 +574,33 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 assistant_blocks,
             );
 
-            // Dispatch each intent and collect tool results
-            let tool_result_content = dispatch_intents_to_results(lua, &parsed_resp.intents)?;
+            // Dispatch each intent and collect tool results.
+            // On error, synthesize error tool_results so the session stays
+            // consistent (every tool_use has a matching tool_result). Without
+            // this guard, a dispatch failure leaves orphan tool_use blocks
+            // that cause API 400 errors on session resume.
+            let tool_result_content = match dispatch_intents_to_results(lua, &parsed_resp.intents) {
+                Ok(content) => content,
+                Err(e) => {
+                    let error_blocks: Vec<ContentBlock> = parsed_resp
+                        .intents
+                        .iter()
+                        .map(|intent| ContentBlock::ToolResult {
+                            tool_use_id: intent.id.clone(),
+                            content: format!("dispatch error: {e}"),
+                            is_error: Some(true),
+                        })
+                        .collect();
+                    let fallback = MessageContent::Blocks(error_blocks);
+                    // Persist error results so session remains valid
+                    messages.push(session::Message {
+                        role: orcs_types::intent::Role::User,
+                        content: fallback.clone(),
+                    });
+                    append_message(lua, &session_id, orcs_types::intent::Role::User, fallback);
+                    return Err(e);
+                }
+            };
             messages.push(session::Message {
                 role: orcs_types::intent::Role::User,
                 content: tool_result_content.clone(),
