@@ -403,6 +403,24 @@ impl Emitter for EventEmitter {
         })
     }
 
+    fn is_alive(&self, target_fqn: &str) -> bool {
+        let Some(map) = self.component_channel_map.as_ref() else {
+            return false;
+        };
+        let Some(handles) = self.shared_handles.as_ref() else {
+            return false;
+        };
+
+        let Some(channel_id) = super::rpc::resolve_fqn(map, target_fqn) else {
+            return false;
+        };
+
+        handles
+            .read()
+            .get(&channel_id)
+            .is_some_and(|h| h.is_alive())
+    }
+
     fn clone_box(&self) -> Box<dyn Emitter> {
         Box::new(self.clone())
     }
@@ -795,5 +813,104 @@ mod tests {
         assert_eq!(b.len(), 1, "Board should have exactly 1 entry");
         let entries = b.recent(1);
         assert_eq!(entries[0].payload["message"], "Board + IO test");
+    }
+
+    // === is_alive tests ===
+
+    fn setup_with_rpc_wiring() -> (
+        EventEmitter,
+        ChannelId,
+        tokio::sync::mpsc::Receiver<crate::channel::runner::base::InboundEvent>,
+    ) {
+        use crate::channel::runner::base::ChannelHandle;
+        use crate::engine::{SharedChannelHandles, SharedComponentChannelMap};
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let (channel_tx, _channel_rx) = OutputSender::channel(64);
+        let (signal_tx, _signal_rx) = broadcast::channel(64);
+        let source_id = ComponentId::builtin("test-is-alive");
+
+        let target_channel = ChannelId::new();
+        let (target_tx, target_rx) = tokio::sync::mpsc::channel(32);
+
+        let mut handles_map = HashMap::new();
+        handles_map.insert(
+            target_channel,
+            ChannelHandle::new(target_channel, target_tx),
+        );
+        let shared_handles: SharedChannelHandles = Arc::new(RwLock::new(handles_map));
+
+        let mut comp_map = HashMap::new();
+        comp_map.insert("ns::target_comp".to_string(), target_channel);
+        let shared_comp_map: SharedComponentChannelMap = Arc::new(RwLock::new(comp_map));
+
+        let emitter = EventEmitter::new(channel_tx, signal_tx, source_id)
+            .with_shared_handles(shared_handles)
+            .with_component_channel_map(shared_comp_map, ChannelId::new());
+
+        (emitter, target_channel, target_rx)
+    }
+
+    #[test]
+    fn is_alive_returns_true_when_runner_active() {
+        let (emitter, _ch, _rx) = setup_with_rpc_wiring();
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+
+        // Receiver is alive (held by _rx)
+        assert!(
+            boxed.is_alive("ns::target_comp"),
+            "should return true when target runner is alive"
+        );
+    }
+
+    #[test]
+    fn is_alive_returns_false_after_receiver_dropped() {
+        let (emitter, _ch, rx) = setup_with_rpc_wiring();
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+
+        // Drop the receiver to simulate runner termination
+        drop(rx);
+
+        assert!(
+            !boxed.is_alive("ns::target_comp"),
+            "should return false after target receiver is dropped"
+        );
+    }
+
+    #[test]
+    fn is_alive_returns_true_with_short_name() {
+        let (emitter, _ch, _rx) = setup_with_rpc_wiring();
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+
+        // Short-name fallback: "target_comp" should resolve to "ns::target_comp"
+        assert!(
+            boxed.is_alive("target_comp"),
+            "should resolve short name via suffix matching"
+        );
+    }
+
+    #[test]
+    fn is_alive_returns_false_for_unknown_fqn() {
+        let (emitter, _ch, _rx) = setup_with_rpc_wiring();
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+
+        assert!(
+            !boxed.is_alive("ns::nonexistent"),
+            "should return false for unknown FQN"
+        );
+    }
+
+    #[test]
+    fn is_alive_returns_false_without_wiring() {
+        // Emitter without shared_handles / component_channel_map
+        let (emitter, _channel_rx, _signal_rx) = setup();
+        let boxed: Box<dyn Emitter> = Box::new(emitter);
+
+        assert!(
+            !boxed.is_alive("anything"),
+            "should return false when no RPC wiring is configured"
+        );
     }
 }

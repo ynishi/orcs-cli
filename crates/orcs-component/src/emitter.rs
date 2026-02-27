@@ -106,6 +106,23 @@ pub trait Emitter: Send + Sync + Debug {
         Err("request not supported".into())
     }
 
+    /// Checks whether a target Component is alive (its runner is still running).
+    ///
+    /// Uses the EventBus channel handle to determine liveness without sending
+    /// a request. This is a best-effort check — the component may die
+    /// immediately after returning `true` (TOCTOU inherent in concurrent systems).
+    ///
+    /// # Arguments
+    ///
+    /// * `target_fqn` - Fully qualified name or short name of the target Component
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `false` (no runtime wiring available).
+    fn is_alive(&self, _target_fqn: &str) -> bool {
+        false
+    }
+
     /// Clones the emitter into a boxed trait object.
     ///
     /// This allows storing the emitter in the Component.

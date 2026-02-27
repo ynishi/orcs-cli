@@ -30,6 +30,27 @@ pub(super) struct RpcParams<'a> {
     pub timeout_ms: u64,
 }
 
+/// Resolves a target FQN to a [`ChannelId`] using exact match first,
+/// then short-name fallback (suffix matching `"::{name}"`).
+///
+/// Returns `None` when the FQN is not found or is ambiguous.
+/// This is the single source of truth for FQN resolution — used by both
+/// [`resolve_and_send_rpc`] and [`EventEmitter::is_alive`](super::EventEmitter).
+pub(super) fn resolve_fqn(map: &SharedComponentChannelMap, target_fqn: &str) -> Option<ChannelId> {
+    let m = map.read();
+    if let Some(&id) = m.get(target_fqn) {
+        return Some(id);
+    }
+    if !target_fqn.contains("::") {
+        let suffix = format!("::{target_fqn}");
+        let matches: Vec<_> = m.iter().filter(|(k, _)| k.ends_with(&suffix)).collect();
+        if matches.len() == 1 {
+            return Some(*matches[0].1);
+        }
+    }
+    None
+}
+
 /// Resolves a target FQN to a ChannelHandle and sends an RPC request.
 ///
 /// This is the async core shared by `EventEmitter::request()` and
@@ -48,29 +69,8 @@ pub(super) async fn resolve_and_send_rpc(params: RpcParams<'_>) -> Result<Value,
     } = params;
 
     // Resolve FQN → ChannelId (with short-name fallback)
-    let channel_id = {
-        let m = component_channel_map.read();
-        if let Some(&id) = m.get(target_fqn) {
-            id
-        } else if !target_fqn.contains("::") {
-            // Short-name fallback: find key ending with "::<target>"
-            let suffix = format!("::{target_fqn}");
-            let matches: Vec<_> = m.iter().filter(|(k, _)| k.ends_with(&suffix)).collect();
-            match matches.len() {
-                0 => return Err(format!("component not found: {target_fqn}")),
-                1 => *matches[0].1,
-                _ => {
-                    let names: Vec<&str> = matches.iter().map(|(k, _)| k.as_str()).collect();
-                    return Err(format!(
-                        "ambiguous component name '{target_fqn}', matches: {}",
-                        names.join(", ")
-                    ));
-                }
-            }
-        } else {
-            return Err(format!("component not found: {target_fqn}"));
-        }
-    };
+    let channel_id = resolve_fqn(component_channel_map, target_fqn)
+        .ok_or_else(|| format!("component not found: {target_fqn}"))?;
 
     // Get ChannelHandle
     let handle = {

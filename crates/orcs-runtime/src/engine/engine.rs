@@ -48,7 +48,7 @@ use orcs_types::{ChannelId, ComponentId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 /// Signal broadcast channel buffer size.
@@ -59,6 +59,16 @@ const SIGNAL_BUFFER_SIZE: usize = 256;
 
 /// Timeout for waiting on each runner task during graceful shutdown.
 const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Notification sent by a runner wrapper when the runner exits.
+///
+/// The monitor task receives these to detect unexpected runner terminations
+/// during normal operation (before Veto/shutdown).
+#[derive(Debug)]
+struct RunnerExitNotice {
+    channel_id: ChannelId,
+    component_fqn: String,
+}
 
 /// OrcsEngine - Main runtime for ORCS CLI.
 ///
@@ -135,6 +145,12 @@ pub struct OrcsEngine {
     hook_registry: Option<SharedHookRegistry>,
     /// Shared MCP client manager (injected into all spawned runners).
     mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
+    /// Sender for runner exit notifications (cloned into each runner wrapper task).
+    runner_exit_tx: mpsc::UnboundedSender<RunnerExitNotice>,
+    /// Receiver for runner exit notifications (taken by the monitor task on start).
+    runner_exit_rx: Option<mpsc::UnboundedReceiver<RunnerExitNotice>>,
+    /// Background monitor task that detects unexpected runner terminations.
+    monitor_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl OrcsEngine {
@@ -169,6 +185,9 @@ impl OrcsEngine {
         // Start WorldManager task
         let manager_task = tokio::spawn(manager.run());
 
+        // Runner exit notification channel for the monitor task.
+        let (runner_exit_tx, runner_exit_rx) = mpsc::unbounded_channel();
+
         info!(
             "OrcsEngine created with IO channel {} (WorldManager started)",
             io_channel
@@ -188,6 +207,9 @@ impl OrcsEngine {
             board: board::shared_board(),
             hook_registry: None,
             mcp_manager: None,
+            runner_exit_tx,
+            runner_exit_rx: Some(runner_exit_rx),
+            monitor_task: None,
         }
     }
 
@@ -250,7 +272,19 @@ impl OrcsEngine {
         self.eventbus
             .register_component_channel(component_id, channel_id);
         self.channel_handles.insert(channel_id, handle.clone());
-        let runner_task = tokio::spawn(runner.run());
+
+        // Wrap the runner task to send an exit notification to the monitor.
+        let exit_tx = self.runner_exit_tx.clone();
+        let fqn = component_id.fqn().to_string();
+        let runner_task = tokio::spawn(async move {
+            let result = runner.run().await;
+            // Notify monitor — ignore send error (monitor may be stopped during shutdown).
+            let _ = exit_tx.send(RunnerExitNotice {
+                channel_id,
+                component_fqn: fqn,
+            });
+            result
+        });
         self.runner_tasks.insert(channel_id, runner_task);
         handle
     }
@@ -787,13 +821,66 @@ impl OrcsEngine {
         self.running
     }
 
-    /// Start the engine (set running flag).
+    /// Start the engine (set running flag) and spawn the runner monitor.
     ///
     /// Use this when you need to start the engine without entering the run loop,
     /// for example in interactive mode where you control the polling yourself.
     pub fn start(&mut self) {
         self.running = true;
+        self.start_runner_monitor();
         info!("OrcsEngine started");
+    }
+
+    /// Spawns the background runner monitor task.
+    ///
+    /// The monitor receives [`RunnerExitNotice`] messages from wrapper tasks
+    /// and logs unexpected runner terminations during normal operation.
+    fn start_runner_monitor(&mut self) {
+        if self.monitor_task.is_some() {
+            return;
+        }
+        let Some(mut exit_rx) = self.runner_exit_rx.take() else {
+            warn!("Runner monitor already started (exit_rx already taken)");
+            return;
+        };
+
+        let shared_handles = self.eventbus.shared_handles();
+        let task = tokio::spawn(async move {
+            while let Some(notice) = exit_rx.recv().await {
+                warn!(
+                    channel = %notice.channel_id,
+                    component = %notice.component_fqn,
+                    "Runner exited unexpectedly during normal operation"
+                );
+
+                // Broadcast Lifecycle event so Lua components can react.
+                let event = crate::channel::Event {
+                    category: orcs_event::EventCategory::Lifecycle,
+                    operation: "runner_exited".into(),
+                    source: orcs_types::ComponentId::builtin("engine"),
+                    payload: serde_json::json!({
+                        "channel_id": notice.channel_id.to_string(),
+                        "component_fqn": notice.component_fqn,
+                    }),
+                };
+                let handles = shared_handles.read();
+                let mut delivered = 0usize;
+                for handle in handles.values() {
+                    if handle.try_inject(event.clone()).is_ok() {
+                        delivered += 1;
+                    }
+                }
+                debug!(
+                    channel = %notice.channel_id,
+                    component = %notice.component_fqn,
+                    delivered,
+                    "Lifecycle::runner_exited event broadcast"
+                );
+            }
+            debug!("Runner monitor stopped (all exit senders dropped)");
+        });
+        self.monitor_task = Some(task);
+        debug!("Runner monitor task spawned");
     }
 
     /// Stop the engine by sending a Veto signal.
@@ -888,6 +975,7 @@ impl OrcsEngine {
     ///
     /// # Shutdown Order
     ///
+    /// 0. Abort runner monitor (suppress spurious WARN during normal shutdown).
     /// 1. Await all runner tasks with timeout (Veto already broadcast).
     ///    Runners execute their shutdown sequence (snapshot → shutdown)
     ///    and return [`RunnerResult`] with captured snapshots.
@@ -896,6 +984,12 @@ impl OrcsEngine {
     ///    so WorldManager must stay alive until runners complete).
     /// 4. Unregister channel handles and clean up.
     async fn shutdown_parallel(&mut self) {
+        // 0. Abort runner monitor before awaiting runners to suppress
+        //    spurious "exited unexpectedly" warnings during normal shutdown.
+        if let Some(task) = self.monitor_task.take() {
+            task.abort();
+            debug!("Runner monitor aborted for shutdown");
+        }
         // 1. Await all runner tasks in parallel with per-runner timeout.
         //    Each runner is wrapped in a tokio task that applies the timeout
         //    and aborts on expiry. All wrappers run concurrently, so total

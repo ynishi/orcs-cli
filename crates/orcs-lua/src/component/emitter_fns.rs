@@ -6,6 +6,7 @@
 //! - `orcs.emit_event(category, operation, payload)` — broadcast Extension event
 //! - `orcs.board_recent(n)` — query shared Board
 //! - `orcs.request(target, operation, payload, opts?)` — Component-to-Component RPC
+//! - `orcs.is_alive(fqn)` — check if a target Component's runner is alive
 
 use crate::error::LuaError;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
@@ -101,8 +102,15 @@ pub(super) fn register(lua: &Lua, emitter: Arc<Mutex<Box<dyn Emitter>>>) -> Resu
         )?;
     orcs_table.set("request", request_fn)?;
 
+    // orcs.is_alive(fqn) -> bool
+    // Non-blocking liveness check via channel handle (no RPC roundtrip).
+    let emitter_clone6 = Arc::clone(&emitter);
+    let is_alive_fn =
+        lua.create_function(move |_, fqn: String| Ok(emitter_clone6.lock().is_alive(&fqn)))?;
+    orcs_table.set("is_alive", is_alive_fn)?;
+
     tracing::debug!(
-        "Registered orcs.output, orcs.emit_event, orcs.board_recent, and orcs.request functions with emitter"
+        "Registered orcs.output, orcs.emit_event, orcs.board_recent, orcs.request, and orcs.is_alive functions with emitter"
     );
     Ok(())
 }
