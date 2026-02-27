@@ -1083,14 +1083,14 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    fn test_policy() -> Arc<dyn SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
     #[test]
     fn child_identifiable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
         assert_eq!(child.id(), "child-1");
     }
@@ -1098,7 +1098,7 @@ mod tests {
     #[test]
     fn child_statusable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
         assert_eq!(child.status(), Status::Idle);
     }
@@ -1106,7 +1106,7 @@ mod tests {
     #[test]
     fn child_abort_changes_status() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let mut child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+        let mut child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
         child.abort();
         assert_eq!(child.status(), Status::Aborted);
@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn child_is_object_safe() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
         // Should compile - proves Child is object-safe
         let _boxed: Box<dyn Child> = Box::new(child);
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn simple_child_is_not_runnable() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+        let child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
         assert!(!child.is_runnable());
     }
@@ -1146,7 +1146,7 @@ mod tests {
             }
         "#;
 
-        let child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+        let child = LuaChild::from_script(lua, script, test_policy()).expect("create child");
         assert!(child.is_runnable());
         assert_eq!(child.id(), "worker");
     }
@@ -1166,7 +1166,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_policy()).expect("create child");
         let input = serde_json::json!({"value": 5});
         let result = child.run(input);
 
@@ -1192,7 +1192,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_policy()).expect("create child");
         let result = child.run(serde_json::json!({}));
 
         assert!(result.is_err());
@@ -1206,8 +1206,7 @@ mod tests {
     #[test]
     fn non_runnable_child_run_returns_error() {
         let lua = Arc::new(Mutex::new(Lua::new()));
-        let mut child =
-            LuaChild::simple(lua, "simple-child", test_sandbox()).expect("create child");
+        let mut child = LuaChild::simple(lua, "simple-child", test_policy()).expect("create child");
 
         let result = child.run(serde_json::json!({}));
         assert!(result.is_err());
@@ -1238,7 +1237,7 @@ mod tests {
 
         drop(lua_guard);
 
-        let result = LuaChild::from_table_runnable(lua, table, test_sandbox());
+        let result = LuaChild::from_table_runnable(lua, table, test_policy());
         assert!(result.is_err());
     }
 
@@ -1253,7 +1252,7 @@ mod tests {
             }
         "#;
 
-        let child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+        let child = LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
         // Should compile - proves RunnableChild is object-safe
         let _boxed: Box<dyn RunnableChild> = Box::new(child);
@@ -1283,7 +1282,7 @@ mod tests {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+        let mut child = LuaChild::from_script(lua, script, test_policy()).expect("create child");
         let input = serde_json::json!({
             "name": "test",
             "numbers": [1, 2, 3, 4, 5]
@@ -1413,7 +1412,7 @@ mod tests {
         #[test]
         fn set_context() {
             let lua = Arc::new(Mutex::new(Lua::new()));
-            let mut child = LuaChild::simple(lua, "child-1", test_sandbox()).expect("create child");
+            let mut child = LuaChild::simple(lua, "child-1", test_policy()).expect("create child");
 
             assert!(!child.has_context());
 
@@ -1439,7 +1438,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             let emit_count = Arc::clone(&ctx.emit_count);
@@ -1466,7 +1465,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1498,7 +1497,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             let spawn_count = Arc::clone(&ctx.spawn_count);
@@ -1531,7 +1530,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1555,7 +1554,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1584,7 +1583,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1608,7 +1607,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1636,7 +1635,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1679,7 +1678,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create batch-sender");
+                LuaChild::from_script(lua, script, test_policy()).expect("create batch-sender");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1709,7 +1708,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create mismatch-sender");
+                LuaChild::from_script(lua, script, test_policy()).expect("create mismatch-sender");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1761,7 +1760,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create rpc-batcher");
+                LuaChild::from_script(lua, script, test_policy()).expect("create rpc-batcher");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1806,7 +1805,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create empty-batcher");
+                LuaChild::from_script(lua, script, test_policy()).expect("create empty-batcher");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1836,7 +1835,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create bad-batcher");
+                LuaChild::from_script(lua, script, test_policy()).expect("create bad-batcher");
 
             let ctx = MockContext::new("parent");
             child.set_context(Box::new(ctx));
@@ -1871,7 +1870,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
             // Note: NOT setting context
 
             let result = child.run(serde_json::json!({}));
@@ -1899,7 +1898,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             // READ only — no EXECUTE
             let ctx = MockContext::new("parent").with_capabilities(Capability::READ);
@@ -1937,7 +1936,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             // EXECUTE granted (MockContext has no auth → permissive)
             let ctx = MockContext::new("parent").with_capabilities(Capability::EXECUTE);
@@ -1974,7 +1973,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             // READ | EXECUTE only — no SPAWN
             let ctx = MockContext::new("parent")
@@ -2012,7 +2011,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             // SPAWN granted
             let ctx = MockContext::new("parent").with_capabilities(Capability::SPAWN);
@@ -2050,7 +2049,7 @@ mod tests {
             "#;
 
             let mut child =
-                LuaChild::from_script(lua, script, test_sandbox()).expect("create child");
+                LuaChild::from_script(lua, script, test_policy()).expect("create child");
 
             // READ | EXECUTE — no LLM
             let ctx = MockContext::new("parent")

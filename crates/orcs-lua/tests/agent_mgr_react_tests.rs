@@ -13,7 +13,7 @@ use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 use serde_json::json;
 use std::sync::Arc;
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -113,7 +113,7 @@ fn ext_cat() -> EventCategory {
 }
 
 fn setup_harness() -> LuaTestHarness {
-    LuaTestHarness::from_script(REACT_HELPERS_SCRIPT, test_sandbox())
+    LuaTestHarness::from_script(REACT_HELPERS_SCRIPT, test_policy())
         .expect("should load react-helpers script")
 }
 

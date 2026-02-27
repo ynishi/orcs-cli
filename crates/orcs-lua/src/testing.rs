@@ -672,7 +672,7 @@ mod tests {
     use super::*;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    fn test_policy() -> Arc<dyn SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn harness_from_script() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness from echo script");
         assert_eq!(harness.id().name, "echo-test");
         assert!(harness.script_source().is_some());
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn harness_request_success() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for request success test");
 
         let result = harness.request(
@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn harness_request_error() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for request error test");
 
         let result = harness.request(EventCategory::Echo, "unknown", Value::Null);
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn harness_veto_aborts() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for veto test");
 
         let response = harness.veto();
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn harness_cancel_handled() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for cancel test");
 
         let response = harness.cancel();
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn harness_lifecycle() {
-        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_policy())
             .expect("should create harness for lifecycle test");
 
         // Init
@@ -811,14 +811,14 @@ mod tests {
 
     #[test]
     fn harness_subscriptions() {
-        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for subscriptions test");
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
     #[test]
     fn harness_clear_logs() {
-        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for clear logs test");
 
         harness
@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn invalid_script_error() {
-        let result = LuaTestHarness::from_script("invalid lua {{{{", test_sandbox());
+        let result = LuaTestHarness::from_script("invalid lua {{{{", test_policy());
         assert!(result.is_err());
     }
 
@@ -851,7 +851,7 @@ mod tests {
             }
         "#;
 
-        let result = LuaTestHarness::from_script(script, test_sandbox());
+        let result = LuaTestHarness::from_script(script, test_policy());
         assert!(result.is_err());
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn inject_llm_mock_captures_prompt_and_returns_response() {
-        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
         let captured = harness.inject_llm_mock(vec!["first reply".to_string()]);
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn inject_llm_mock_falls_back_when_queue_exhausted() {
-        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
         let captured = harness.inject_llm_mock(vec![]); // empty queue
@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn inject_llm_mock_returns_responses_in_order() {
-        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
         let captured = harness.inject_llm_mock(vec!["first".to_string(), "second".to_string()]);
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn inject_request_mock_returns_matching_handler() {
-        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_policy())
             .expect("request-caller script should load");
 
         harness.inject_request_mock(vec![(
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn inject_request_mock_returns_error_for_unregistered_target() {
-        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_policy())
             .expect("request-caller script should load");
 
         harness.inject_request_mock(vec![]); // no handlers
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[test]
     fn inject_tool_descriptions_mock_returns_fixed_string() {
-        let mut harness = LuaTestHarness::from_script(TOOL_DESC_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(TOOL_DESC_CALLER_SCRIPT, test_policy())
             .expect("tool-desc-caller script should load");
 
         harness.inject_tool_descriptions_mock("## Tools\n- tool_a\n- tool_b");
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn inject_spawn_runner_mock_captures_args_and_returns_response() {
-        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
         let captured = harness.inject_spawn_runner_mock(vec![(
@@ -1103,7 +1103,7 @@ mod tests {
 
     #[test]
     fn inject_spawn_runner_mock_returns_error_when_queue_exhausted() {
-        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
         let captured = harness.inject_spawn_runner_mock(vec![]); // empty queue
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn inject_spawn_runner_mock_consumes_queue_in_order() {
-        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
         let captured = harness.inject_spawn_runner_mock(vec![
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_captures_output_messages() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         let captured = harness.inject_output_stubs();
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_captures_output_with_level_messages() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         let captured = harness.inject_output_stubs();
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_emit_event_does_not_panic() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         harness.inject_output_stubs();
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_board_recent_returns_empty_table() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         harness.inject_output_stubs();
@@ -1271,7 +1271,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_hook_does_not_panic() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         harness.inject_output_stubs();
@@ -1283,7 +1283,7 @@ mod tests {
 
     #[test]
     fn inject_output_stubs_all_stubs_work_together() {
-        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_sandbox())
+        let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
         let captured = harness.inject_output_stubs();

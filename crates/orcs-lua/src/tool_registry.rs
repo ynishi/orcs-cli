@@ -949,18 +949,18 @@ mod tests {
     use super::*;
     use crate::orcs_helpers::register_base_orcs_functions;
     use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
+    use orcs_runtime::WorkDir;
     use std::fs;
     use std::sync::Arc;
-    use tempfile::TempDir;
 
-    fn test_sandbox() -> (TempDir, std::path::PathBuf, Arc<dyn SandboxPolicy>) {
-        let td = TempDir::new().expect("should create temp dir");
-        let dir = td
+    fn test_sandbox() -> (WorkDir, Arc<dyn SandboxPolicy>) {
+        let wd = WorkDir::temporary().expect("should create temp work dir");
+        let dir = wd
             .path()
             .canonicalize()
             .expect("should canonicalize temp dir");
         let sandbox = ProjectSandbox::new(&dir).expect("test sandbox");
-        (td, dir, Arc::new(sandbox))
+        (wd, Arc::new(sandbox))
     }
 
     fn setup_lua(sandbox: Arc<dyn SandboxPolicy>) -> Lua {
@@ -1059,14 +1059,14 @@ mod tests {
 
     #[test]
     fn dispatch_read() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("test.txt"), "hello dispatch").expect("should write test file");
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("test.txt"), "hello dispatch").expect("should write test file");
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("read", {{path="{}"}})"#,
-                root.join("test.txt").display()
+                wd.path().join("test.txt").display()
             ))
             .eval()
             .expect("dispatch read should succeed");
@@ -1082,8 +1082,8 @@ mod tests {
 
     #[test]
     fn dispatch_write_and_read() {
-        let (_td, root, sandbox) = test_sandbox();
-        let path = root.join("written.txt");
+        let (wd, sandbox) = test_sandbox();
+        let path = wd.path().join("written.txt");
 
         let lua = setup_lua(sandbox);
         let code = format!(
@@ -1109,15 +1109,15 @@ mod tests {
 
     #[test]
     fn dispatch_grep() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("search.txt"), "line one\nline two\nthird")
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("search.txt"), "line one\nline two\nthird")
             .expect("should write search file");
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("grep", {{pattern="line", path="{}"}})"#,
-                root.join("search.txt").display()
+                wd.path().join("search.txt").display()
             ))
             .eval()
             .expect("dispatch grep should succeed");
@@ -1128,16 +1128,16 @@ mod tests {
 
     #[test]
     fn dispatch_glob() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("a.rs"), "").expect("write a.rs");
-        fs::write(root.join("b.rs"), "").expect("write b.rs");
-        fs::write(root.join("c.txt"), "").expect("write c.txt");
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("a.rs"), "").expect("write a.rs");
+        fs::write(wd.path().join("b.rs"), "").expect("write b.rs");
+        fs::write(wd.path().join("c.txt"), "").expect("write c.txt");
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("glob", {{pattern="*.rs", dir="{}"}})"#,
-                root.display()
+                wd.path().display()
             ))
             .eval()
             .expect("dispatch glob should succeed");
@@ -1148,8 +1148,8 @@ mod tests {
 
     #[test]
     fn dispatch_mkdir_remove() {
-        let (_td, root, sandbox) = test_sandbox();
-        let dir_path = root.join("sub/deep");
+        let (wd, sandbox) = test_sandbox();
+        let dir_path = wd.path().join("sub/deep");
 
         let lua = setup_lua(sandbox);
         let code = format!(
@@ -1172,9 +1172,9 @@ mod tests {
 
     #[test]
     fn dispatch_mv() {
-        let (_td, root, sandbox) = test_sandbox();
-        let src = root.join("src.txt");
-        let dst = root.join("dst.txt");
+        let (wd, sandbox) = test_sandbox();
+        let src = wd.path().join("src.txt");
+        let dst = wd.path().join("dst.txt");
         fs::write(&src, "move me").expect("write src");
 
         let lua = setup_lua(sandbox);
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_tool() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn dispatch_missing_required_arg() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Missing required arg returns {ok: false, error: "..."} (not a Lua error).
@@ -1235,7 +1235,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_returns_all() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let schemas: Table = lua
@@ -1283,7 +1283,7 @@ mod tests {
 
     #[test]
     fn dispatch_exec_uses_registered_exec() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Default exec is deny-stub
@@ -1300,7 +1300,7 @@ mod tests {
 
     #[test]
     fn intent_defs_returns_all() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let defs: Table = lua
@@ -1332,7 +1332,7 @@ mod tests {
 
     #[test]
     fn register_intent_adds_to_registry() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn register_intent_duplicate_fails() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_no_request_fn_returns_error() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register a Component intent without providing orcs.request
@@ -1433,7 +1433,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_success_normalized() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register a Component intent
@@ -1494,7 +1494,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_failure_normalized() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register + mock failing request
@@ -1532,7 +1532,7 @@ mod tests {
 
     #[test]
     fn dispatch_component_forwards_all_args() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         lua.load(
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_name_errors() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_description_errors() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1619,7 +1619,7 @@ mod tests {
 
     #[test]
     fn register_intent_missing_component_errors() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result = lua
@@ -1646,7 +1646,7 @@ mod tests {
 
     #[test]
     fn register_intent_defaults_operation_to_execute() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Register without specifying operation
@@ -1791,15 +1791,15 @@ mod tests {
 
     #[test]
     fn grep_dispatch_preserves_integer_line_number() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("nums.txt"), "alpha\nbeta\nalpha again\n")
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("nums.txt"), "alpha\nbeta\nalpha again\n")
             .expect("should write test file");
 
         let lua = setup_lua(sandbox);
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("grep", {{pattern="alpha", path="{}"}})"#,
-                root.join("nums.txt").display()
+                wd.path().join("nums.txt").display()
             ))
             .eval()
             .expect("dispatch grep should succeed");
@@ -1887,8 +1887,8 @@ mod tests {
 
     #[test]
     fn dispatch_rust_tool_denies_without_capability() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("secret.txt"), "classified").expect("should write test file");
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("secret.txt"), "classified").expect("should write test file");
 
         let lua = setup_lua(sandbox);
 
@@ -1904,7 +1904,7 @@ mod tests {
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("read", {{path="{}"}})"#,
-                root.join("secret.txt").display()
+                wd.path().join("secret.txt").display()
             ))
             .eval()
             .expect("dispatch should return result table, not throw");
@@ -1920,8 +1920,8 @@ mod tests {
 
     #[test]
     fn dispatch_rust_tool_allows_with_capability() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("allowed.txt"), "public data").expect("should write test file");
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("allowed.txt"), "public data").expect("should write test file");
 
         let lua = setup_lua(sandbox);
 
@@ -1936,7 +1936,7 @@ mod tests {
         let result: Table = lua
             .load(format!(
                 r#"return orcs.dispatch("read", {{path="{}"}})"#,
-                root.join("allowed.txt").display()
+                wd.path().join("allowed.txt").display()
             ))
             .eval()
             .expect("dispatch should return result table");
@@ -1949,7 +1949,7 @@ mod tests {
 
     #[test]
     fn positional_write_denied_with_read_only_cap() {
-        let (_td, root, sandbox) = test_sandbox();
+        let (wd, sandbox) = test_sandbox();
 
         let lua = setup_lua(sandbox);
 
@@ -1966,7 +1966,7 @@ mod tests {
         let result: Table = lua
             .load(format!(
                 r#"return orcs.write("{}", "hacked")"#,
-                root.join("nope.txt").display()
+                wd.path().join("nope.txt").display()
             ))
             .eval()
             .expect("positional write should return result table");
@@ -1984,8 +1984,8 @@ mod tests {
 
     #[test]
     fn positional_read_denied_without_capability() {
-        let (_td, root, sandbox) = test_sandbox();
-        fs::write(root.join("pos_secret.txt"), "restricted").expect("should write test file");
+        let (wd, sandbox) = test_sandbox();
+        fs::write(wd.path().join("pos_secret.txt"), "restricted").expect("should write test file");
 
         let lua = setup_lua(sandbox);
 
@@ -2000,7 +2000,7 @@ mod tests {
         let result: Table = lua
             .load(format!(
                 r#"return orcs.read("{}")"#,
-                root.join("pos_secret.txt").display()
+                wd.path().join("pos_secret.txt").display()
             ))
             .eval()
             .expect("positional read should return result table");
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn mcp_servers_returns_ok_without_manager() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -2040,7 +2040,7 @@ mod tests {
 
     #[test]
     fn mcp_tools_returns_empty_without_mcp_intents() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua
@@ -2062,7 +2062,7 @@ mod tests {
 
     #[test]
     fn mcp_tools_filters_by_server() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         // Manually register MCP intents to test filtering
@@ -2131,7 +2131,7 @@ mod tests {
 
     #[test]
     fn mcp_call_without_manager_returns_error() {
-        let (_td, _, sandbox) = test_sandbox();
+        let (_wd, sandbox) = test_sandbox();
         let lua = setup_lua(sandbox);
 
         let result: Table = lua

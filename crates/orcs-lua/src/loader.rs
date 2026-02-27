@@ -346,19 +346,19 @@ mod tests {
     use orcs_component::Component;
     use orcs_runtime::sandbox::ProjectSandbox;
 
-    fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+    fn test_policy() -> Arc<dyn SandboxPolicy> {
         Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
     }
 
     #[test]
     fn new_loader_has_empty_search_paths() {
-        let loader = ScriptLoader::new(test_sandbox());
+        let loader = ScriptLoader::new(test_policy());
         assert!(loader.search_paths.is_empty());
     }
 
     #[test]
     fn with_path_adds_to_search_paths() {
-        let loader = ScriptLoader::new(test_sandbox())
+        let loader = ScriptLoader::new(test_policy())
             .with_path("/foo")
             .with_path("/bar");
         assert_eq!(loader.search_paths.len(), 2);
@@ -368,20 +368,20 @@ mod tests {
 
     #[test]
     fn with_project_root_adds_scripts_subdir() {
-        let loader = ScriptLoader::new(test_sandbox()).with_project_root("/project");
+        let loader = ScriptLoader::new(test_policy()).with_project_root("/project");
         assert_eq!(loader.search_paths[0], PathBuf::from("/project/scripts"));
     }
 
     #[test]
     fn load_from_crate_scripts_dir() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_policy()).with_path(ScriptLoader::crate_scripts_dir());
         let component = loader.load("echo");
         assert!(component.is_ok());
     }
 
     #[test]
     fn load_not_found_shows_searched_paths() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path("/nonexistent/path");
+        let loader = ScriptLoader::new(test_policy()).with_path("/nonexistent/path");
         let result = loader.load("missing");
         let Err(err) = result else {
             panic!("expected error");
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn list_available_includes_filesystem() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_policy()).with_path(ScriptLoader::crate_scripts_dir());
         let names = loader.list_available();
         assert!(names.contains(&"echo".to_string()));
     }
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn load_all_from_crate_scripts_dir() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_policy()).with_path(ScriptLoader::crate_scripts_dir());
         let result = loader.load_all();
 
         // Should load at least echo.lua
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn load_all_empty_for_nonexistent_dir() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path("/nonexistent/path");
+        let loader = ScriptLoader::new(test_policy()).with_path("/nonexistent/path");
         let result = loader.load_all();
 
         // Nonexistent dirs are skipped, not errors
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn load_dir_convenience() {
-        let result = ScriptLoader::load_dir(&ScriptLoader::crate_scripts_dir(), test_sandbox());
+        let result = ScriptLoader::load_dir(&ScriptLoader::crate_scripts_dir(), test_policy());
         assert!(result.has_loaded());
     }
 
@@ -472,7 +472,7 @@ mod tests {
         )
         .expect("write init.lua");
 
-        let sb = test_sandbox();
+        let sb = test_policy();
         let component = LuaComponent::from_dir(dir.path(), sb).expect("load dir component");
         assert_eq!(component.id().name, "dir-component");
     }
@@ -505,7 +505,7 @@ mod tests {
         )
         .expect("write init.lua");
 
-        let sb = test_sandbox();
+        let sb = test_policy();
         let component =
             LuaComponent::from_dir(dir.path(), sb).expect("load require-test component");
         assert_eq!(component.id().name, "require-test");
@@ -528,7 +528,7 @@ mod tests {
         )
         .expect("write my_comp/init.lua");
 
-        let sb = test_sandbox();
+        let sb = test_policy();
         let loader = ScriptLoader::new(sb).with_path(dir.path());
         let component = loader.load("my_comp").expect("load my_comp");
         assert_eq!(component.id().name, "my_comp");
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn load_skill_manager_as_directory_component() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_policy()).with_path(ScriptLoader::crate_scripts_dir());
 
         let component = loader
             .load("skill_manager")
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn list_available_includes_skill_manager_directory() {
-        let loader = ScriptLoader::new(test_sandbox()).with_path(ScriptLoader::crate_scripts_dir());
+        let loader = ScriptLoader::new(test_policy()).with_path(ScriptLoader::crate_scripts_dir());
         let names = loader.list_available();
         assert!(
             names.contains(&"skill_manager".to_string()),
@@ -582,8 +582,8 @@ mod tests {
         )
         .expect("write init.lua");
 
-        let component = LuaComponent::from_dir(dir.path(), test_sandbox())
-            .expect("load flat require component");
+        let component =
+            LuaComponent::from_dir(dir.path(), test_policy()).expect("load flat require component");
         assert_eq!(component.id().name, "flat-require-test");
     }
 
@@ -594,7 +594,7 @@ mod tests {
         std::fs::create_dir_all(&comp_dir).expect("create dir_comp dir");
         std::fs::write(comp_dir.join("init.lua"), "return {}").expect("write init.lua");
 
-        let sb = test_sandbox();
+        let sb = test_policy();
         let loader = ScriptLoader::new(sb).with_path(dir.path());
         let names = loader.list_available();
         assert!(names.contains(&"dir_comp".to_string()));

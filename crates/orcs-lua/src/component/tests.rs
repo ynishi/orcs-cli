@@ -3,7 +3,7 @@ use orcs_event::Request;
 use orcs_runtime::sandbox::ProjectSandbox;
 use orcs_types::{ChannelId, ComponentId, Principal};
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -36,7 +36,7 @@ fn load_simple_component() {
             }
         "#;
 
-    let component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+    let component = LuaComponent::from_script(script, test_policy()).expect("load script");
     assert!(component.id().fqn().contains("test-component"));
     assert_eq!(component.subscriptions(), &[EventCategory::Echo]);
 }
@@ -59,7 +59,7 @@ fn handle_request() {
             }
         "#;
 
-    let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+    let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
     let req = create_test_request("echo", JsonValue::String("hello".into()));
     let result = component.on_request(&req);
@@ -89,7 +89,7 @@ fn handle_signal_abort() {
             }
         "#;
 
-    let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+    let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
     let signal = Signal::veto(test_principal());
     let response = component.on_signal(&signal);
@@ -108,7 +108,7 @@ fn missing_callback_error() {
             }
         "#;
 
-    let result = LuaComponent::from_script(script, test_sandbox());
+    let result = LuaComponent::from_script(script, test_policy());
     assert!(result.is_err());
 }
 
@@ -202,7 +202,7 @@ mod exec_tests {
             cmd
         );
         let mut comp =
-            LuaComponent::from_script(&script, test_sandbox()).expect("load exec script");
+            LuaComponent::from_script(&script, test_policy()).expect("load exec script");
         comp.set_child_context(Box::new(PermissiveContext));
         comp
     }
@@ -229,7 +229,7 @@ mod exec_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         let req = create_test_request("test", JsonValue::Null);
         let result = component.on_request(&req).expect("should succeed");
 
@@ -319,7 +319,7 @@ mod exec_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         component.set_child_context(Box::new(PermissiveContext));
         let req = create_test_request("test", JsonValue::Null);
         let data = component.on_request(&req).expect("should succeed");
@@ -356,7 +356,7 @@ mod log_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         let req = create_test_request("test", JsonValue::Null);
         let result = component.on_request(&req);
 
@@ -415,7 +415,7 @@ mod emitter_tests {
                     on_signal = function(sig) return "Ignored" end,
                 }
                 "#,
-            test_sandbox(),
+            test_policy(),
         )
         .expect("load script");
 
@@ -433,7 +433,7 @@ mod emitter_tests {
                     on_signal = function(sig) return "Ignored" end,
                 }
                 "#,
-            test_sandbox(),
+            test_policy(),
         )
         .expect("load script");
 
@@ -459,7 +459,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let emitter = MockEmitter::new();
         let emitter_clone = emitter.clone();
@@ -491,7 +491,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let emitter = MockEmitter::new();
         let emitter_clone = emitter.clone();
@@ -524,7 +524,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         // Note: no emitter set
         let req = create_test_request("test", JsonValue::Null);
@@ -575,7 +575,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let entries = vec![
             serde_json::json!({"source": {"name": "tool"}, "kind": {"type": "Output", "level": "info"}, "operation": "display", "payload": {"message": "hello"}}),
@@ -604,7 +604,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let req = create_test_request("test", JsonValue::Null);
         let result = component.on_request(&req);
@@ -631,7 +631,7 @@ mod emitter_tests {
                 }
             "#;
 
-        let mut component = LuaComponent::from_script(script, test_sandbox()).expect("load script");
+        let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let entries: Vec<serde_json::Value> = (0..5)
             .map(|i| serde_json::json!({"payload": {"message": format!("msg{i}")}}))
@@ -661,7 +661,7 @@ mod loader_tests {
                 "return { id = 'test', subscriptions = {'Echo'}, on_request = function(r) return { success = true } end, on_signal = function(s) return 'Ignored' end }".to_string(),
             ),
         ]));
-        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+        let loader = LuaComponentLoader::new(test_policy()).with_builtins(builtins);
 
         let result = loader.resolve_builtin("test.lua");
         assert!(result.is_some(), "should resolve existing builtin");
@@ -679,7 +679,7 @@ mod loader_tests {
             "test.lua".to_string(),
             "return {}".to_string(),
         )]));
-        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+        let loader = LuaComponentLoader::new(test_policy()).with_builtins(builtins);
 
         assert!(
             loader.resolve_builtin("nonexistent.lua").is_none(),
@@ -689,7 +689,7 @@ mod loader_tests {
 
     #[test]
     fn resolve_builtin_returns_none_without_builtins() {
-        let loader = LuaComponentLoader::new(test_sandbox());
+        let loader = LuaComponentLoader::new(test_policy());
 
         assert!(
             loader.resolve_builtin("anything.lua").is_none(),
@@ -713,7 +713,7 @@ mod loader_tests {
             "builtin_test.lua".to_string(),
             script.to_string(),
         )]));
-        let loader = LuaComponentLoader::new(test_sandbox()).with_builtins(builtins);
+        let loader = LuaComponentLoader::new(test_policy()).with_builtins(builtins);
 
         let resolved = loader
             .resolve_builtin("builtin_test.lua")
@@ -854,7 +854,7 @@ mod snapshot_tests {
         "#;
 
         let component =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
         let result = component.snapshot();
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -876,7 +876,7 @@ mod snapshot_tests {
         "#;
 
         let mut component =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
         let snapshot =
             ComponentSnapshot::from_state("lua::no-restore", &serde_json::json!({"key": "value"}))
                 .expect("should create snapshot");
@@ -921,7 +921,7 @@ mod snapshot_tests {
 
         // Create component, mutate state
         let mut comp1 =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
         let req = create_test_request("increment", JsonValue::Null);
         comp1.on_request(&req).expect("increment should succeed");
         comp1.on_request(&req).expect("increment should succeed");
@@ -942,7 +942,7 @@ mod snapshot_tests {
 
         // Create new component, restore
         let mut comp2 =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
 
         // Verify fresh state is counter=0
         let data = comp2.on_request(&get_req).expect("get should succeed");
@@ -994,7 +994,7 @@ mod snapshot_tests {
         "#;
 
         let mut comp1 =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
 
         // Add items
         let add_req = create_test_request("add", serde_json::json!({"item": "alpha"}));
@@ -1007,7 +1007,7 @@ mod snapshot_tests {
 
         // Restore into new component
         let mut comp2 =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
         comp2.restore(&snapshot).expect("restore should succeed");
 
         // Verify
@@ -1033,7 +1033,7 @@ mod snapshot_tests {
         "#;
 
         let mut component =
-            LuaComponent::from_script(script, test_sandbox()).expect("should load script");
+            LuaComponent::from_script(script, test_policy()).expect("should load script");
 
         // Create snapshot with wrong FQN
         let wrong_snapshot =
@@ -1065,7 +1065,7 @@ fn globals_inject_string_value() {
         .as_object()
         .expect("test fixture must be a JSON object");
     let mut component =
-        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
+        LuaComponent::from_script_with_globals(script, test_policy(), Some(globals))
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
@@ -1103,7 +1103,7 @@ fn globals_inject_nested_table() {
         .as_object()
         .expect("test fixture must be a JSON object");
     let mut component =
-        LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
+        LuaComponent::from_script_with_globals(script, test_policy(), Some(globals))
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
@@ -1125,7 +1125,7 @@ fn globals_none_is_backward_compatible() {
         }
     "#;
 
-    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), None)
+    let component = LuaComponent::from_script_with_globals(script, test_policy(), None)
         .expect("load without globals");
     assert!(component.id().fqn().contains("no-globals"));
 }
@@ -1148,7 +1148,7 @@ fn globals_used_in_component_id() {
     let globals = globals_val
         .as_object()
         .expect("test fixture must be a JSON object");
-    let component = LuaComponent::from_script_with_globals(script, test_sandbox(), Some(globals))
+    let component = LuaComponent::from_script_with_globals(script, test_policy(), Some(globals))
         .expect("load with dynamic id");
     assert_eq!(component.id().fqn(), "agent::custom-agent");
 }

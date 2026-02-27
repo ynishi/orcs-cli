@@ -203,10 +203,11 @@ fn resolve_absolute(path: &str, root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkDir;
     use std::fs;
 
-    fn test_sandbox() -> (tempfile::TempDir, ProjectSandbox) {
-        let tmp = tempfile::tempdir().expect("should create temp dir for sandbox test");
+    fn test_sandbox() -> (WorkDir, ProjectSandbox) {
+        let tmp = WorkDir::temporary().expect("should create temp WorkDir for sandbox test");
         let sandbox = ProjectSandbox::new(tmp.path()).expect("should create sandbox from temp dir");
         (tmp, sandbox)
     }
@@ -511,7 +512,7 @@ mod tests {
         fn write_rejects_symlink_parent_escape() {
             let (tmp, sandbox) = test_sandbox();
             let outside =
-                tempfile::tempdir().expect("should create outside temp dir for symlink test");
+                WorkDir::temporary().expect("should create outside temp WorkDir for symlink test");
             symlink(outside.path(), tmp.path().join("escape_dir"))
                 .expect("should create symlink to outside dir");
 

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 const LIFE_GAME_SCRIPT: &str = include_str!("../../orcs-app/builtins/life_game.lua");
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -183,7 +183,7 @@ impl ChildContext for MockCellContext {
 
 #[test]
 fn load_life_game_component() {
-    let component = LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox());
+    let component = LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy());
 
     assert!(
         component.is_ok(),
@@ -201,7 +201,7 @@ fn load_life_game_component() {
 #[test]
 fn life_game_init_and_shutdown() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
     let init_result = component.init(&empty_config);
@@ -218,7 +218,7 @@ fn life_game_init_and_shutdown() {
 #[test]
 fn life_game_veto_aborts() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let signal = Signal::veto(Principal::System);
     let response = component.on_signal(&signal);
@@ -234,7 +234,7 @@ fn life_game_veto_aborts() {
 #[test]
 fn life_game_run_default_params() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     let spawn_count = Arc::clone(&ctx.spawn_count);
@@ -276,7 +276,7 @@ fn life_game_run_default_params() {
 #[test]
 fn life_game_run_custom_params() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     let spawn_count = Arc::clone(&ctx.spawn_count);
@@ -317,7 +317,7 @@ fn life_game_run_custom_params() {
 #[test]
 fn life_game_run_verifies_grid_rendering() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -350,7 +350,7 @@ fn life_game_run_verifies_grid_rendering() {
 #[test]
 fn life_game_run_simulation_produces_changes() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -402,7 +402,7 @@ fn life_game_run_simulation_produces_changes() {
 #[test]
 fn life_game_grid_size_exceeds_max() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -424,7 +424,7 @@ fn life_game_grid_size_exceeds_max() {
 #[test]
 fn life_game_unknown_operation() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -444,7 +444,7 @@ fn life_game_unknown_operation() {
 #[test]
 fn life_game_spawn_failure_returns_error() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     // max_children=0 → spawn always fails
     let ctx = MockCellContext::new("life_game").with_max_children(0);
@@ -466,7 +466,7 @@ fn life_game_spawn_failure_returns_error() {
 #[test]
 fn life_game_status_before_run() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -485,7 +485,7 @@ fn life_game_status_before_run() {
 #[test]
 fn life_game_status_after_run() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     component.set_child_context(Box::new(ctx));
@@ -524,7 +524,7 @@ fn life_game_status_after_run() {
 #[test]
 fn life_game_reuses_spawned_cells() {
     let mut component =
-        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_sandbox()).expect("load life_game");
+        LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
     let ctx = MockCellContext::new("life_game");
     let spawn_count = Arc::clone(&ctx.spawn_count);

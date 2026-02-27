@@ -13,7 +13,7 @@ use orcs_event::{EventCategory, SignalResponse};
 use orcs_lua::{LuaChild, LuaComponent};
 use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 
-fn test_sandbox() -> Arc<dyn SandboxPolicy> {
+fn test_policy() -> Arc<dyn SandboxPolicy> {
     Arc::new(ProjectSandbox::new(".").expect("test sandbox"))
 }
 
@@ -243,7 +243,7 @@ mod worker_child {
     #[test]
     fn load_worker_child() {
         let lua = create_lua();
-        let child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox());
+        let child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_policy());
 
         assert!(child.is_ok(), "Failed to load: {:?}", child.err());
         let child = child.expect("should load worker child from script");
@@ -254,7 +254,7 @@ mod worker_child {
     #[test]
     fn worker_run_basic_task() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox())
+        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_policy())
             .expect("should load worker child for basic task test");
 
         // Set mock context
@@ -287,7 +287,7 @@ mod worker_child {
     #[test]
     fn worker_emits_output() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox())
+        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_policy())
             .expect("should load worker child for emit test");
 
         let ctx = MockChildContext::new("parent");
@@ -315,7 +315,7 @@ mod worker_child {
     #[test]
     fn worker_responds_to_veto() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_sandbox())
+        let mut child = LuaChild::from_script(Arc::clone(&lua), WORKER_SCRIPT, test_policy())
             .expect("should load worker child for veto test");
 
         // Worker's on_signal uses orcs.emit_output, so we need context
@@ -350,7 +350,7 @@ mod spawner_child {
     #[test]
     fn load_spawner_child() {
         let lua = create_lua();
-        let child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox());
+        let child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_policy());
 
         assert!(child.is_ok(), "Failed to load: {:?}", child.err());
         let child = child.expect("should load spawner child from script");
@@ -361,7 +361,7 @@ mod spawner_child {
     #[test]
     fn spawner_spawns_workers() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox())
+        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_policy())
             .expect("should load spawner child for spawn workers test");
 
         let ctx = MockChildContext::new("parent");
@@ -399,7 +399,7 @@ mod spawner_child {
     #[test]
     fn spawner_respects_max_children() {
         let lua = create_lua();
-        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_sandbox())
+        let mut child = LuaChild::from_script(Arc::clone(&lua), SPAWNER_SCRIPT, test_policy())
             .expect("should load spawner child for max children test");
 
         let ctx = MockChildContext::new("parent");
@@ -452,7 +452,7 @@ mod manager_component {
 
     #[test]
     fn load_manager_component() {
-        let component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox());
+        let component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy());
 
         assert!(component.is_ok(), "Failed to load: {:?}", component.err());
         let component = component.expect("should load manager component from script");
@@ -461,7 +461,7 @@ mod manager_component {
 
     #[test]
     fn manager_dispatch_task() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox())
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for dispatch test");
 
         let req = create_request("dispatch", json!({"task": "process-item"}));
@@ -475,7 +475,7 @@ mod manager_component {
 
     #[test]
     fn manager_status() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox())
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for status test");
 
         let req = create_request("status", json!({}));
@@ -488,7 +488,7 @@ mod manager_component {
 
     #[test]
     fn manager_veto_aborts() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox())
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for veto test");
 
         let signal = orcs_event::Signal::veto(orcs_types::Principal::System);
@@ -500,7 +500,7 @@ mod manager_component {
 
     #[test]
     fn manager_init_and_shutdown() {
-        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_sandbox())
+        let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager script");
 
         // Init
@@ -566,7 +566,7 @@ mod integration {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load orchestrator child for integration test");
 
         // 3. Set up context
@@ -616,7 +616,7 @@ mod integration {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load no-context child");
         // Note: NOT setting context
 
@@ -710,7 +710,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_has_child_context() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox())
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for context test");
 
         // Initially no child context
@@ -725,7 +725,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_spawn_child_via_request() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox())
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for spawn via request test");
 
         // Set child context
@@ -756,7 +756,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_get_counts_without_spawning() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox())
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for counts test");
 
         // Set child context
@@ -775,7 +775,7 @@ mod component_spawns_child {
 
     #[test]
     fn component_without_context_spawn_fails_gracefully() {
-        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_sandbox())
+        let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for no-context test");
 
         // Note: NOT setting child context
@@ -824,7 +824,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load emitter child for history test");
 
         let ctx = MockChildContext::new("parent");
@@ -860,7 +860,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load emitter child for contains test");
 
         let ctx = MockChildContext::new("parent");
@@ -899,7 +899,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load spawner child for history test");
 
         let ctx = MockChildContext::new("parent");
@@ -932,7 +932,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load spawner child for ids test");
 
         let ctx = MockChildContext::new("parent");
@@ -969,7 +969,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load spawner child for max children limit test");
 
         // Limit to 3 children
@@ -1002,7 +1002,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load spawner child for error injection test");
 
         // Fail any spawn with "bad" in the id
@@ -1049,7 +1049,7 @@ mod test_harness {
             }
         "#;
 
-        let mut child = LuaChild::from_script(lua, script, test_sandbox())
+        let mut child = LuaChild::from_script(lua, script, test_policy())
             .expect("should load helper test child");
 
         let ctx = MockChildContext::new("parent");

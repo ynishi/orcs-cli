@@ -26,7 +26,7 @@ use anyhow::Result;
 use clap::Parser;
 use orcs_app::{
     ConfigError, ConfigLoader, ConfigResolver, OrcsApp, OrcsConfig, ProjectSandbox,
-    SharedPrinterSlot,
+    SharedPrinterSlot, WorkDir,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,12 +116,11 @@ impl CliConfigResolver {
             })
         });
 
-        // --sandbox: resolve to explicit dir or auto-generated temp dir
-        let sandbox_dir = args.sandbox.as_ref().map(|opt_path| {
-            opt_path.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("orcs-sandbox-{}", std::process::id()))
-            })
-        });
+        // --sandbox: resolve to explicit dir (handled by caller via WorkDir)
+        let sandbox_dir = args
+            .sandbox
+            .as_ref()
+            .and_then(|opt_path| opt_path.clone());
 
         Self {
             project_root,
@@ -197,17 +196,29 @@ async fn main() -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
-    let resolver = CliConfigResolver::from_args(&args);
-
-    if let Some(ref dir) = resolver.sandbox_dir {
-        if let Err(e) = std::fs::create_dir_all(dir) {
+    // Create WorkDir for sandbox lifecycle management.
+    // WorkDir is owned by main() — Temporary variant auto-cleans on process exit.
+    let sandbox_work_dir: Option<WorkDir> = match &args.sandbox {
+        Some(Some(path)) => Some(WorkDir::persistent(path.clone()).unwrap_or_else(|e| {
             eprintln!(
                 "Error: cannot create sandbox directory {}: {e}",
-                dir.display()
+                path.display()
             );
             std::process::exit(1);
-        }
-        println!("Sandbox: {}", dir.display());
+        })),
+        Some(None) => Some(WorkDir::temporary().unwrap_or_else(|e| {
+            eprintln!("Error: cannot create temporary sandbox directory: {e}");
+            std::process::exit(1);
+        })),
+        None => None,
+    };
+
+    let mut resolver = CliConfigResolver::from_args(&args);
+
+    // Inject WorkDir path into resolver (resolver borrows the path, WorkDir owns the lifecycle)
+    if let Some(ref wd) = sandbox_work_dir {
+        resolver.sandbox_dir = Some(wd.path().to_path_buf());
+        println!("Sandbox: {}", wd.path().display());
     }
 
     // Open persistent log file (sandbox overrides to <sandbox>/logs/)
@@ -343,23 +354,15 @@ fn open_log_file(
 mod tests {
     use super::*;
 
-    /// Helper: creates a CliConfigResolver with a temp dir (no config files).
+    /// Helper: creates a CliConfigResolver backed by a WorkDir (no config files).
     fn resolver_with(
         debug: bool,
         verbose: bool,
         session_path: Option<PathBuf>,
-    ) -> CliConfigResolver {
-        let temp = std::env::temp_dir().join(format!(
-            "orcs-cli-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("should create temp dir");
-        CliConfigResolver {
-            project_root: temp,
+    ) -> (WorkDir, CliConfigResolver) {
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for test");
+        let resolver = CliConfigResolver {
+            project_root: wd.path().to_path_buf(),
             debug,
             verbose,
             experimental: false,
@@ -367,12 +370,13 @@ mod tests {
             builtins_dir: None,
             profile: None,
             sandbox_dir: None,
-        }
+        };
+        (wd, resolver)
     }
 
     #[test]
     fn resolve_defaults_no_overrides() {
-        let resolver = resolver_with(false, false, None);
+        let (_wd, resolver) = resolver_with(false, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.debug);
@@ -382,7 +386,7 @@ mod tests {
 
     #[test]
     fn resolve_debug_override() {
-        let resolver = resolver_with(true, false, None);
+        let (_wd, resolver) = resolver_with(true, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(config.debug);
@@ -391,7 +395,7 @@ mod tests {
 
     #[test]
     fn resolve_verbose_override() {
-        let resolver = resolver_with(false, true, None);
+        let (_wd, resolver) = resolver_with(false, true, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.debug);
@@ -401,7 +405,7 @@ mod tests {
     #[test]
     fn resolve_session_path_override() {
         let path = PathBuf::from("/custom/sessions");
-        let resolver = resolver_with(false, false, Some(path.clone()));
+        let (_wd, resolver) = resolver_with(false, false, Some(path.clone()));
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.paths.session_dir, Some(path));
@@ -410,7 +414,7 @@ mod tests {
     #[test]
     fn resolve_all_overrides() {
         let path = PathBuf::from("/all/overrides");
-        let resolver = resolver_with(true, true, Some(path.clone()));
+        let (_wd, resolver) = resolver_with(true, true, Some(path.clone()));
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(config.debug);
@@ -424,7 +428,7 @@ mod tests {
     /// values must be preserved — `if self.debug` guard skips override.
     #[test]
     fn false_flags_preserve_loader_values() {
-        let resolver = resolver_with(false, false, None);
+        let (_wd, resolver) = resolver_with(false, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         // Loader returns defaults (false) and CLI doesn't override.
@@ -493,7 +497,7 @@ mod tests {
 
     #[test]
     fn resolve_builtins_dir_override() {
-        let mut resolver = resolver_with(false, false, None);
+        let (_wd, mut resolver) = resolver_with(false, false, None);
         let custom = PathBuf::from("/custom/builtins");
         resolver.builtins_dir = Some(custom.clone());
 
@@ -503,7 +507,7 @@ mod tests {
 
     #[test]
     fn resolve_builtins_dir_default_when_unset() {
-        let resolver = resolver_with(false, false, None);
+        let (_wd, resolver) = resolver_with(false, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         let default = OrcsConfig::default();
@@ -515,7 +519,7 @@ mod tests {
 
     #[test]
     fn resolve_experimental_adds_components() {
-        let mut resolver = resolver_with(false, false, None);
+        let (_wd, mut resolver) = resolver_with(false, false, None);
         resolver.experimental = true;
         let config = resolver.resolve().expect("resolve should succeed");
 
@@ -524,7 +528,7 @@ mod tests {
 
     #[test]
     fn resolve_no_experimental_by_default() {
-        let resolver = resolver_with(false, false, None);
+        let (_wd, resolver) = resolver_with(false, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert!(!config.components.load.contains(&"life_game".to_string()));
@@ -533,18 +537,10 @@ mod tests {
     // --- Sandbox tests ---
 
     /// Helper: creates a CliConfigResolver with sandbox enabled.
-    fn resolver_with_sandbox(sandbox_dir: PathBuf) -> CliConfigResolver {
-        let temp = std::env::temp_dir().join(format!(
-            "orcs-cli-sandbox-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("should create temp dir");
-        CliConfigResolver {
-            project_root: temp,
+    fn resolver_with_sandbox(sandbox_dir: PathBuf) -> (WorkDir, CliConfigResolver) {
+        let wd = WorkDir::temporary().expect("should create temp WorkDir for sandbox test");
+        let resolver = CliConfigResolver {
+            project_root: wd.path().to_path_buf(),
             debug: false,
             verbose: false,
             experimental: false,
@@ -552,13 +548,14 @@ mod tests {
             builtins_dir: None,
             profile: None,
             sandbox_dir: Some(sandbox_dir),
-        }
+        };
+        (wd, resolver)
     }
 
     #[test]
     fn sandbox_redirects_session_dir() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let resolver = resolver_with_sandbox(sandbox.clone());
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.paths.session_dir, Some(sandbox.join("sessions")));
@@ -567,7 +564,7 @@ mod tests {
     #[test]
     fn sandbox_redirects_history_file() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let resolver = resolver_with_sandbox(sandbox.clone());
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.paths.history_file, Some(sandbox.join("history")));
@@ -576,7 +573,7 @@ mod tests {
     #[test]
     fn sandbox_redirects_builtins_dir() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let resolver = resolver_with_sandbox(sandbox.clone());
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.components.builtins_dir, sandbox.join("builtins"));
@@ -585,7 +582,7 @@ mod tests {
     #[test]
     fn sandbox_redirects_component_paths() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let resolver = resolver_with_sandbox(sandbox.clone());
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.components.paths, vec![sandbox.join("components")]);
@@ -594,7 +591,7 @@ mod tests {
     #[test]
     fn sandbox_redirects_script_dirs() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let resolver = resolver_with_sandbox(sandbox.clone());
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
         let config = resolver.resolve().expect("resolve should succeed");
 
         assert_eq!(config.scripts.dirs, vec![sandbox.join("scripts")]);
@@ -603,7 +600,7 @@ mod tests {
     #[test]
     fn sandbox_cli_overrides_take_precedence() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
-        let mut resolver = resolver_with_sandbox(sandbox);
+        let (_wd, mut resolver) = resolver_with_sandbox(sandbox);
         // Explicit CLI overrides should win over sandbox defaults
         let custom_session = PathBuf::from("/custom/session-override");
         let custom_builtins = PathBuf::from("/custom/builtins-override");
@@ -637,7 +634,9 @@ mod tests {
     }
 
     #[test]
-    fn from_args_sandbox_auto_generates_temp_dir() {
+    fn from_args_sandbox_without_dir_defers_to_workdir() {
+        // --sandbox without DIR: from_args sets sandbox_dir = None.
+        // main() creates WorkDir::temporary() and injects the path.
         let args = Args {
             debug: false,
             verbose: false,
@@ -653,14 +652,9 @@ mod tests {
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
-        let sandbox = resolver.sandbox_dir.expect("should have sandbox dir");
         assert!(
-            sandbox
-                .to_str()
-                .expect("should be valid UTF-8")
-                .contains("orcs-sandbox-"),
-            "auto-generated dir should contain 'orcs-sandbox-': {:?}",
-            sandbox
+            resolver.sandbox_dir.is_none(),
+            "from_args should not auto-generate; WorkDir handles this in main()"
         );
     }
 
