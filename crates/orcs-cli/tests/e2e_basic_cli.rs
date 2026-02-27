@@ -300,11 +300,7 @@ fn dispatch_llm_output_reaches_stdout() {
             // Read request headers (we don't need to parse them carefully).
             let mut request = Vec::new();
             let mut buf = [0u8; 4096];
-            loop {
-                let n = match stream.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
+            while let Ok(n) = stream.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
@@ -341,7 +337,7 @@ fn dispatch_llm_output_reaches_stdout() {
         }
     });
 
-    let mut child = Command::new(&bin)
+    let mut child = Command::new(bin)
         .arg("-d")
         .arg("--sandbox")
         .arg(tmp.path())
@@ -413,17 +409,14 @@ fn dispatch_llm_output_reaches_stdout() {
 
     let stdout = stdout_thread.join().expect("join stdout thread");
     let stderr = stderr_thread.join().expect("join stderr thread");
+    let _ = child.wait();
     drop(server_thread);
 
-    // Dump output for post-mortem inspection.
-    let dump_dir = std::env::temp_dir().join("orcs_e2e_dump");
-    std::fs::create_dir_all(&dump_dir).expect("create dump dir");
-    std::fs::write(dump_dir.join("stdout.txt"), stdout.as_bytes()).expect("write stdout dump");
-    std::fs::write(dump_dir.join("stderr.txt"), stderr.as_bytes()).expect("write stderr dump");
+    // Dump output for post-mortem inspection (auto-cleaned unless ORCS_TEST_DUMP_DIR is set).
+    let _dump = common::dump_test_output("dispatch_llm", &stdout, &stderr);
 
     eprintln!("=== DISPATCH_LLM DEBUG ===");
     eprintln!("worker_completed={worker_completed}");
-    eprintln!("dump_dir={}", dump_dir.display());
     eprintln!("stdout_len={} stderr_len={}", stdout.len(), stderr.len());
     eprintln!("=== END DEBUG ===");
 
