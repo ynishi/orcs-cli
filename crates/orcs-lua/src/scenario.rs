@@ -504,6 +504,11 @@ impl ScenarioRunner {
         register_test_assertions(&scenario_lua)
             .map_err(|e| format!("failed to register test assertions: {e}"))?;
 
+        // Register lspec (lust) for expect-style assertions
+        #[cfg(feature = "test-utils")]
+        mlua_lspec::register(&scenario_lua)
+            .map_err(|e| format!("failed to register lspec: {e}"))?;
+
         // 2. Load scenario file
         let script = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -585,6 +590,10 @@ impl ScenarioRunner {
         let scenario_lua = Lua::new();
         register_test_assertions(&scenario_lua)
             .map_err(|e| format!("failed to register test assertions: {e}"))?;
+
+        #[cfg(feature = "test-utils")]
+        mlua_lspec::register(&scenario_lua)
+            .map_err(|e| format!("failed to register lspec: {e}"))?;
 
         let scenario_table: Table = scenario_lua
             .load(script)

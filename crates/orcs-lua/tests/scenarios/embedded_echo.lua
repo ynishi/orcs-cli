@@ -3,7 +3,7 @@
 -- Tests the built-in echo component loaded via component_name.
 -- This validates that named script loading works through the scenario framework.
 
-local test = orcs.test
+local expect = lust.expect
 
 return {
     name = "Echo Component",
@@ -15,7 +15,7 @@ return {
         {
             name = "embedded echo component loads",
             run = function(h)
-                test.eq(h:status(), "Idle")
+                expect(h:status()).to.equal("Idle")
             end,
         },
         {
@@ -23,15 +23,15 @@ return {
             run = function(h)
                 -- The built-in echo component echoes payload on "echo" operation
                 local result = h:request("Echo", "echo", { msg = "test" })
-                test.type_is(result, "table", "should return a table")
+                expect(type(result)).to.equal("table")
             end,
         },
         {
             name = "embedded echo responds to veto",
             run = function(h)
                 local response = h:veto()
-                test.eq(response, "Abort")
-                test.eq(h:status(), "Aborted")
+                expect(response).to.equal("Abort")
+                expect(h:status()).to.equal("Aborted")
             end,
         },
     },

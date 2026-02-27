@@ -2,7 +2,7 @@
 --
 -- Tests the fundamental request/signal cycle of a simple echo component.
 
-local test = orcs.test
+local expect = lust.expect
 
 return {
     name = "Echo Component Basics",
@@ -50,14 +50,14 @@ return {
             name = "echo returns payload message",
             run = function(h)
                 local result = h:request("Echo", "echo", { message = "hello world" })
-                test.eq(result.message, "hello world")
+                expect(result.message).to.equal("hello world")
             end,
         },
         {
             name = "echo includes request count",
             run = function(h)
                 local r1 = h:request("Echo", "echo", { message = "first" })
-                test.eq(r1.count, 1)
+                expect(r1.count).to.equal(1)
             end,
         },
         {
@@ -66,7 +66,7 @@ return {
                 h:request("Echo", "echo", { message = "a" })
                 h:request("Echo", "echo", { message = "b" })
                 local count_result = h:request("Echo", "count", {})
-                test.eq(count_result.count, 3) -- echo + echo + count itself
+                expect(count_result.count).to.equal(3) -- echo + echo + count itself
             end,
         },
         {
@@ -75,8 +75,8 @@ return {
                 local ok, err = pcall(function()
                     h:request("Echo", "nonexistent", {})
                 end)
-                test.ok(not ok, "should return error for unknown op")
-                test.contains(tostring(err), "unknown operation")
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match("unknown operation")
             end,
         },
 
@@ -86,18 +86,18 @@ return {
         {
             name = "veto signal aborts component",
             run = function(h)
-                test.eq(h:status(), "Idle")
+                expect(h:status()).to.equal("Idle")
                 local response = h:veto()
-                test.eq(response, "Abort")
-                test.eq(h:status(), "Aborted")
+                expect(response).to.equal("Abort")
+                expect(h:status()).to.equal("Aborted")
             end,
         },
         {
             name = "cancel signal is handled",
             run = function(h)
                 local response = h:cancel()
-                test.eq(response, "Handled")
-                test.eq(h:status(), "Idle") -- should stay Idle
+                expect(response).to.equal("Handled")
+                expect(h:status()).to.equal("Idle") -- should stay Idle
             end,
         },
 
@@ -109,7 +109,7 @@ return {
             run = function(h)
                 -- If state leaked from previous scenarios, count would be > 1
                 local result = h:request("Echo", "echo", { message = "fresh" })
-                test.eq(result.count, 1, "should be first request in fresh harness")
+                expect(result.count).to.equal(1)
             end,
         },
 
@@ -123,10 +123,10 @@ return {
                 h:request("Echo", "count", {})
 
                 local log = h:request_log()
-                test.len(log, 2)
-                test.eq(log[1].operation, "echo")
-                test.eq(log[1].success, true)
-                test.eq(log[2].operation, "count")
+                expect(#log).to.equal(2)
+                expect(log[1].operation).to.equal("echo")
+                expect(log[1].success).to.equal(true)
+                expect(log[2].operation).to.equal("count")
             end,
         },
         {
@@ -136,9 +136,9 @@ return {
                 h:veto()
 
                 local log = h:signal_log()
-                test.len(log, 2)
-                test.eq(log[1].response, "Handled")
-                test.eq(log[2].response, "Abort")
+                expect(#log).to.equal(2)
+                expect(log[1].response).to.equal("Handled")
+                expect(log[2].response).to.equal("Abort")
             end,
         },
         {
@@ -148,8 +148,8 @@ return {
                 h:cancel()
                 h:clear_logs()
 
-                test.len(h:request_log(), 0)
-                test.len(h:signal_log(), 0)
+                expect(#h:request_log()).to.equal(0)
+                expect(#h:signal_log()).to.equal(0)
             end,
         },
     },

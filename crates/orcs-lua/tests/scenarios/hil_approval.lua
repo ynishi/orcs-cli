@@ -3,7 +3,7 @@
 -- Tests the approval request → pending → resolve flow
 -- using a component that wraps approval logic.
 
-local test = orcs.test
+local expect = lust.expect
 
 return {
     name = "HIL Approval Flow",
@@ -106,8 +106,8 @@ return {
                     operation = "write",
                     description = "write to config.txt",
                 })
-                test.eq(result.approval_id, "req-1")
-                test.eq(result.status, "pending")
+                expect(result.approval_id).to.equal("req-1")
+                expect(result.status).to.equal("pending")
             end,
         },
         {
@@ -115,7 +115,7 @@ return {
             run = function(h)
                 h:request("Hil", "submit", { id = "req-1", operation = "write" })
                 local status = h:request("Hil", "status", { id = "req-1" })
-                test.eq(status.status, "pending")
+                expect(status.status).to.equal("pending")
             end,
         },
         {
@@ -124,8 +124,8 @@ return {
                 local ok, err = pcall(function()
                     h:request("Hil", "status", { id = "nonexistent" })
                 end)
-                test.ok(not ok)
-                test.contains(tostring(err), "not found")
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match("not found")
             end,
         },
         {
@@ -135,7 +135,7 @@ return {
                 h:request("Hil", "submit", { id = "b", operation = "write" })
                 h:request("Hil", "submit", { id = "c", operation = "exec" })
                 local result = h:request("Hil", "pending_count", {})
-                test.eq(result.count, 3)
+                expect(result.count).to.equal(3)
             end,
         },
 
@@ -148,10 +148,10 @@ return {
                 h:request("Hil", "submit", { id = "req-1", operation = "write" })
 
                 local response = h:approve("req-1")
-                test.eq(response, "Handled")
+                expect(response).to.equal("Handled")
 
                 local status = h:request("Hil", "status", { id = "req-1" })
-                test.eq(status.status, "approved")
+                expect(status.status).to.equal("approved")
             end,
         },
         {
@@ -163,14 +163,14 @@ return {
                 h:approve("req-1")
 
                 local count = h:request("Hil", "pending_count", {})
-                test.eq(count.count, 1, "only req-2 should remain pending")
+                expect(count.count).to.equal(1)
             end,
         },
         {
             name = "approve nonexistent is ignored",
             run = function(h)
                 local response = h:approve("ghost")
-                test.eq(response, "Ignored")
+                expect(response).to.equal("Ignored")
             end,
         },
 
@@ -183,10 +183,10 @@ return {
                 h:request("Hil", "submit", { id = "req-1", operation = "delete" })
 
                 local response = h:reject("req-1", "too dangerous")
-                test.eq(response, "Handled")
+                expect(response).to.equal("Handled")
 
                 local status = h:request("Hil", "status", { id = "req-1" })
-                test.eq(status.status, "rejected")
+                expect(status.status).to.equal("rejected")
             end,
         },
 
@@ -202,18 +202,18 @@ return {
 
                 -- Confirm 3 pending before veto
                 local count = h:request("Hil", "pending_count", {})
-                test.eq(count.count, 3, "3 pending before veto")
+                expect(count.count).to.equal(3)
 
                 local response = h:veto()
-                test.eq(response, "Abort")
-                test.eq(h:status(), "Aborted")
+                expect(response).to.equal("Abort")
+                expect(h:status()).to.equal("Aborted")
 
                 -- After veto, component is aborted and rejects requests
                 local ok, err = pcall(function()
                     h:request("Hil", "pending_count", {})
                 end)
-                test.ok(not ok, "aborted component should reject requests")
-                test.contains(tostring(err), "aborted")
+                expect(ok).to.equal(false)
+                expect(tostring(err)).to.match("aborted")
             end,
         },
 
@@ -230,13 +230,13 @@ return {
                 h:reject("dangerous", "nope")
 
                 local safe_status = h:request("Hil", "status", { id = "safe" })
-                test.eq(safe_status.status, "approved")
+                expect(safe_status.status).to.equal("approved")
 
                 local danger_status = h:request("Hil", "status", { id = "dangerous" })
-                test.eq(danger_status.status, "rejected")
+                expect(danger_status.status).to.equal("rejected")
 
                 local count = h:request("Hil", "pending_count", {})
-                test.eq(count.count, 0)
+                expect(count.count).to.equal(0)
             end,
         },
     },
