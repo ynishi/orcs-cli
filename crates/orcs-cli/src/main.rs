@@ -117,10 +117,7 @@ impl CliConfigResolver {
         });
 
         // --sandbox: resolve to explicit dir (handled by caller via WorkDir)
-        let sandbox_dir = args
-            .sandbox
-            .as_ref()
-            .and_then(|opt_path| opt_path.clone());
+        let sandbox_dir = args.sandbox.as_ref().and_then(|opt_path| opt_path.clone());
 
         Self {
             project_root,

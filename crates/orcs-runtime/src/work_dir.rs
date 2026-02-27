@@ -79,6 +79,12 @@ impl WorkDir {
     }
 }
 
+impl AsRef<Path> for WorkDir {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +136,17 @@ mod tests {
         let file = path.join("test.txt");
         std::fs::write(&file, "hello").expect("should write file inside WorkDir");
         assert!(file.exists());
+    }
+
+    #[test]
+    fn as_ref_path_matches_path_method() {
+        let wd = WorkDir::temporary().expect("should create temporary WorkDir");
+        let via_path: &Path = wd.path();
+        let via_as_ref: &Path = wd.as_ref();
+        assert_eq!(
+            via_path, via_as_ref,
+            "AsRef<Path> should delegate to path()"
+        );
     }
 
     #[test]

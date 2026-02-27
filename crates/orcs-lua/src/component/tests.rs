@@ -201,8 +201,7 @@ mod exec_tests {
             "#,
             cmd
         );
-        let mut comp =
-            LuaComponent::from_script(&script, test_policy()).expect("load exec script");
+        let mut comp = LuaComponent::from_script(&script, test_policy()).expect("load exec script");
         comp.set_child_context(Box::new(PermissiveContext));
         comp
     }
