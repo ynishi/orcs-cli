@@ -302,6 +302,7 @@ return {
     namespace = "mcp",
     subscriptions = {},
     elevated = true,
+    output_to_io = true,
 
     init = function(cfg)
         if cfg and type(cfg) == "table" then
@@ -325,11 +326,59 @@ return {
     end,
 
     on_request = function(request)
-        local handler = handlers[request.operation]
-        if handler then
-            return handler(request.payload)
+        local op = request.operation
+
+        -- Runtime @component routing sends operation="input" with payload.message.
+        -- Parse the message to extract the real operation and arguments.
+        if op == "input" then
+            local msg = ""
+            if type(request.payload) == "table" then
+                msg = request.payload.message or ""
+            elseif type(request.payload) == "string" then
+                msg = request.payload
+            end
+            msg = msg:match("^%s*(.-)%s*$") or ""
+
+            -- Parse: "op args" or "op {json}" or bare "op"
+            local parsed_op, rest = msg:match("^(%S+)%s+(.+)$")
+            if parsed_op then
+                op = parsed_op:lower()
+                -- Try JSON parse for structured args
+                local ok_json, parsed_payload = pcall(orcs.json_parse, rest)
+                if ok_json and type(parsed_payload) == "table" then
+                    request.payload = parsed_payload
+                else
+                    request.payload = { message = rest, query = rest, name = rest }
+                end
+            elseif msg ~= "" then
+                op = msg:lower()
+                request.payload = {}
+            else
+                op = "status"
+                request.payload = {}
+            end
         end
-        return { success = false, error = "unknown operation: " .. tostring(request.operation) }
+
+        local handler = handlers[op]
+        if handler then
+            local result = handler(request.payload)
+            -- For CLI @mcp_manager routing, output the result directly
+            if request.operation == "input" and result then
+                if result.success and result.data then
+                    local data = result.data
+                    if type(data) == "table" then
+                        data = orcs.json_encode(data)
+                    end
+                    orcs.output("[MCPManager] " .. tostring(data))
+                elseif not result.success then
+                    orcs.output("[MCPManager] Error: " .. tostring(result.error or "unknown"))
+                else
+                    orcs.output("[MCPManager] ok")
+                end
+            end
+            return result
+        end
+        return { success = false, error = "unknown operation: " .. tostring(op) }
     end,
 
     on_signal = function(signal)
