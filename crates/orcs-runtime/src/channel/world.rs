@@ -22,8 +22,8 @@
 //! let root = world.create_channel(ChannelConfig::interactive());
 //!
 //! // Spawn child channels
-//! let agent = world.spawn(root).unwrap();
-//! let tool = world.spawn(agent).unwrap();
+//! let agent = world.spawn(root).expect("parent exists");
+//! let tool = world.spawn(agent).expect("parent exists");
 //!
 //! // Kill cascades to descendants
 //! world.kill(agent, "cancelled".into());
@@ -72,11 +72,11 @@ use std::collections::HashMap;
 /// let root = world.create_channel(ChannelConfig::interactive());
 ///
 /// // Spawn and complete a child
-/// let child = world.spawn(root).unwrap();
+/// let child = world.spawn(root).expect("parent exists");
 /// world.complete(child);
 ///
 /// assert_eq!(
-///     world.get(&child).unwrap().state(),
+///     world.get(&child).expect("child channel exists").state(),
 ///     &ChannelState::Completed
 /// );
 /// ```
@@ -127,8 +127,8 @@ impl World {
     ///
     /// // Create an interactive (IO) channel
     /// let io = world.create_channel(ChannelConfig::interactive());
-    /// assert!(world.get(&io).unwrap().parent().is_none());
-    /// assert_eq!(world.get(&io).unwrap().priority(), 255);
+    /// assert!(world.get(&io).expect("channel exists").parent().is_none());
+    /// assert_eq!(world.get(&io).expect("channel exists").priority(), 255);
     ///
     /// // Create a background root channel
     /// let bg = world.create_channel(ChannelConfig::background());
@@ -183,7 +183,7 @@ impl World {
     /// let root = world.create_channel(ChannelConfig::interactive());
     ///
     /// let child = world.spawn(root).expect("parent exists");
-    /// assert_eq!(world.get(&child).unwrap().parent(), Some(root));
+    /// assert_eq!(world.get(&child).expect("child channel exists").parent(), Some(root));
     /// ```
     pub fn spawn(&mut self, parent: ChannelId) -> Option<ChannelId> {
         self.spawn_with(parent, ChannelConfig::default())
@@ -220,19 +220,19 @@ impl World {
     /// // Spawn a background channel
     /// let bg = world.spawn_with(root, ChannelConfig::background())
     ///     .expect("parent exists");
-    /// assert_eq!(world.get(&bg).unwrap().priority(), 10);
-    /// assert!(!world.get(&bg).unwrap().can_spawn());
+    /// assert_eq!(world.get(&bg).expect("channel exists").priority(), 10);
+    /// assert!(!world.get(&bg).expect("channel exists").can_spawn());
     ///
     /// // Spawn a tool channel (inherits elevated from interactive parent)
     /// let tool = world.spawn_with(root, ChannelConfig::tool())
     ///     .expect("parent exists");
-    /// assert_eq!(world.get(&tool).unwrap().priority(), 100);
-    /// assert_eq!(world.get(&tool).unwrap().config().max_privilege(), MaxPrivilege::Elevated);
+    /// assert_eq!(world.get(&tool).expect("channel exists").priority(), 100);
+    /// assert_eq!(world.get(&tool).expect("channel exists").config().max_privilege(), MaxPrivilege::Elevated);
     ///
     /// // Spawn from background parent (max_privilege capped to Standard)
     /// let child = world.spawn_with(bg, ChannelConfig::tool())
     ///     .expect("parent exists");
-    /// assert_eq!(world.get(&child).unwrap().config().max_privilege(), MaxPrivilege::Standard);
+    /// assert_eq!(world.get(&child).expect("channel exists").config().max_privilege(), MaxPrivilege::Standard);
     /// ```
     pub fn spawn_with(&mut self, parent: ChannelId, config: ChannelConfig) -> Option<ChannelId> {
         let id = ChannelId::new();
@@ -308,8 +308,8 @@ impl World {
     ///
     /// let mut world = World::new();
     /// let root = world.create_channel(ChannelConfig::interactive());
-    /// let agent = world.spawn(root).unwrap();
-    /// let tool = world.spawn(agent).unwrap();
+    /// let agent = world.spawn(root).expect("parent exists");
+    /// let tool = world.spawn(agent).expect("parent exists");
     ///
     /// // Killing agent also removes tool
     /// world.kill(agent, "task cancelled".into());
@@ -436,8 +436,8 @@ impl World {
     ///
     /// let mut world = World::new();
     /// let root = world.create_channel(ChannelConfig::interactive());
-    /// let child = world.spawn(root).unwrap();
-    /// let grandchild = world.spawn(child).unwrap();
+    /// let child = world.spawn(root).expect("parent exists");
+    /// let grandchild = world.spawn(child).expect("parent exists");
     ///
     /// assert!(world.is_descendant_of(child, root));
     /// assert!(world.is_descendant_of(grandchild, root));

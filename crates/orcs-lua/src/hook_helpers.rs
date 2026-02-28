@@ -152,7 +152,8 @@ impl std::fmt::Debug for LuaHook {
 ///
 /// ```
 /// # use orcs_lua::hook_helpers::parse_hook_descriptor;
-/// let (fql, point) = parse_hook_descriptor("builtin::llm:request.pre_dispatch").unwrap();
+/// let (fql, point) = parse_hook_descriptor("builtin::llm:request.pre_dispatch")
+///     .expect("valid descriptor should parse");
 /// assert_eq!(fql.to_string(), "builtin::llm");
 /// assert_eq!(point.to_string(), "request.pre_dispatch");
 /// ```

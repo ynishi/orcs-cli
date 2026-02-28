@@ -78,7 +78,7 @@
 //! use orcs_runtime::sandbox::ProjectSandbox;
 //! use std::sync::Arc;
 //!
-//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
+//! let sandbox = Arc::new(ProjectSandbox::new(".").expect("sandbox init"));
 //!
 //! let loader = ScriptLoader::new(sandbox)
 //!     .with_path("~/.orcs/components")

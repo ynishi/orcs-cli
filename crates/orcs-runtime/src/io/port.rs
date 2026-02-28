@@ -42,13 +42,13 @@
 //!     let (port, input_handle, mut output_handle) = IOPort::new(channel_id, 32);
 //!
 //!     // View layer sends input
-//!     input_handle.send(IOInput::line("y")).await.unwrap();
+//!     input_handle.send(IOInput::line("y")).await.expect("send input");
 //!
 //!     // Bridge layer receives and processes
 //!     // (in ClientRunner)
 //!
 //!     // Bridge layer sends output
-//!     port.send(IOOutput::info("Approved")).await.unwrap();
+//!     port.send(IOOutput::info("Approved")).await.expect("send output");
 //!
 //!     // View layer receives output
 //!     let output = output_handle.recv().await;

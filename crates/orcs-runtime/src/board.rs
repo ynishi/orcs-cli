@@ -28,7 +28,7 @@
 //!
 //! // Auto-written by EventEmitter; manual append for illustration:
 //! {
-//!     let mut b = board.write().unwrap();
+//!     let mut b = board.write().expect("board write lock");
 //!     b.append(BoardEntry {
 //!         timestamp: chrono::Utc::now(),
 //!         source: ComponentId::builtin("tool"),
@@ -40,7 +40,7 @@
 //!
 //! // Query recent entries
 //! {
-//!     let b = board.read().unwrap();
+//!     let b = board.read().expect("board read lock");
 //!     let recent = b.recent(10);
 //!     assert_eq!(recent.len(), 1);
 //! }
