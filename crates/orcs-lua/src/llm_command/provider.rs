@@ -266,6 +266,13 @@ fn blocks_to_wire_messages(cb: &ClassifiedBlocks<'_>, role: &Role) -> Vec<serde_
         }));
     }
 
+    // Text blocks alongside tool_results: emit as separate user message
+    // after the tool results (e.g., turn budget reminders).
+    if !cb.text_parts.is_empty() && !cb.tool_results.is_empty() && cb.tool_uses.is_empty() {
+        let text = cb.text_parts.join("");
+        msgs.push(serde_json::json!({"role": role, "content": text}));
+    }
+
     // Text-only blocks (no tool_use or tool_result)
     if cb.tool_uses.is_empty() && cb.tool_results.is_empty() {
         let text = cb.text_parts.join("");

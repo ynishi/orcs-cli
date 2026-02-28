@@ -91,6 +91,11 @@ const RETRY_MAX_DELAY_SECS: u64 = 30;
 /// Default maximum number of tool-loop turns (resolve mode).
 const DEFAULT_MAX_TOOL_TURNS: u32 = 10;
 
+/// Turn budget reminder threshold: inject a reminder when remaining
+/// turns fall to this value or below (research shows 27-60% performance
+/// degradation without reminders — arXiv:2510.16786).
+const TURN_REMINDER_THRESHOLD: u32 = 3;
+
 // ── Shared HTTP Client ────────────────────────────────────────────────
 
 /// Wrapper for `reqwest::Client` stored in Lua app_data.
@@ -605,7 +610,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             // hil_intents=false: Suspended caught → error tool_results synthesized
             //   so the session stays consistent (every tool_use has a matching
             //   tool_result), preventing API 400 on session resume.
-            let tool_result_content = match dispatch_intents_to_results(
+            let mut tool_result_content = match dispatch_intents_to_results(
                 lua,
                 &parsed_resp.intents,
                 llm_opts.hil_intents,
@@ -637,6 +642,29 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                     return Err(e);
                 }
             };
+
+            // ── Turn budget reminder ──
+            // Inject a reminder when approaching the turn limit so the LLM
+            // can prioritize remaining work (research shows 27-60% perf drop
+            // without reminders).
+            let remaining = llm_opts.max_tool_turns.saturating_sub(tool_turn + 1);
+            if remaining > 0 && remaining <= TURN_REMINDER_THRESHOLD {
+                if let MessageContent::Blocks(ref mut blocks) = tool_result_content {
+                    blocks.push(ContentBlock::Text {
+                        text: format!(
+                            "[System] You have {} tool turn(s) remaining before the limit. \
+                             Prioritize completing the most important remaining work.",
+                            remaining
+                        ),
+                    });
+                    tracing::info!(
+                        "tool turn {}: injected turn budget reminder ({} remaining)",
+                        tool_turn,
+                        remaining
+                    );
+                }
+            }
+
             messages.push(session::Message {
                 role: orcs_types::intent::Role::User,
                 content: tool_result_content.clone(),
