@@ -74,7 +74,10 @@ use session::{
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// Default max_tokens for Anthropic (required field).
-const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
+///
+/// 8192 is chosen because code-generation tool calls (edit/write) routinely
+/// exceed 4096 output tokens, causing truncated JSON and `resolve=false`.
+const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 8192;
 
 /// Maximum response body size (10 MiB).
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024;
@@ -659,6 +662,121 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 parsed_resp.intents.len(),
                 intent_names.join(", ")
             );
+            continue;
+        }
+
+        // ── MaxTokens continuation: recover from truncated output ──
+        //
+        // When the LLM hits max_tokens during a resolve loop, the output is
+        // truncated.  Two sub-cases:
+        //   (a) Complete intents exist → resolve them, then continue so the
+        //       model can finish its remaining work.
+        //   (b) No intents (text-only truncation) → store partial text and
+        //       inject a continuation prompt so the model picks up where it
+        //       left off.
+        let should_continue_on_max_tokens = parsed_resp.stop_reason == StopReason::MaxTokens
+            && llm_opts.resolve
+            && tool_turn < llm_opts.max_tool_turns;
+
+        if should_continue_on_max_tokens {
+            tracing::warn!(
+                "llm response truncated by max_tokens at turn={} (intents={}, content_len={}), attempting continuation",
+                tool_turn,
+                parsed_resp.intents.len(),
+                parsed_resp.content.len()
+            );
+
+            if !parsed_resp.intents.is_empty() {
+                // Case (a): complete intents survived truncation — resolve them.
+                let assistant_blocks = build_assistant_content_blocks(&parsed_resp);
+                messages.push(session::Message {
+                    role: orcs_types::intent::Role::Assistant,
+                    content: assistant_blocks.clone(),
+                });
+                append_message(
+                    lua,
+                    &session_id,
+                    orcs_types::intent::Role::Assistant,
+                    assistant_blocks,
+                );
+
+                let tool_result_content = match dispatch_intents_to_results(
+                    lua,
+                    &parsed_resp.intents,
+                    llm_opts.hil_intents,
+                ) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        if llm_opts.hil_intents
+                            && crate::extract_suspended_info(&e).is_some()
+                        {
+                            truncate_session(lua, &session_id, session_checkpoint);
+                            return Err(e);
+                        }
+                        let error_blocks: Vec<ContentBlock> = parsed_resp
+                            .intents
+                            .iter()
+                            .map(|intent| ContentBlock::ToolResult {
+                                tool_use_id: intent.id.clone(),
+                                content: format!("dispatch error: {e}"),
+                                is_error: Some(true),
+                            })
+                            .collect();
+                        let fallback = MessageContent::Blocks(error_blocks);
+                        messages.push(session::Message {
+                            role: orcs_types::intent::Role::User,
+                            content: fallback.clone(),
+                        });
+                        append_message(
+                            lua,
+                            &session_id,
+                            orcs_types::intent::Role::User,
+                            fallback,
+                        );
+                        return Err(e);
+                    }
+                };
+                messages.push(session::Message {
+                    role: orcs_types::intent::Role::User,
+                    content: tool_result_content.clone(),
+                });
+                append_message(
+                    lua,
+                    &session_id,
+                    orcs_types::intent::Role::User,
+                    tool_result_content,
+                );
+            } else {
+                // Case (b): text-only truncation — store partial content and
+                // inject a continuation prompt.
+                let assistant_content = MessageContent::Text(parsed_resp.content.clone());
+                messages.push(session::Message {
+                    role: orcs_types::intent::Role::Assistant,
+                    content: assistant_content.clone(),
+                });
+                append_message(
+                    lua,
+                    &session_id,
+                    orcs_types::intent::Role::Assistant,
+                    assistant_content,
+                );
+
+                let continuation = MessageContent::Text(
+                    "Your previous response was truncated due to output token limits. \
+                     Please continue from where you left off."
+                        .to_string(),
+                );
+                messages.push(session::Message {
+                    role: orcs_types::intent::Role::User,
+                    content: continuation.clone(),
+                });
+                append_message(
+                    lua,
+                    &session_id,
+                    orcs_types::intent::Role::User,
+                    continuation,
+                );
+            }
             continue;
         }
 

@@ -54,12 +54,25 @@ end
 
 --- Output LLM response to IO and emit observability event.
 local function emit_success(message, llm_resp)
+    if llm_resp.stop_reason == "max_tokens" then
+        orcs.log("warn", string.format(
+            "concierge: response truncated by max_tokens (session=%s, content_len=%d)",
+            (llm_resp.session_id or "none"):sub(1, 12),
+            #(llm_resp.content or "")
+        ))
+        orcs.output_with_level(
+            "[Concierge] Warning: response was truncated due to output token limit. "
+            .. "The result may be incomplete.",
+            "warn"
+        )
+    end
     orcs.output("[Concierge] " .. (llm_resp.content or ""))
     orcs.emit_event("Extension", "llm_response", {
         message = message,
         response = llm_resp.content,
         session_id = llm_resp.session_id,
         cost = llm_resp.cost,
+        stop_reason = llm_resp.stop_reason,
         source = "concierge",
     })
     orcs.log("info", string.format(
@@ -403,11 +416,34 @@ local function handle_process(input)
         local recommendation, skill_count = fetch_and_register_skills(message, history_context)
         register_delegate_intent()
 
-        -- Compose system block (skill recommendations only).
+        -- Compose system block: concierge role + skill recommendations.
         -- Tool definitions are provided exclusively via the API tools parameter
         -- (built from IntentRegistry in build_tools_for_provider). Embedding tool
         -- descriptions in the prompt text would conflict with native tool_use.
-        local system_full = recommendation
+        local concierge_role = table.concat({
+            "## Your Role: Concierge (Coordinator)",
+            "You are the concierge — a coordinating agent, NOT an implementer.",
+            "Your job is to understand the user's intent, plan the approach, and delegate work.",
+            "",
+            "### Capabilities",
+            "- Read files, search code (read, grep, glob) for analysis and planning",
+            "- Delegate implementation tasks to sub-agents via `delegate_task`",
+            "- Invoke skills for specialized workflows",
+            "",
+            "### Constraints",
+            "- You do NOT have write/edit capability. Do not attempt to write or edit files directly.",
+            "- For any task that requires creating or modifying files, use `delegate_task` to assign",
+            "  the work to a sub-agent that has full tool access (read, write, grep, glob, exec).",
+            "- Focus on: understanding requirements, reading relevant code, planning, and delegating.",
+            "- Provide concise status updates to the user about delegated work.",
+        }, "\n")
+
+        local system_parts = {}
+        system_parts[#system_parts + 1] = concierge_role
+        if recommendation ~= "" then
+            system_parts[#system_parts + 1] = recommendation
+        end
+        local system_full = table.concat(system_parts, "\n\n")
 
         -- Compose context blocks
         local history_block = ""
