@@ -735,9 +735,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 ) {
                     Ok(content) => content,
                     Err(e) => {
-                        if llm_opts.hil_intents
-                            && crate::extract_suspended_info(&e).is_some()
-                        {
+                        if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
                             truncate_session(lua, &session_id, session_checkpoint);
                             return Err(e);
                         }
@@ -755,12 +753,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                             role: orcs_types::intent::Role::User,
                             content: fallback.clone(),
                         });
-                        append_message(
-                            lua,
-                            &session_id,
-                            orcs_types::intent::Role::User,
-                            fallback,
-                        );
+                        append_message(lua, &session_id, orcs_types::intent::Role::User, fallback);
                         return Err(e);
                     }
                 };
