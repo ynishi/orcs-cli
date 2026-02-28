@@ -102,7 +102,7 @@ local function handle_process(payload)
             if llm_config.api_key        then opts.api_key         = llm_config.api_key end
             if llm_config.temperature    then opts.temperature     = llm_config.temperature end
             if llm_config.max_tokens     then opts.max_tokens      = llm_config.max_tokens end
-            if llm_config.timeout        then opts.timeout         = llm_config.timeout end
+            opts.timeout = llm_config.timeout or math.floor(delegate_timeout_ms / 1000)
             if llm_config.max_tool_turns then opts.max_tool_turns  = llm_config.max_tool_turns end
             opts.resolve = true  -- Enable tool-use for the delegate
             opts.hil_intents = true  -- Propagate Suspended for HIL approval
