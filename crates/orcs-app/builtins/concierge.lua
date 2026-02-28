@@ -16,9 +16,13 @@
 
 -- === Module State ===
 
--- Configurable timeouts (overridden via _delegate_timeout_ms global if set)
+-- Configurable timeouts (overridden via globals injected by agent_mgr)
 local delegate_timeout_ms = (_delegate_timeout_ms and type(_delegate_timeout_ms) == "number")
     and _delegate_timeout_ms
+    or 600000  -- 10 minutes default
+
+local concierge_timeout_ms = (_concierge_timeout_ms and type(_concierge_timeout_ms) == "number")  -- luacheck: ignore 113
+    and _concierge_timeout_ms  -- luacheck: ignore 113
     or 600000  -- 10 minutes default
 
 local busy = false
@@ -43,6 +47,10 @@ local function build_llm_opts(input)
     if llm_cfg.max_tokens     then opts.max_tokens      = llm_cfg.max_tokens end
     if llm_cfg.timeout        then opts.timeout         = llm_cfg.timeout end
     if llm_cfg.max_tool_turns then opts.max_tool_turns  = llm_cfg.max_tool_turns end
+    -- Wall-clock timeout for the entire resolve loop
+    if concierge_timeout_ms > 0 then
+        opts.overall_timeout = math.floor(concierge_timeout_ms / 1000)
+    end
     return opts
 end
 

@@ -127,6 +127,7 @@ impl OrcsConfig {
             },
             "timeouts": {
                 "delegate_ms": self.timeouts.delegate_ms,
+                "concierge_ms": self.timeouts.concierge_ms,
             },
         })
     }
@@ -340,15 +341,23 @@ impl UiConfig {
 pub struct TimeoutsConfig {
     /// Timeout for delegate/invoke operations in milliseconds.
     ///
-    /// Used by agent_mgr, concierge, and delegate_worker for task
-    /// delegation. Default: 600000 (10 minutes).
+    /// Used by agent_mgr and delegate_worker for task delegation.
+    /// Default: 600000 (10 minutes).
     pub delegate_ms: u64,
+
+    /// Wall-clock timeout for concierge resolve loop in milliseconds.
+    ///
+    /// Bounds the total time concierge spends on a single request
+    /// (all LLM API calls + tool dispatches combined).
+    /// Default: 600000 (10 minutes).  Set to 0 to disable.
+    pub concierge_ms: u64,
 }
 
 impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             delegate_ms: 600_000,
+            concierge_ms: 600_000,
         }
     }
 }
@@ -359,6 +368,9 @@ impl TimeoutsConfig {
 
         if other.delegate_ms != default.delegate_ms {
             self.delegate_ms = other.delegate_ms;
+        }
+        if other.concierge_ms != default.concierge_ms {
+            self.concierge_ms = other.concierge_ms;
         }
     }
 }

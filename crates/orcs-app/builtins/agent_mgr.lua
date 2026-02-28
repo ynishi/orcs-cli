@@ -787,10 +787,12 @@ end
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
 local MAX_AGENT_INTENTS = 3  -- Max agent IntentDefs exposed to LLM per dispatch
 local DEFAULT_DELEGATE_TIMEOUT_MS = 600000  -- 10 minutes
+local DEFAULT_CONCIERGE_TIMEOUT_MS = 600000 -- 10 minutes
 local DEFAULT_PING_TIMEOUT_MS = 5000        -- 5 seconds
 
 -- Configurable timeouts (updated from cfg._global.timeouts in init())
 local delegate_timeout_ms = DEFAULT_DELEGATE_TIMEOUT_MS
+local concierge_timeout_ms = DEFAULT_CONCIERGE_TIMEOUT_MS
 local ping_timeout_ms = DEFAULT_PING_TIMEOUT_MS
 
 -- Component settings (populated from config in init())
@@ -1431,6 +1433,9 @@ return {
                 if g.timeouts.delegate_ms then
                     delegate_timeout_ms = g.timeouts.delegate_ms
                 end
+                if g.timeouts.concierge_ms then
+                    concierge_timeout_ms = g.timeouts.concierge_ms
+                end
             end
             -- Per-component ping timeout override
             if cfg.ping_timeout_ms then
@@ -1455,7 +1460,10 @@ return {
         if not concierge then
             local result = orcs.spawn_runner({
                 builtin = "concierge.lua",
-                globals = { _delegate_timeout_ms = delegate_timeout_ms },
+                globals = {
+                    _delegate_timeout_ms = delegate_timeout_ms,
+                    _concierge_timeout_ms = concierge_timeout_ms,
+                },
             })
             if result.ok then
                 concierge_fqn = result.fqn
