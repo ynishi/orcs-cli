@@ -80,21 +80,58 @@ local function handle_process(payload)
         else
             -- Use built-in orcs.llm() with configured provider
             local opts = {}
-            if llm_config.provider    then opts.provider    = llm_config.provider end
-            if llm_config.model       then opts.model       = llm_config.model end
-            if llm_config.base_url    then opts.base_url    = llm_config.base_url end
-            if llm_config.api_key     then opts.api_key     = llm_config.api_key end
-            if llm_config.temperature then opts.temperature = llm_config.temperature end
-            if llm_config.max_tokens  then opts.max_tokens  = llm_config.max_tokens end
-            if llm_config.timeout     then opts.timeout     = llm_config.timeout end
+            if llm_config.provider       then opts.provider       = llm_config.provider end
+            if llm_config.model          then opts.model           = llm_config.model end
+            if llm_config.base_url       then opts.base_url        = llm_config.base_url end
+            if llm_config.api_key        then opts.api_key         = llm_config.api_key end
+            if llm_config.temperature    then opts.temperature     = llm_config.temperature end
+            if llm_config.max_tokens     then opts.max_tokens      = llm_config.max_tokens end
+            if llm_config.timeout        then opts.timeout         = llm_config.timeout end
+            if llm_config.max_tool_turns then opts.max_tool_turns  = llm_config.max_tool_turns end
             opts.resolve = true  -- Enable tool-use for the delegate
             opts.hil_intents = true  -- Propagate Suspended for HIL approval
 
             local resp = orcs.llm(prompt, opts)
+
+            -- Dynamic budget escalation: if tool_loop_limit hit, resume same
+            -- session with additional turns (+10, single extension only).
+            if resp and resp.error_kind == "tool_loop_limit" and resp.session_id then
+                local initial_turns = opts.max_tool_turns or 10
+                local extension = math.min(initial_turns, 10)
+                orcs.log("warn", string.format(
+                    "delegate-worker: task %s hit tool_loop_limit at %d turns, "
+                    .. "extending by %d (session=%s)",
+                    request_id, initial_turns, extension,
+                    (resp.session_id or ""):sub(1, 12)
+                ))
+                orcs.output(string.format(
+                    "[WARN] [Delegate:%s] Work incomplete: tool turn limit reached. "
+                    .. "Extending by %d turns...",
+                    request_id, extension
+                ))
+                opts.session_id = resp.session_id
+                opts.max_tool_turns = extension
+                resp = orcs.llm(
+                    "You ran out of tool turns. Continue and complete the task. "
+                    .. "Prioritize the most important remaining work.",
+                    opts
+                )
+            end
+
             if resp and resp.ok then
                 summary = resp.content or ""
                 cost = resp.cost
                 sess_id = resp.session_id
+                if resp.stop_reason == "max_tokens" then
+                    orcs.log("warn", string.format(
+                        "delegate-worker: task %s response truncated by max_tokens (content_len=%d)",
+                        request_id, #summary
+                    ))
+                    orcs.output_with_level(
+                        "[Delegate:" .. request_id .. "] Warning: response truncated by output token limit.",
+                        "warn"
+                    )
+                end
             else
                 err = (resp and resp.error) or "unknown error"
             end

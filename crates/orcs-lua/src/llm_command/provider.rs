@@ -266,6 +266,13 @@ fn blocks_to_wire_messages(cb: &ClassifiedBlocks<'_>, role: &Role) -> Vec<serde_
         }));
     }
 
+    // Text blocks alongside tool_results: emit as separate user message
+    // after the tool results (e.g., turn budget reminders).
+    if !cb.text_parts.is_empty() && !cb.tool_results.is_empty() && cb.tool_uses.is_empty() {
+        let text = cb.text_parts.join("");
+        msgs.push(serde_json::json!({"role": role, "content": text}));
+    }
+
     // Text-only blocks (no tool_use or tool_result)
     if cb.tool_uses.is_empty() && cb.tool_results.is_empty() {
         let text = cb.text_parts.join("");
@@ -691,8 +698,8 @@ mod tests {
         assert_eq!(msgs.len(), 1, "system message should be filtered out");
         assert_eq!(msgs[0]["role"], "user");
 
-        // max_tokens defaults to 4096
-        assert_eq!(body["max_tokens"], 4096);
+        // max_tokens defaults to ANTHROPIC_DEFAULT_MAX_TOKENS (8192)
+        assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["stream"], false);
     }
 

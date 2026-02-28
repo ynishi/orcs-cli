@@ -185,8 +185,14 @@ async fn main() -> Result<()> {
     let printer_slot = SharedPrinterSlot::new();
 
     // Setup logging: --debug > --verbose > RUST_LOG env > default "warn"
+    //
+    // --debug enables DEBUG for orcs crates only. External crates (hyper, h2,
+    // reqwest, tokio, rustls) stay at WARN to avoid flooding the terminal
+    // with HTTP frame/TLS debug output which causes the ExternalPrinter to hang.
     let filter = if args.debug {
-        EnvFilter::new("debug")
+        EnvFilter::new(
+            "debug,hyper=warn,h2=warn,reqwest=warn,rustls=warn,tokio=warn,tungstenite=warn",
+        )
     } else if args.verbose {
         EnvFilter::new("info")
     } else {

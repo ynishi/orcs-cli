@@ -227,13 +227,14 @@ return {
         local function build_llm_opts(input)
             local opts = {}
             local llm_cfg = input.llm_config or {}
-            if llm_cfg.provider   then opts.provider    = llm_cfg.provider end
-            if llm_cfg.model      then opts.model       = llm_cfg.model end
-            if llm_cfg.base_url   then opts.base_url    = llm_cfg.base_url end
-            if llm_cfg.api_key    then opts.api_key     = llm_cfg.api_key end
-            if llm_cfg.temperature then opts.temperature = llm_cfg.temperature end
-            if llm_cfg.max_tokens then opts.max_tokens  = llm_cfg.max_tokens end
-            if llm_cfg.timeout    then opts.timeout     = llm_cfg.timeout end
+            if llm_cfg.provider       then opts.provider       = llm_cfg.provider end
+            if llm_cfg.model          then opts.model           = llm_cfg.model end
+            if llm_cfg.base_url       then opts.base_url        = llm_cfg.base_url end
+            if llm_cfg.api_key        then opts.api_key         = llm_cfg.api_key end
+            if llm_cfg.temperature    then opts.temperature     = llm_cfg.temperature end
+            if llm_cfg.max_tokens     then opts.max_tokens      = llm_cfg.max_tokens end
+            if llm_cfg.timeout        then opts.timeout         = llm_cfg.timeout end
+            if llm_cfg.max_tool_turns then opts.max_tool_turns  = llm_cfg.max_tool_turns end
             return opts
         end
 
@@ -816,13 +817,14 @@ local intent_allowed_agents = {}
 -- Mapping from component_settings keys (llm_*) to LLM config keys (without prefix).
 -- Single source of truth: used by dispatch_llm(), delegate operation, and init() ping.
 local LLM_KEY_MAP = {
-    llm_provider    = "provider",
-    llm_model       = "model",
-    llm_base_url    = "base_url",
-    llm_api_key     = "api_key",
-    llm_temperature = "temperature",
-    llm_max_tokens  = "max_tokens",
-    llm_timeout     = "timeout",
+    llm_provider       = "provider",
+    llm_model          = "model",
+    llm_base_url       = "base_url",
+    llm_api_key        = "api_key",
+    llm_temperature    = "temperature",
+    llm_max_tokens     = "max_tokens",
+    llm_timeout        = "timeout",
+    llm_max_tool_turns = "max_tool_turns",
 }
 
 --- Extract LLM config from component_settings using LLM_KEY_MAP.
