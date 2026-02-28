@@ -618,7 +618,9 @@ pub(crate) fn tool_load_lua(
 /// The sandbox controls which paths are accessible. All file operations
 /// validate paths through the sandbox before any I/O.
 ///
-/// Adds: `orcs.read`, `orcs.write`, `orcs.grep`, `orcs.glob`, `orcs.mkdir`, `orcs.remove`, `orcs.mv`
+/// Delegates to:
+/// - [`register_rust_tool_wrappers`] — RustTool-backed file tools (read, write, grep, glob, mkdir, remove, mv)
+/// - [`register_utility_tools`] — scan_dir, parse_frontmatter, parse_toml, glob_match, load_lua
 ///
 /// # Errors
 ///
@@ -630,126 +632,140 @@ pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Re
     // Idempotent — register_base_orcs_functions also sets this.
     lua.set_app_data(Arc::clone(&sandbox));
 
-    // ── RustTool-backed positional wrappers ──────────────────────────
-    //
-    // The 7 file tools delegate to dispatch_rust_tool which provides:
-    //   - Capability checks (via ContextWrapper in app_data)
-    //   - Sandbox validation (via Arc<dyn SandboxPolicy> in app_data)
-    //   - Unified execution path (RustTool::execute)
-    //
-    // Tools are obtained from the IntentRegistry (single source of truth),
-    // avoiding duplicate Arc allocations from builtin_rust_tools().
-    {
-        use crate::tool_registry::{dispatch_rust_tool, ensure_registry};
+    register_rust_tool_wrappers(lua, &orcs_table)?;
+    register_utility_tools(lua, &orcs_table, &sandbox)?;
 
-        let registry = ensure_registry(lua)?;
+    tracing::debug!(
+        "Registered orcs tool functions (sandbox_root={})",
+        sandbox.root().display()
+    );
+    Ok(())
+}
 
-        /// Retrieves a builtin tool by name from the registry.
-        /// Panics in debug builds if missing (programming error — should never happen).
-        fn get_tool(
-            registry: &crate::tool_registry::IntentRegistry,
-            name: &str,
-        ) -> Option<std::sync::Arc<dyn orcs_component::RustTool>> {
-            match registry.get_tool(name) {
-                Some(t) => Some(std::sync::Arc::clone(t)),
-                None => {
-                    debug_assert!(false, "builtin tool '{name}' missing from IntentRegistry");
-                    tracing::error!(
-                        "builtin tool '{name}' missing from IntentRegistry — orcs.{name}() unavailable"
-                    );
-                    None
-                }
+/// Registers the 7 RustTool-backed file tools via [`dispatch_rust_tool`](crate::tool_registry::dispatch_rust_tool).
+///
+/// Tools are obtained from the IntentRegistry (single source of truth).
+/// Each tool delegates to `dispatch_rust_tool` which provides:
+///   - Capability checks (via ContextWrapper in app_data)
+///   - Sandbox validation (via Arc<dyn SandboxPolicy> in app_data)
+///   - Unified execution path (RustTool::execute)
+fn register_rust_tool_wrappers(lua: &Lua, orcs_table: &Table) -> Result<(), LuaError> {
+    use crate::tool_registry::{dispatch_rust_tool, ensure_registry};
+
+    let registry = ensure_registry(lua)?;
+
+    /// Retrieves a builtin tool by name from the registry.
+    /// Panics in debug builds if missing (programming error — should never happen).
+    fn get_tool(
+        registry: &crate::tool_registry::IntentRegistry,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn orcs_component::RustTool>> {
+        match registry.get_tool(name) {
+            Some(t) => Some(std::sync::Arc::clone(t)),
+            None => {
+                debug_assert!(false, "builtin tool '{name}' missing from IntentRegistry");
+                tracing::error!(
+                    "builtin tool '{name}' missing from IntentRegistry — orcs.{name}() unavailable"
+                );
+                None
             }
         }
-
-        /// Registers a deny stub for `orcs.<name>()` that returns
-        /// `{ok=false, error="tool unavailable: <name>"}`.
-        /// Used when a builtin tool is unexpectedly missing from the registry.
-        fn register_deny_stub(
-            lua: &Lua,
-            orcs_table: &Table,
-            name: &str,
-        ) -> Result<(), mlua::Error> {
-            let tool_name = name.to_string();
-            let f = lua.create_function(move |lua, _args: mlua::MultiValue| {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", format!("tool unavailable: {tool_name}"))?;
-                Ok(result)
-            })?;
-            orcs_table.set(name, f)?;
-            Ok(())
-        }
-
-        /// Registers a Lua positional wrapper that delegates to `dispatch_rust_tool`.
-        /// Falls back to a deny stub if the tool is missing from the registry.
-        macro_rules! register_wrapper {
-            // orcs.name(arg) — single required String arg
-            ($tool:expr, $name:literal, |$arg:ident: String|) => {
-                if let Some(t) = $tool {
-                    let f = lua.create_function(move |lua, $arg: String| {
-                        let args = lua.create_table()?;
-                        args.set(stringify!($arg), $arg)?;
-                        dispatch_rust_tool(lua, &*t, &args)
-                    })?;
-                    orcs_table.set($name, f)?;
-                } else {
-                    register_deny_stub(lua, &orcs_table, $name)?;
-                }
-            };
-            // orcs.name(arg1, arg2) — two required String args
-            ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: String|) => {
-                if let Some(t) = $tool {
-                    let f = lua.create_function(move |lua, ($a1, $a2): (String, String)| {
-                        let args = lua.create_table()?;
-                        args.set(stringify!($a1), $a1)?;
-                        args.set(stringify!($a2), $a2)?;
-                        dispatch_rust_tool(lua, &*t, &args)
-                    })?;
-                    orcs_table.set($name, f)?;
-                } else {
-                    register_deny_stub(lua, &orcs_table, $name)?;
-                }
-            };
-            // orcs.name(arg1, arg2?) — one required + one optional String arg
-            ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: Option<String>|) => {
-                if let Some(t) = $tool {
-                    let f =
-                        lua.create_function(move |lua, ($a1, opt): (String, Option<String>)| {
-                            let args = lua.create_table()?;
-                            args.set(stringify!($a1), $a1)?;
-                            if let Some(v) = opt {
-                                args.set(stringify!($a2), v)?;
-                            }
-                            dispatch_rust_tool(lua, &*t, &args)
-                        })?;
-                    orcs_table.set($name, f)?;
-                } else {
-                    register_deny_stub(lua, &orcs_table, $name)?;
-                }
-            };
-        }
-
-        let read_tool = get_tool(&registry, "read");
-        let write_tool = get_tool(&registry, "write");
-        let grep_tool = get_tool(&registry, "grep");
-        let glob_tool = get_tool(&registry, "glob");
-        let mkdir_tool = get_tool(&registry, "mkdir");
-        let remove_tool = get_tool(&registry, "remove");
-        let mv_tool = get_tool(&registry, "mv");
-        drop(registry);
-
-        register_wrapper!(read_tool, "read", |path: String|);
-        register_wrapper!(write_tool, "write", |path: String, content: String|);
-        register_wrapper!(grep_tool, "grep", |pattern: String, path: String|);
-        register_wrapper!(glob_tool, "glob", |pattern: String, dir: Option<String>|);
-        register_wrapper!(mkdir_tool, "mkdir", |path: String|);
-        register_wrapper!(remove_tool, "remove", |path: String|);
-        register_wrapper!(mv_tool, "mv", |src: String, dst: String|);
     }
 
+    /// Registers a deny stub for `orcs.<name>()` that returns
+    /// `{ok=false, error="tool unavailable: <name>"}`.
+    /// Used when a builtin tool is unexpectedly missing from the registry.
+    fn register_deny_stub(lua: &Lua, orcs_table: &Table, name: &str) -> Result<(), mlua::Error> {
+        let tool_name = name.to_string();
+        let f = lua.create_function(move |lua, _args: mlua::MultiValue| {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", format!("tool unavailable: {tool_name}"))?;
+            Ok(result)
+        })?;
+        orcs_table.set(name, f)?;
+        Ok(())
+    }
+
+    /// Registers a Lua positional wrapper that delegates to `dispatch_rust_tool`.
+    /// Falls back to a deny stub if the tool is missing from the registry.
+    macro_rules! register_wrapper {
+        // orcs.name(arg) — single required String arg
+        ($tool:expr, $name:literal, |$arg:ident: String|) => {
+            if let Some(t) = $tool {
+                let f = lua.create_function(move |lua, $arg: String| {
+                    let args = lua.create_table()?;
+                    args.set(stringify!($arg), $arg)?;
+                    dispatch_rust_tool(lua, &*t, &args)
+                })?;
+                orcs_table.set($name, f)?;
+            } else {
+                register_deny_stub(lua, orcs_table, $name)?;
+            }
+        };
+        // orcs.name(arg1, arg2) — two required String args
+        ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: String|) => {
+            if let Some(t) = $tool {
+                let f = lua.create_function(move |lua, ($a1, $a2): (String, String)| {
+                    let args = lua.create_table()?;
+                    args.set(stringify!($a1), $a1)?;
+                    args.set(stringify!($a2), $a2)?;
+                    dispatch_rust_tool(lua, &*t, &args)
+                })?;
+                orcs_table.set($name, f)?;
+            } else {
+                register_deny_stub(lua, orcs_table, $name)?;
+            }
+        };
+        // orcs.name(arg1, arg2?) — one required + one optional String arg
+        ($tool:expr, $name:literal, |$a1:ident: String, $a2:ident: Option<String>|) => {
+            if let Some(t) = $tool {
+                let f = lua.create_function(move |lua, ($a1, opt): (String, Option<String>)| {
+                    let args = lua.create_table()?;
+                    args.set(stringify!($a1), $a1)?;
+                    if let Some(v) = opt {
+                        args.set(stringify!($a2), v)?;
+                    }
+                    dispatch_rust_tool(lua, &*t, &args)
+                })?;
+                orcs_table.set($name, f)?;
+            } else {
+                register_deny_stub(lua, orcs_table, $name)?;
+            }
+        };
+    }
+
+    let read_tool = get_tool(&registry, "read");
+    let write_tool = get_tool(&registry, "write");
+    let grep_tool = get_tool(&registry, "grep");
+    let glob_tool = get_tool(&registry, "glob");
+    let mkdir_tool = get_tool(&registry, "mkdir");
+    let remove_tool = get_tool(&registry, "remove");
+    let mv_tool = get_tool(&registry, "mv");
+    drop(registry);
+
+    register_wrapper!(read_tool, "read", |path: String|);
+    register_wrapper!(write_tool, "write", |path: String, content: String|);
+    register_wrapper!(grep_tool, "grep", |pattern: String, path: String|);
+    register_wrapper!(glob_tool, "glob", |pattern: String, dir: Option<String>|);
+    register_wrapper!(mkdir_tool, "mkdir", |path: String|);
+    register_wrapper!(remove_tool, "remove", |path: String|);
+    register_wrapper!(mv_tool, "mv", |src: String, dst: String|);
+
+    Ok(())
+}
+
+/// Registers utility tool functions: scan_dir, parse_frontmatter, parse_toml, glob_match, load_lua.
+///
+/// These are Lua closures that directly call `tool_*` implementation functions,
+/// without going through the RustTool/dispatch_rust_tool path.
+fn register_utility_tools(
+    lua: &Lua,
+    orcs_table: &Table,
+    sandbox: &Arc<dyn SandboxPolicy>,
+) -> Result<(), LuaError> {
     // orcs.scan_dir(config) -> table[]
-    let sb = Arc::clone(&sandbox);
+    let sb = Arc::clone(sandbox);
     let scan_dir_fn = lua.create_function(move |lua, config: Table| {
         let path: String = config.get("path")?;
         let recursive: bool = config.get("recursive").unwrap_or(true);
@@ -793,7 +809,7 @@ pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Re
     orcs_table.set("scan_dir", scan_dir_fn)?;
 
     // orcs.parse_frontmatter(path) -> { frontmatter, body, format }
-    let sb = Arc::clone(&sandbox);
+    let sb = Arc::clone(sandbox);
     let parse_fm_fn =
         lua.create_function(move |lua, path: String| {
             match tool_parse_frontmatter(&path, sb.as_ref()) {
@@ -878,10 +894,6 @@ pub fn register_tool_functions(lua: &Lua, sandbox: Arc<dyn SandboxPolicy>) -> Re
     )?;
     orcs_table.set("load_lua", load_lua_fn)?;
 
-    tracing::debug!(
-        "Registered orcs tool functions: read, write, grep, glob, mkdir, remove, mv, scan_dir, parse_frontmatter, parse_toml, glob_match, load_lua (sandbox_root={})",
-        sandbox.root().display()
-    );
     Ok(())
 }
 
