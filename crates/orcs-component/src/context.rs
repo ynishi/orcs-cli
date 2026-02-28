@@ -541,6 +541,12 @@ pub trait ChildContext: Send + Sync + Debug {
     /// Resolves the builtin name to script content via the component loader,
     /// then delegates to [`spawn_runner_from_script`](Self::spawn_runner_from_script).
     ///
+    /// # Arguments
+    ///
+    /// * `name` - Builtin component filename (e.g., `"delegate_worker.lua"`)
+    /// * `id` - Optional component ID override
+    /// * `globals` - Optional key-value pairs to inject into the VM as global variables
+    ///
     /// # Default Implementation
     ///
     /// Returns `SpawnError::Internal` indicating builtin spawning is not supported.
@@ -548,6 +554,7 @@ pub trait ChildContext: Send + Sync + Debug {
         &self,
         _name: &str,
         _id: Option<&str>,
+        _globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "builtin spawning not supported by this context".into(),
@@ -691,6 +698,24 @@ pub trait ChildContext: Send + Sync + Debug {
     /// Returns `None` (no extensions available).
     fn extension(&self, _key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
         None
+    }
+
+    /// Requests graceful termination of this component's own ChannelRunner.
+    ///
+    /// Sends an `Abort` transition to the WorldManager, causing the runner
+    /// to exit its event loop cleanly after the current request completes.
+    /// The RunnerMonitor will broadcast a `Lifecycle::runner_exited` event.
+    ///
+    /// # Use Cases
+    ///
+    /// - Per-delegation workers that complete a single task and should release resources
+    /// - Components that detect they are no longer needed
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an error indicating self-stop is not supported.
+    fn request_stop(&self) -> Result<(), String> {
+        Err("request_stop not supported by this context".into())
     }
 
     /// Clones this context into a boxed trait object.

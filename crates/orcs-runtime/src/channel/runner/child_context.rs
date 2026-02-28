@@ -1016,6 +1016,7 @@ impl ChildContext for ChildContextImpl {
         &self,
         name: &str,
         id: Option<&str>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         let loader = self
             .component_loader
@@ -1026,7 +1027,7 @@ impl ChildContext for ChildContextImpl {
             .resolve_builtin(name)
             .ok_or_else(|| SpawnError::Internal(format!("builtin not found: {name}")))?;
 
-        self.spawn_runner_from_script(&script, id, None)
+        self.spawn_runner_from_script(&script, id, globals)
     }
 
     fn can_execute_command(&self, cmd: &str) -> bool {
@@ -1184,6 +1185,32 @@ impl ChildContext for ChildContextImpl {
                 results
             })
         })
+    }
+
+    fn request_stop(&self) -> Result<(), String> {
+        let world_tx = self
+            .world_tx
+            .as_ref()
+            .ok_or("request_stop: no world_tx (runner spawning not configured)")?;
+        let channel_id = self
+            .channel_id
+            .ok_or("request_stop: no channel_id (not running in a ChannelRunner)")?;
+
+        let reason = format!("component {} requested self-stop", self.parent_id);
+        let tx = world_tx.clone();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                super::common::send_abort(&tx, channel_id, &reason).await;
+            });
+        });
+
+        tracing::info!(
+            component = %self.parent_id,
+            channel = %channel_id,
+            "request_stop: abort sent"
+        );
+        Ok(())
     }
 
     fn extension(&self, key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
