@@ -233,6 +233,19 @@ fn concierge_component() {
                 expect(r.success).to.equal(true)
                 expect(r.data.ok).to.equal(true)
             end)
+
+            it('returns failure when llm_ping fails', function()
+                local c, m = fresh_concierge()
+                orcs.llm_ping = function(opts)
+                    return {{ ok = false, error = "connection refused" }}
+                end
+                local r = c.on_request({{
+                    operation = "ping",
+                    payload = {{ llm_config = {{ provider = "bad" }} }}
+                }})
+                expect(r.success).to.equal(false)
+                expect(r.data.error).to.equal("connection refused")
+            end)
         end)
 
         describe('concierge process (initial)', function()
@@ -365,6 +378,22 @@ fn concierge_component() {
             end)
         end)
 
+        describe('concierge process (busy rejection)', function()
+            it('rejects process while another is in-flight', function()
+                local c, m = fresh_concierge()
+                local inner_result = nil
+                -- Override llm to attempt a recursive process call while busy=true
+                orcs.llm = function(prompt, opts)
+                    inner_result = c.on_request({{ operation = "process", payload = {{ message = "concurrent" }} }})
+                    return {{ ok = true, content = "reply", session_id = "sess-1", cost = 0.001 }}
+                end
+                c.on_request({{ operation = "process", payload = {{ message = "outer" }} }})
+                expect(inner_result).to.exist()
+                expect(inner_result.success).to.equal(false)
+                expect(inner_result.error).to.match("busy")
+            end)
+        end)
+
         describe('concierge process (prompt placement)', function()
             it('uses "top" placement: system context appears once', function()
                 local c, m = fresh_concierge()
@@ -384,6 +413,29 @@ fn concierge_component() {
                 }})
                 local _, count = m.last_prompt:gsub("%[SYS%]", "")
                 expect(count).to.equal(1)
+            end)
+
+            it('"top" places system before user message', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "USR_MSG", prompt_placement = "top" }}
+                }})
+                local sys_pos = m.last_prompt:find("%[SYS%]")
+                local msg_pos = m.last_prompt:find("USR_MSG")
+                expect(sys_pos < msg_pos).to.equal(true)
+            end)
+
+            it('"bottom" places task before system', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "USR_MSG", prompt_placement = "bottom" }}
+                }})
+                -- In bottom placement, [TASK] comes before [SYS]
+                local task_pos = m.last_prompt:find("%[TASK%]")
+                local sys_pos = m.last_prompt:find("%[SYS%]")
+                expect(task_pos < sys_pos).to.equal(true)
             end)
         end)
 
@@ -425,8 +477,8 @@ fn concierge_component() {
     );
     let summary = run_lspec(&code, "@concierge_component_test.lua");
     assert!(
-        summary.passed >= 20,
-        "expected at least 20 concierge component tests, got {}",
+        summary.passed >= 24,
+        "expected at least 24 concierge component tests, got {}",
         summary.passed
     );
 }
