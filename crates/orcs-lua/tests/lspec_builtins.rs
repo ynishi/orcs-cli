@@ -112,7 +112,379 @@ fn echo_component() {
 }
 
 // =============================================================================
-// Concierge Helpers
+// Concierge Component (mock-injected full component test)
+// =============================================================================
+
+/// Reusable mock factory for concierge tests.
+/// Returns Lua code that sets up `orcs` global with captured calls.
+fn concierge_mock_setup() -> String {
+    format!(
+        r#"
+        local function create_mock(overrides)
+            overrides = overrides or {{}}
+            local m = {{
+                log_calls = {{}},
+                output_calls = {{}},
+                output_level_calls = {{}},
+                request_calls = {{}},
+                intent_calls = {{}},
+                event_calls = {{}},
+                last_prompt = nil,
+                last_llm_opts = nil,
+                llm_response = overrides.llm_response,
+                foundation = overrides.foundation or {{ system = "[SYS]", task = "[TASK]", guard = "[GUARD]" }},
+                metrics_formatted = overrides.metrics_formatted or "[METRICS]",
+                skills = overrides.skills or {{ {{ name = "test-skill", description = "A test" }} }},
+            }}
+
+            orcs = {{
+                log = function(level, msg)
+                    m.log_calls[#m.log_calls + 1] = {{ level = level, msg = msg }}
+                end,
+                output = function(msg)
+                    m.output_calls[#m.output_calls + 1] = msg
+                end,
+                output_with_level = function(msg, level)
+                    m.output_level_calls[#m.output_level_calls + 1] = {{ msg = msg, level = level }}
+                end,
+                request = function(target, op, payload, opts)
+                    m.request_calls[#m.request_calls + 1] = {{ target = target, op = op, payload = payload }}
+                    if target == "foundation::foundation_manager" and op == "get_all" then
+                        return {{ success = true, data = m.foundation }}
+                    end
+                    if target == "metrics::console_metrics" and op == "get_all" then
+                        return {{ success = true, formatted = m.metrics_formatted }}
+                    end
+                    if target == "skill::skill_manager" and op == "recommend" then
+                        return {{ success = true, data = m.skills }}
+                    end
+                    return {{ success = false }}
+                end,
+                register_intent = function(def)
+                    m.intent_calls[#m.intent_calls + 1] = def
+                    return {{ ok = true }}
+                end,
+                emit_event = function(cat, op, payload)
+                    m.event_calls[#m.event_calls + 1] = {{ cat = cat, op = op, payload = payload }}
+                end,
+                llm = function(prompt, opts)
+                    m.last_prompt = prompt
+                    m.last_llm_opts = opts
+                    return m.llm_response or {{
+                        ok = true, content = "mock reply", session_id = "sess-1", cost = 0.0042,
+                    }}
+                end,
+                llm_ping = function(opts)
+                    return {{ ok = true, provider = opts.provider or "unknown" }}
+                end,
+            }}
+
+            return m
+        end
+
+        local CONCIERGE_PATH = "{concierge_path}"
+
+        local function fresh_concierge(overrides)
+            local m = create_mock(overrides)
+            local c = dofile(CONCIERGE_PATH)
+            return c, m
+        end
+        "#,
+        concierge_path = builtin_path("concierge.lua")
+    )
+}
+
+/// Concierge component: full integration test via mock injection.
+/// Loads real concierge.lua with mocked orcs.* APIs.
+#[test]
+fn concierge_component() {
+    let setup = concierge_mock_setup();
+    let code = format!(
+        r#"
+        {setup}
+        local describe, it, expect = lust.describe, lust.it, lust.expect
+
+        describe('concierge status', function()
+            it('returns initial idle state', function()
+                local c, m = fresh_concierge()
+                local r = c.on_request({{ operation = "status", payload = {{}} }})
+                expect(r.success).to.equal(true)
+                expect(r.data.busy).to.equal(false)
+                expect(r.data.turn_count).to.equal(0)
+            end)
+
+            it('reflects state after successful process', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "hi" }} }})
+                local r = c.on_request({{ operation = "status", payload = {{}} }})
+                expect(r.data.turn_count).to.equal(1)
+                expect(r.data.session_id).to.equal("sess-1")
+                expect(r.data.busy).to.equal(false)
+            end)
+        end)
+
+        describe('concierge ping', function()
+            it('returns success with provider config', function()
+                local c, m = fresh_concierge()
+                local r = c.on_request({{
+                    operation = "ping",
+                    payload = {{ llm_config = {{ provider = "ollama" }} }}
+                }})
+                expect(r.success).to.equal(true)
+                expect(r.data.ok).to.equal(true)
+            end)
+
+            it('returns failure when llm_ping fails', function()
+                local c, m = fresh_concierge()
+                orcs.llm_ping = function(opts)
+                    return {{ ok = false, error = "connection refused" }}
+                end
+                local r = c.on_request({{
+                    operation = "ping",
+                    payload = {{ llm_config = {{ provider = "bad" }} }}
+                }})
+                expect(r.success).to.equal(false)
+                expect(r.data.error).to.equal("connection refused")
+            end)
+        end)
+
+        describe('concierge process (initial)', function()
+            it('succeeds and returns response data', function()
+                local c, m = fresh_concierge()
+                local r = c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "hello" }}
+                }})
+                expect(r.success).to.equal(true)
+                expect(r.data.response).to.equal("mock reply")
+                expect(r.data.session_id).to.equal("sess-1")
+                expect(r.data.cost).to.equal(0.0042)
+            end)
+
+            it('fetches foundation, metrics, skills via RPC', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "test" }} }})
+                local targets = {{}}
+                for _, call in ipairs(m.request_calls) do
+                    targets[call.target] = call.op
+                end
+                expect(targets["foundation::foundation_manager"]).to.equal("get_all")
+                expect(targets["metrics::console_metrics"]).to.equal("get_all")
+                expect(targets["skill::skill_manager"]).to.equal("recommend")
+            end)
+
+            it('registers skill and delegate intents', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "test" }} }})
+                local names = {{}}
+                for _, def in ipairs(m.intent_calls) do
+                    names[def.name] = true
+                end
+                expect(names["test-skill"]).to.equal(true)
+                expect(names["delegate_task"]).to.equal(true)
+            end)
+
+            it('assembles prompt with "both" placement by default', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "user msg" }} }})
+                local p = m.last_prompt
+                -- "both" placement: [SYS] appears twice (top + bottom anchor)
+                local _, count = p:gsub("%[SYS%]", "")
+                expect(count).to.equal(2)
+                -- Message at the end
+                expect(p:find("user msg")).to.exist()
+                -- Guard before message
+                local guard_pos = p:find("%[GUARD%]")
+                local msg_pos = p:find("user msg")
+                expect(guard_pos < msg_pos).to.equal(true)
+            end)
+
+            it('passes llm_config to llm opts', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{
+                        message = "hi",
+                        llm_config = {{ provider = "anthropic", model = "claude-4", temperature = 0.3 }}
+                    }}
+                }})
+                expect(m.last_llm_opts.provider).to.equal("anthropic")
+                expect(m.last_llm_opts.model).to.equal("claude-4")
+                expect(m.last_llm_opts.temperature).to.equal(0.3)
+                expect(m.last_llm_opts.resolve).to.equal(true)
+            end)
+
+            it('outputs Thinking indicator', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "x" }} }})
+                local found = false
+                for _, msg in ipairs(m.output_calls) do
+                    if msg:find("Thinking") then found = true end
+                end
+                expect(found).to.equal(true)
+            end)
+
+            it('emits llm_response event on success', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "x" }} }})
+                local found = false
+                for _, ev in ipairs(m.event_calls) do
+                    if ev.op == "llm_response" and ev.payload.source == "concierge" then
+                        found = true
+                    end
+                end
+                expect(found).to.equal(true)
+            end)
+        end)
+
+        describe('concierge process (session resume)', function()
+            it('skips prompt assembly on second call', function()
+                local c, m = fresh_concierge()
+                c.on_request({{ operation = "process", payload = {{ message = "first" }} }})
+                local first_request_count = #m.request_calls
+                c.on_request({{ operation = "process", payload = {{ message = "second" }} }})
+                -- No new RPC calls (session resume path)
+                expect(#m.request_calls).to.equal(first_request_count)
+                expect(m.last_llm_opts.session_id).to.equal("sess-1")
+            end)
+        end)
+
+        describe('concierge process (empty message)', function()
+            it('returns success without processing', function()
+                local c, m = fresh_concierge()
+                local r = c.on_request({{ operation = "process", payload = {{ message = "" }} }})
+                expect(r.success).to.equal(true)
+                expect(m.last_prompt).to.equal(nil)
+            end)
+        end)
+
+        describe('concierge process (LLM error)', function()
+            it('returns error when llm fails', function()
+                local c, m = fresh_concierge({{
+                    llm_response = {{ ok = false, error = "rate limit exceeded" }}
+                }})
+                local r = c.on_request({{ operation = "process", payload = {{ message = "hi" }} }})
+                expect(r.success).to.equal(false)
+                expect(r.error).to.match("rate limit")
+            end)
+
+            it('resets busy after LLM error', function()
+                local c, m = fresh_concierge({{
+                    llm_response = {{ ok = false, error = "fail" }}
+                }})
+                c.on_request({{ operation = "process", payload = {{ message = "hi" }} }})
+                local status = c.on_request({{ operation = "status", payload = {{}} }})
+                expect(status.data.busy).to.equal(false)
+            end)
+        end)
+
+        describe('concierge process (busy rejection)', function()
+            it('rejects process while another is in-flight', function()
+                local c, m = fresh_concierge()
+                local inner_result = nil
+                -- Override llm to attempt a recursive process call while busy=true
+                orcs.llm = function(prompt, opts)
+                    inner_result = c.on_request({{ operation = "process", payload = {{ message = "concurrent" }} }})
+                    return {{ ok = true, content = "reply", session_id = "sess-1", cost = 0.001 }}
+                end
+                c.on_request({{ operation = "process", payload = {{ message = "outer" }} }})
+                expect(inner_result).to.exist()
+                expect(inner_result.success).to.equal(false)
+                expect(inner_result.error).to.match("busy")
+            end)
+        end)
+
+        describe('concierge process (prompt placement)', function()
+            it('uses "top" placement: system context appears once', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "msg", prompt_placement = "top" }}
+                }})
+                local _, count = m.last_prompt:gsub("%[SYS%]", "")
+                expect(count).to.equal(1)
+            end)
+
+            it('uses "bottom" placement: system context appears once', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "msg", prompt_placement = "bottom" }}
+                }})
+                local _, count = m.last_prompt:gsub("%[SYS%]", "")
+                expect(count).to.equal(1)
+            end)
+
+            it('"top" places system before user message', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "USR_MSG", prompt_placement = "top" }}
+                }})
+                local sys_pos = m.last_prompt:find("%[SYS%]")
+                local msg_pos = m.last_prompt:find("USR_MSG")
+                expect(sys_pos < msg_pos).to.equal(true)
+            end)
+
+            it('"bottom" places task before system', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "USR_MSG", prompt_placement = "bottom" }}
+                }})
+                -- In bottom placement, [TASK] comes before [SYS]
+                local task_pos = m.last_prompt:find("%[TASK%]")
+                local sys_pos = m.last_prompt:find("%[SYS%]")
+                expect(task_pos < sys_pos).to.equal(true)
+            end)
+        end)
+
+        describe('concierge tracking preservation (H1 fix)', function()
+            it('preserves provider when config absent on resume', function()
+                local c, m = fresh_concierge()
+                c.on_request({{
+                    operation = "process",
+                    payload = {{ message = "a", llm_config = {{ provider = "anthropic", model = "claude" }} }}
+                }})
+                c.on_request({{ operation = "process", payload = {{ message = "b" }} }})
+                local status = c.on_request({{ operation = "status", payload = {{}} }})
+                expect(status.data.provider).to.equal("anthropic")
+                expect(status.data.model).to.equal("claude")
+            end)
+        end)
+
+        describe('concierge unknown operation', function()
+            it('returns error with operation name', function()
+                local c, m = fresh_concierge()
+                local r = c.on_request({{ operation = "nonexistent", payload = {{}} }})
+                expect(r.success).to.equal(false)
+                expect(r.error).to.match("unknown operation")
+                expect(r.error).to.match("nonexistent")
+            end)
+        end)
+
+        describe('concierge on_signal', function()
+            it('aborts on Veto', function()
+                local c = fresh_concierge()
+                expect(c.on_signal({{ kind = "Veto" }})).to.equal("Abort")
+            end)
+            it('handles other signals', function()
+                local c = fresh_concierge()
+                expect(c.on_signal({{ kind = "Other" }})).to.equal("Handled")
+            end)
+        end)
+        "#
+    );
+    let summary = run_lspec(&code, "@concierge_component_test.lua");
+    assert!(
+        summary.passed >= 24,
+        "expected at least 24 concierge component tests, got {}",
+        summary.passed
+    );
+}
+
+// =============================================================================
+// Concierge Helpers (pure function unit tests)
 // =============================================================================
 
 /// Concierge: build_llm_opts pure function.
