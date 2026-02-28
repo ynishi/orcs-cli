@@ -609,7 +609,7 @@ pub(super) fn register(
 
         // Resolve script: builtin name takes precedence over inline script
         let spawn_result = if let Ok(builtin_name) = config.get::<String>("builtin") {
-            ctx_guard.spawn_runner_from_builtin(&builtin_name, id.as_deref())
+            ctx_guard.spawn_runner_from_builtin(&builtin_name, id.as_deref(), globals.as_ref())
         } else if let Ok(script) = config.get::<String>("script") {
             ctx_guard.spawn_runner_from_script(&script, id.as_deref(), globals.as_ref())
         } else {

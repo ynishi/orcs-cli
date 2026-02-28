@@ -541,6 +541,12 @@ pub trait ChildContext: Send + Sync + Debug {
     /// Resolves the builtin name to script content via the component loader,
     /// then delegates to [`spawn_runner_from_script`](Self::spawn_runner_from_script).
     ///
+    /// # Arguments
+    ///
+    /// * `name` - Builtin component filename (e.g., `"delegate_worker.lua"`)
+    /// * `id` - Optional component ID override
+    /// * `globals` - Optional key-value pairs to inject into the VM as global variables
+    ///
     /// # Default Implementation
     ///
     /// Returns `SpawnError::Internal` indicating builtin spawning is not supported.
@@ -548,6 +554,7 @@ pub trait ChildContext: Send + Sync + Debug {
         &self,
         _name: &str,
         _id: Option<&str>,
+        _globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         Err(SpawnError::Internal(
             "builtin spawning not supported by this context".into(),

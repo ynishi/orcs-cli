@@ -1016,6 +1016,7 @@ impl ChildContext for ChildContextImpl {
         &self,
         name: &str,
         id: Option<&str>,
+        globals: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(ChannelId, String), SpawnError> {
         let loader = self
             .component_loader
@@ -1026,7 +1027,7 @@ impl ChildContext for ChildContextImpl {
             .resolve_builtin(name)
             .ok_or_else(|| SpawnError::Internal(format!("builtin not found: {name}")))?;
 
-        self.spawn_runner_from_script(&script, id, None)
+        self.spawn_runner_from_script(&script, id, globals)
     }
 
     fn can_execute_command(&self, cmd: &str) -> bool {
