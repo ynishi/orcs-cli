@@ -620,6 +620,7 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
             hil_intents: false,
+            overall_timeout: None,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");
@@ -681,6 +682,7 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
             hil_intents: false,
+            overall_timeout: None,
         };
         let result = build_lua_result(&lua, &parsed, &opts, "sess-test")
             .expect("build_lua_result should succeed");

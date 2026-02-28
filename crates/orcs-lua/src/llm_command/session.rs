@@ -223,6 +223,7 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
             hil_intents: false,
+            overall_timeout: None,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -253,6 +254,7 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
             hil_intents: false,
+            overall_timeout: None,
         };
 
         let msgs = build_messages(&lua, &sid, "hi", &opts);
@@ -284,6 +286,7 @@ mod tests {
             resolve: false,
             max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
             hil_intents: false,
+            overall_timeout: None,
         };
 
         let msgs = build_messages(&lua, &sid, "second question", &opts);
