@@ -192,10 +192,9 @@ pub fn parse_event_category(s: &str) -> Option<EventCategory> {
         "UserInput" => Some(EventCategory::UserInput),
         "Output" => Some(EventCategory::Output),
         _ => {
-            tracing::warn!(
+            tracing::info!(
                 category = s,
-                known = "Lifecycle, Hil, Echo, UserInput, Output",
-                "Unknown event category in Lua subscription, treating as Extension"
+                "Lua subscription: treating custom category as Extension"
             );
             Some(EventCategory::Extension {
                 namespace: "lua".to_string(),
