@@ -131,7 +131,7 @@ impl PrivilegeLevel {
     /// let elevated = PrivilegeLevel::elevated_for(Duration::from_secs(60));
     /// let remaining = elevated.remaining();
     /// assert!(remaining.is_some());
-    /// assert!(remaining.unwrap() <= Duration::from_secs(60));
+    /// assert!(remaining.expect("elevated has remaining") <= Duration::from_secs(60));
     /// ```
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {

@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 /// ```no_run
 /// use orcs_runtime::sandbox::{ProjectSandbox, SandboxPolicy};
 ///
-/// let sandbox = ProjectSandbox::new("/home/user/myproject").unwrap();
+/// let sandbox = ProjectSandbox::new("/home/user/myproject").expect("sandbox init");
 /// assert!(sandbox.validate_read("src/main.rs").is_ok());
 /// assert!(sandbox.validate_read("/etc/passwd").is_err());
 /// ```

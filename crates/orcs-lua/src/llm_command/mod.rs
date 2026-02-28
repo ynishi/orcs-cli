@@ -57,7 +57,7 @@ mod session;
 use mlua::{Lua, Table};
 use orcs_types::intent::{ContentBlock, MessageContent, StopReason};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use provider::{build_request_body, build_tools_for_provider, Provider};
 use resolve::{
@@ -179,6 +179,13 @@ pub(super) struct LlmOpts {
     /// `is_error = true` tool_result so the LLM can adapt (e.g., delegate
     /// to an agent with the required permissions).
     pub hil_intents: bool,
+    /// Wall-clock timeout in seconds for the entire resolve loop (default: None).
+    ///
+    /// When set, the resolve loop checks elapsed time at each iteration and
+    /// returns `error_kind = "overall_timeout"` if the deadline is exceeded.
+    /// Unlike `timeout` (per-HTTP-request), this covers the total operation
+    /// including all LLM API calls, tool dispatches, and retries.
+    pub overall_timeout: Option<u64>,
 }
 
 impl LlmOpts {
@@ -243,6 +250,8 @@ impl LlmOpts {
             .flatten()
             .unwrap_or(false);
 
+        let overall_timeout = opts.and_then(|o| o.get::<u64>("overall_timeout").ok());
+
         Ok(Self {
             provider,
             base_url,
@@ -258,6 +267,7 @@ impl LlmOpts {
             resolve,
             max_tool_turns,
             hil_intents,
+            overall_timeout,
         })
     }
 }
@@ -480,7 +490,10 @@ pub fn register_llm_deny_stub(lua: &Lua, orcs_table: &Table) -> Result<(), mlua:
 ///   - `session_id` - Session ID for multi-turn (nil = new session)
 ///   - `temperature` - Sampling temperature
 ///   - `max_tokens` - Max completion tokens
-///   - `timeout` - Request timeout in seconds (default: 120)
+///   - `timeout` - Per-request timeout in seconds (default: 120)
+///   - `overall_timeout` - Wall-clock timeout in seconds for the entire
+///     resolve loop (default: nil = no limit). When set, the loop aborts
+///     with `error_kind = "overall_timeout"` if the deadline is exceeded.
 ///
 /// # Returns (Lua table)
 ///
@@ -569,6 +582,13 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     };
     let remaining_budget = llm_opts.max_tool_turns.saturating_sub(turn_offset);
 
+    // ── Wall-clock deadline ──
+    // When overall_timeout is set, the entire resolve loop is bounded by a
+    // wall-clock deadline. Checked at each iteration before sending an API call.
+    let deadline = llm_opts
+        .overall_timeout
+        .map(|secs| Instant::now() + Duration::from_secs(secs));
+
     // ── Tool loop ──
     // Each iteration: build body → send → parse → if tool_use && resolve → dispatch → append results → repeat
     tracing::debug!(
@@ -577,10 +597,36 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         remaining_budget = remaining_budget,
         resolve = llm_opts.resolve,
         reminder_threshold = TURN_REMINDER_THRESHOLD,
+        overall_timeout = ?llm_opts.overall_timeout,
         "resolve loop config"
     );
     for tool_turn in 0..=remaining_budget {
         let global_turn = turn_offset + tool_turn;
+
+        // Check wall-clock deadline before each API call
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                tracing::warn!(
+                    overall_timeout = llm_opts.overall_timeout,
+                    tool_turn = global_turn,
+                    session_id = %session_id,
+                    "overall timeout exceeded"
+                );
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set(
+                    "error",
+                    format!(
+                        "overall timeout exceeded ({}s) at tool turn {}",
+                        llm_opts.overall_timeout.unwrap_or(0),
+                        global_turn
+                    ),
+                )?;
+                result.set("error_kind", "overall_timeout")?;
+                result.set("session_id", session_id.clone())?;
+                return Ok(result);
+            }
+        }
         let request_body = match build_request_body(&llm_opts, &messages, tools_json.as_ref()) {
             Ok(body) => body,
             Err(e) => {
@@ -1055,6 +1101,39 @@ mod tests {
         tbl.set("resolve", false).expect("set resolve");
         let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
         assert!(!opts.resolve, "resolve should be false when explicitly set");
+    }
+
+    // ── overall_timeout tests ─────────────────────────────────────────
+
+    #[test]
+    fn llm_opts_overall_timeout_none_by_default() {
+        let opts = LlmOpts::from_lua(None).expect("should parse None opts");
+        assert_eq!(opts.overall_timeout, None);
+    }
+
+    #[test]
+    fn llm_opts_overall_timeout_none_when_key_absent() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert_eq!(
+            opts.overall_timeout, None,
+            "overall_timeout should be None when key is absent"
+        );
+    }
+
+    #[test]
+    fn llm_opts_overall_timeout_parsed() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().expect("create table");
+        tbl.set("overall_timeout", 30u64)
+            .expect("set overall_timeout");
+        let opts = LlmOpts::from_lua(Some(&tbl)).expect("parse opts");
+        assert_eq!(
+            opts.overall_timeout,
+            Some(30),
+            "overall_timeout should be 30 when explicitly set"
+        );
     }
 
     // ── Deny stub test ─────────────────────────────────────────────────

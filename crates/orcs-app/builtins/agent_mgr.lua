@@ -180,6 +180,7 @@
 --   cfg._global.ui.verbose       (bool)    — verbose output
 --   cfg._global.ui.color         (bool)    — color output
 --   cfg._global.ui.emoji         (bool)    — emoji output
+--   cfg._global.timeouts.delegate_ms (number) — delegate task timeout (ms)
 
 -- === Worker Scripts ===
 
@@ -401,7 +402,7 @@ return {
                     .. "results appear in your context on the next turn.",
                 component = "builtin::agent_mgr",
                 operation = "delegate",
-                timeout_ms = 600000,
+                timeout_ms = delegate_timeout_ms,
                 params = {
                     description = {
                         type = "string",
@@ -435,7 +436,7 @@ return {
                             or ("Invoke the " .. agent_name .. " agent"),
                         component = "builtin::agent_mgr",
                         operation = "invoke_agent",
-                        timeout_ms = 600000,
+                        timeout_ms = delegate_timeout_ms,
                         params = {
                             agent_name = {
                                 type = "string",
@@ -785,6 +786,14 @@ end
 
 local HISTORY_LIMIT = 10  -- Max recent conversation entries to include as context
 local MAX_AGENT_INTENTS = 3  -- Max agent IntentDefs exposed to LLM per dispatch
+local DEFAULT_DELEGATE_TIMEOUT_MS = 600000  -- 10 minutes
+local DEFAULT_CONCIERGE_TIMEOUT_MS = 600000 -- 10 minutes
+local DEFAULT_PING_TIMEOUT_MS = 5000        -- 5 seconds
+
+-- Configurable timeouts (updated from cfg._global.timeouts in init())
+local delegate_timeout_ms = DEFAULT_DELEGATE_TIMEOUT_MS
+local concierge_timeout_ms = DEFAULT_CONCIERGE_TIMEOUT_MS
+local ping_timeout_ms = DEFAULT_PING_TIMEOUT_MS
 
 -- Component settings (populated from config in init())
 local component_settings = {}
@@ -1227,7 +1236,10 @@ return {
             local worker = orcs.spawn_runner({
                 builtin = "delegate_worker.lua",
                 id = "delegate-" .. request_id,
-                globals = { _delegate_payload = task_payload },
+                globals = {
+                    _delegate_payload = task_payload,
+                    _delegate_timeout_ms = delegate_timeout_ms,
+                },
             })
 
             if not worker or not worker.ok then
@@ -1414,6 +1426,21 @@ return {
             end
             component_settings = cfg
             orcs.log("debug", "agent_mgr: config received: " .. orcs.json_encode(cfg))
+
+            -- Read timeouts from global config
+            local g = cfg._global
+            if g and type(g) == "table" and g.timeouts and type(g.timeouts) == "table" then
+                if g.timeouts.delegate_ms then
+                    delegate_timeout_ms = g.timeouts.delegate_ms
+                end
+                if g.timeouts.concierge_ms then
+                    concierge_timeout_ms = g.timeouts.concierge_ms
+                end
+            end
+            -- Per-component ping timeout override
+            if cfg.ping_timeout_ms then
+                ping_timeout_ms = cfg.ping_timeout_ms
+            end
         end
 
         -- Normalize concierge: Lua treats "" as truthy, so coerce to nil
@@ -1431,7 +1458,13 @@ return {
         -- Spawn concierge agent (handles AgentTask events for LLM processing).
         -- When concierge is set to an external FQN, skip spawning the builtin.
         if not concierge then
-            local result = orcs.spawn_runner({ builtin = "concierge.lua" })
+            local result = orcs.spawn_runner({
+                builtin = "concierge.lua",
+                globals = {
+                    _delegate_timeout_ms = delegate_timeout_ms,
+                    _concierge_timeout_ms = concierge_timeout_ms,
+                },
+            })
             if result.ok then
                 concierge_fqn = result.fqn
                 orcs.log("info", "spawned concierge agent (fqn=" .. concierge_fqn .. ")")
@@ -1481,7 +1514,7 @@ return {
             -- silently vanish (emit_event returns delivered=true due to self-channel counting).
             orcs.log("info", "concierge='" .. concierge .. "': verifying external agent...")
             local probe_ok, probe_err = pcall(function()
-                local resp = orcs.request(concierge, "ping", {}, { timeout_ms = 5000 })
+                local resp = orcs.request(concierge, "ping", {}, { timeout_ms = ping_timeout_ms })
                 if resp and resp.success then
                     concierge_fqn = concierge
     
@@ -1514,7 +1547,10 @@ return {
 
         -- Spawn delegate-worker agent (handles DelegateTask events).
         -- Always spawned: delegation is orthogonal to the concierge choice.
-        local delegate = orcs.spawn_runner({ builtin = "delegate_worker.lua" })
+        local delegate = orcs.spawn_runner({
+            builtin = "delegate_worker.lua",
+            globals = { _delegate_timeout_ms = delegate_timeout_ms },
+        })
         if delegate.ok then
             delegate_worker_fqn = delegate.fqn
             orcs.log("info", "spawned delegate-worker agent (fqn=" .. delegate_worker_fqn .. ")")

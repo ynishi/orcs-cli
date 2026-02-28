@@ -96,7 +96,7 @@
 //! // Complete the child
 //! world.complete(child);
 //! assert_eq!(
-//!     world.get(&child).unwrap().state(),
+//!     world.get(&child).expect("child channel exists").state(),
 //!     &ChannelState::Completed
 //! );
 //! ```
@@ -110,9 +110,9 @@
 //! let io = world.create_channel(ChannelConfig::interactive());
 //!
 //! // Build hierarchical channel tree
-//! let agent = world.spawn(io).unwrap();
-//! let tool1 = world.spawn(agent).unwrap();
-//! let tool2 = world.spawn(agent).unwrap();
+//! let agent = world.spawn(io).expect("parent exists");
+//! let tool1 = world.spawn(agent).expect("parent exists");
+//! let tool2 = world.spawn(agent).expect("parent exists");
 //!
 //! // Killing agent also kills tool1 and tool2
 //! world.kill(agent, "task cancelled".to_string());

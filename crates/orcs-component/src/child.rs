@@ -305,7 +305,7 @@ impl From<ChildError> for ChildResult {
 /// let result = ChildResult::Err(ChildError::Timeout { elapsed_ms: 5000 });
 /// let dto: ChildResultDto = result.into();
 ///
-/// let json = serde_json::to_string(&dto).unwrap();
+/// let json = serde_json::to_string(&dto).expect("ChildResultDto should serialize");
 /// assert!(json.contains("timeout"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

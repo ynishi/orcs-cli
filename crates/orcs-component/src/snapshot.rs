@@ -26,7 +26,7 @@
 //! impl Snapshottable for CounterComponent {
 //!     fn snapshot(&self) -> ComponentSnapshot {
 //!         let state = CounterState { count: self.count };
-//!         ComponentSnapshot::from_state("counter", &state).unwrap()
+//!         ComponentSnapshot::from_state("counter", &state).expect("state should serialize")
 //!     }
 //!
 //!     fn restore(&mut self, snapshot: &ComponentSnapshot) -> Result<(), SnapshotError> {

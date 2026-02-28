@@ -32,7 +32,7 @@
 //! use std::sync::Arc;
 //!
 //! let lua = Lua::new();
-//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
+//! let sandbox = Arc::new(ProjectSandbox::new(".").expect("sandbox init"));
 //! register_base_orcs_functions(&lua, sandbox)?;
 //!
 //! // Now Lua scripts can use:

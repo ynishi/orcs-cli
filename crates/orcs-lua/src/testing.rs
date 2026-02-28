@@ -33,8 +33,8 @@
 //!     }
 //! "#;
 //!
-//! let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
-//! let mut harness = LuaTestHarness::from_script(script, sandbox).unwrap();
+//! let sandbox = Arc::new(ProjectSandbox::new(".").expect("sandbox init"));
+//! let mut harness = LuaTestHarness::from_script(script, sandbox).expect("harness init");
 //!
 //! // Test request
 //! let result = harness.request(EventCategory::Echo, "echo", json!({"msg": "hello"}));
@@ -98,8 +98,8 @@ impl LuaTestHarness {
     ///     }
     /// "#;
     ///
-    /// let sandbox = Arc::new(ProjectSandbox::new(".").unwrap());
-    /// let harness = LuaTestHarness::from_script(script, sandbox).unwrap();
+    /// let sandbox = Arc::new(ProjectSandbox::new(".").expect("sandbox init"));
+    /// let harness = LuaTestHarness::from_script(script, sandbox).expect("harness init");
     /// assert_eq!(harness.id().name, "test");
     /// ```
     pub fn from_script(script: &str, sandbox: Arc<dyn SandboxPolicy>) -> Result<Self, LuaError> {

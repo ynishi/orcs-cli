@@ -36,7 +36,7 @@ pub const SESSION_VERSION: u32 = 1;
 /// asset.project_context.name = Some("my-project".into());
 ///
 /// // Save to JSON
-/// let json = asset.to_json().unwrap();
+/// let json = asset.to_json().expect("asset should serialize to JSON");
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionAsset {

@@ -107,6 +107,12 @@ return {
             component_settings = cfg
         end
 
+        -- Read sandbox timeout from per-component settings (default 30s)
+        local sandbox_timeout = (component_settings.sandbox_timeout_ms
+            and type(component_settings.sandbox_timeout_ms) == "number")
+            and component_settings.sandbox_timeout_ms
+            or 30000
+
         -- Register "lua_eval" IntentDef so LLM can call it via tool_use
         local reg = orcs.register_intent({
             name = "lua_eval",
@@ -118,7 +124,7 @@ return {
                 .. "Code runs statelessly — each call starts fresh. 1M instruction limit.",
             component = "builtin::lua_sandbox",
             operation = "execute",
-            timeout_ms = 30000,
+            timeout_ms = sandbox_timeout,
             params = {
                 code = {
                     type = "string",

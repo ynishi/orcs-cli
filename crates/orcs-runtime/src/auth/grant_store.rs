@@ -48,14 +48,14 @@ use std::sync::RwLock;
 /// let store = DefaultGrantStore::new();
 ///
 /// // Grant a persistent pattern
-/// store.grant(CommandGrant::persistent("rm -rf")).unwrap();
-/// assert!(store.is_granted("rm -rf ./temp").unwrap());
-/// assert!(store.is_granted("rm -rf ./temp").unwrap()); // Still valid
+/// store.grant(CommandGrant::persistent("rm -rf")).expect("grant persistent");
+/// assert!(store.is_granted("rm -rf ./temp").expect("check grant"));
+/// assert!(store.is_granted("rm -rf ./temp").expect("check grant")); // Still valid
 ///
 /// // Grant a one-time pattern
-/// store.grant(CommandGrant::one_time("git push --force")).unwrap();
-/// assert!(store.is_granted("git push --force origin main").unwrap()); // Consumed
-/// assert!(!store.is_granted("git push --force origin main").unwrap()); // Gone
+/// store.grant(CommandGrant::one_time("git push --force")).expect("grant one-time");
+/// assert!(store.is_granted("git push --force origin main").expect("check grant")); // Consumed
+/// assert!(!store.is_granted("git push --force origin main").expect("check grant")); // Gone
 /// ```
 #[derive(Debug, Default)]
 pub struct DefaultGrantStore {
@@ -83,10 +83,10 @@ impl DefaultGrantStore {
     ///
     /// Typically used to restore session state:
     /// ```ignore
-    /// let grants = old_store.list_grants().unwrap();
+    /// let grants = old_store.list_grants().expect("list grants");
     /// // ... serialize grants to SessionAsset, persist, reload ...
     /// let new_store = DefaultGrantStore::new();
-    /// new_store.restore_grants(&grants).unwrap();
+    /// new_store.restore_grants(&grants).expect("restore grants");
     /// ```
     ///
     /// Existing grants are preserved (additive merge).
