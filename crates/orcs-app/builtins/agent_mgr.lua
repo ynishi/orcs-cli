@@ -867,6 +867,28 @@ local function attempt_restart_concierge(old_fqn)
     return false
 end
 
+--- Attempt to restart the persistent delegate-worker (shared mode).
+--- Uses check_restart_allowed() to prevent restart storms.
+--- @param old_fqn string|nil  FQN of the delegate-worker that just died.
+--- @return boolean  true if restart succeeded
+local function attempt_restart_delegate_worker(old_fqn)
+    local check_fqn = old_fqn or delegate_worker_fqn or "builtin::delegate-worker"
+    if not check_restart_allowed(check_fqn) then
+        return false
+    end
+    local result = orcs.spawn_runner({
+        builtin = "delegate_worker.lua",
+        globals = { _delegate_timeout_ms = delegate_timeout_ms },
+    })
+    if result and result.ok then
+        delegate_worker_fqn = result.fqn
+        orcs.log("info", "AgentMgr: delegate-worker restarted as " .. delegate_worker_fqn)
+        return true
+    end
+    orcs.log("error", "AgentMgr: delegate-worker restart failed: " .. (result and result.error or "unknown"))
+    return false
+end
+
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 
@@ -1241,7 +1263,26 @@ return {
                     )
                 end
 
-            -- Delegate worker died → record failure in delegation_results.
+            -- Persistent delegate-worker died → attempt restart.
+            -- Must be checked BEFORE per-delegation pattern: "builtin::delegate-worker"
+            -- matches "^builtin::delegate%-" and would be misidentified as request_id="worker".
+            elseif fqn == delegate_worker_fqn then
+                local old_fqn = delegate_worker_fqn
+                delegate_worker_fqn = nil
+                orcs.output_with_level(
+                    "[AgentMgr] Delegate-worker exited (" .. reason .. "). Attempting restart...",
+                    "warn"
+                )
+                if attempt_restart_delegate_worker(old_fqn) then
+                    orcs.output("[AgentMgr] Delegate-worker restarted successfully.")
+                else
+                    orcs.output_with_level(
+                        "[AgentMgr] Delegate-worker restart failed. Shared delegation unavailable.",
+                        "error"
+                    )
+                end
+
+            -- Per-delegation worker died → record failure in delegation_results.
             -- FQN format: "builtin::delegate-{request_id}" (see delegate spawn in dispatch).
             elseif fqn and fqn:match("^builtin::delegate%-") then
                 local request_id = fqn:match("^builtin::delegate%-(.+)$")
