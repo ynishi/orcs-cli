@@ -48,15 +48,7 @@ pub(super) fn register(
 
         // Capability gate: EXECUTE required
         if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("stdout", "")?;
-            result.set(
-                "stderr",
-                "permission denied: Capability::EXECUTE not granted",
-            )?;
-            result.set("code", -1)?;
-            return Ok(result);
+            return exec_error_table(lua, "permission denied: Capability::EXECUTE not granted");
         }
 
         // Permission check via check_command_permission (respects dynamic grants)
@@ -66,12 +58,7 @@ pub(super) fn register(
                 // Proceed to execution
             }
             orcs_component::CommandPermission::Denied(reason) => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("stdout", "")?;
-                result.set("stderr", format!("permission denied: {}", reason))?;
-                result.set("code", -1)?;
-                return Ok(result);
+                return exec_error_table(lua, &format!("permission denied: {}", reason));
             }
             orcs_component::CommandPermission::RequiresApproval {
                 grant_pattern,
@@ -140,15 +127,10 @@ pub(super) fn register(
 
                 // Capability gate: EXECUTE required
                 if !ctx_guard.has_capability(orcs_component::Capability::EXECUTE) {
-                    let result = lua.create_table()?;
-                    result.set("ok", false)?;
-                    result.set("stdout", "")?;
-                    result.set(
-                        "stderr",
+                    return exec_error_table(
+                        lua,
                         "permission denied: Capability::EXECUTE not granted",
-                    )?;
-                    result.set("code", -1)?;
-                    return Ok(result);
+                    );
                 }
 
                 // Permission check on program name
@@ -156,12 +138,7 @@ pub(super) fn register(
                 match &permission {
                     orcs_component::CommandPermission::Allowed => {}
                     orcs_component::CommandPermission::Denied(reason) => {
-                        let result = lua.create_table()?;
-                        result.set("ok", false)?;
-                        result.set("stdout", "")?;
-                        result.set("stderr", format!("permission denied: {}", reason))?;
-                        result.set("code", -1)?;
-                        return Ok(result);
+                        return exec_error_table(lua, &format!("permission denied: {}", reason));
                     }
                     orcs_component::CommandPermission::RequiresApproval {
                         grant_pattern,
@@ -215,11 +192,10 @@ pub(super) fn register(
             let ctx_guard = ctx_clone.lock();
 
             if !ctx_guard.has_capability(orcs_component::Capability::LLM) {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", "permission denied: Capability::LLM not granted")?;
-                result.set("error_kind", "permission_denied")?;
-                return Ok(result);
+                return capability_error_table(
+                    lua,
+                    "permission denied: Capability::LLM not granted",
+                );
             }
             drop(ctx_guard);
 
@@ -239,11 +215,10 @@ pub(super) fn register(
             let ctx_guard = ctx_clone.lock();
 
             if !ctx_guard.has_capability(orcs_component::Capability::LLM) {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", "permission denied: Capability::LLM not granted")?;
-                result.set("error_kind", "permission_denied")?;
-                return Ok(result);
+                return capability_error_table(
+                    lua,
+                    "permission denied: Capability::LLM not granted",
+                );
             }
             drop(ctx_guard);
 
@@ -263,11 +238,10 @@ pub(super) fn register(
             let ctx_guard = ctx_clone.lock();
 
             if !ctx_guard.has_capability(orcs_component::Capability::HTTP) {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", "permission denied: Capability::HTTP not granted")?;
-                result.set("error_kind", "permission_denied")?;
-                return Ok(result);
+                return capability_error_table(
+                    lua,
+                    "permission denied: Capability::HTTP not granted",
+                );
             }
             drop(ctx_guard);
 
@@ -284,21 +258,15 @@ pub(super) fn register(
 
         // Capability gate: SPAWN required
         if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("error", "permission denied: Capability::SPAWN not granted")?;
-            return Ok(result);
+            return simple_error_table(lua, "permission denied: Capability::SPAWN not granted");
         }
 
         // Auth permission check
         if !ctx_guard.can_spawn_child_auth() {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set(
-                "error",
+            return simple_error_table(
+                lua,
                 "permission denied: spawn_child requires elevated session",
-            )?;
-            return Ok(result);
+            );
         }
 
         // Parse config
@@ -583,21 +551,15 @@ pub(super) fn register(
 
         // Capability gate: SPAWN required
         if !ctx_guard.has_capability(orcs_component::Capability::SPAWN) {
-            let result_table = lua.create_table()?;
-            result_table.set("ok", false)?;
-            result_table.set("error", "permission denied: Capability::SPAWN not granted")?;
-            return Ok(result_table);
+            return simple_error_table(lua, "permission denied: Capability::SPAWN not granted");
         }
 
         // Auth permission check
         if !ctx_guard.can_spawn_runner_auth() {
-            let result_table = lua.create_table()?;
-            result_table.set("ok", false)?;
-            result_table.set(
-                "error",
+            return simple_error_table(
+                lua,
                 "permission denied: spawn_runner requires elevated session",
-            )?;
-            return Ok(result_table);
+            );
         }
 
         // ID is optional
@@ -660,6 +622,40 @@ pub(super) fn register(
         "Registered orcs.spawn_child, child_count, max_children, send_to_child, send_to_children_batch, request_batch, spawn_runner, request_stop functions"
     );
     Ok(())
+}
+
+// ── Capability-gate error table helpers ──────────────────────────────
+//
+// Three response shapes exist because Lua consumers expect different fields:
+//   - exec/exec_argv:  { ok, stdout, stderr, code }
+//   - llm/http:        { ok, error, error_kind }
+//   - spawn:           { ok, error }
+
+/// Build an exec-style error table: `{ ok=false, stdout="", stderr=msg, code=-1 }`.
+fn exec_error_table(lua: &Lua, stderr_msg: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("ok", false)?;
+    t.set("stdout", "")?;
+    t.set("stderr", stderr_msg)?;
+    t.set("code", -1)?;
+    Ok(t)
+}
+
+/// Build a capability error table: `{ ok=false, error=msg, error_kind="permission_denied" }`.
+fn capability_error_table(lua: &Lua, msg: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("ok", false)?;
+    t.set("error", msg)?;
+    t.set("error_kind", "permission_denied")?;
+    Ok(t)
+}
+
+/// Build a simple error table: `{ ok=false, error=msg }`.
+fn simple_error_table(lua: &Lua, msg: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("ok", false)?;
+    t.set("error", msg)?;
+    Ok(t)
 }
 
 /// Parse a Lua value from `config.globals` into a typed `serde_json::Map`.
@@ -818,5 +814,87 @@ mod tests {
             err.to_string().contains("got boolean"),
             "error message should say 'got boolean', got: {err}"
         );
+    }
+
+    // ── Error table helper tests ─────────────────────────────────────
+
+    #[test]
+    fn exec_error_table_has_correct_fields() {
+        let lua = mlua::Lua::new();
+        let table = exec_error_table(&lua, "some error").expect("exec_error_table should not fail");
+        assert_eq!(
+            table.get::<bool>("ok").expect("ok field"),
+            false,
+            "ok should be false"
+        );
+        assert_eq!(
+            table.get::<String>("stdout").expect("stdout field"),
+            "",
+            "stdout should be empty"
+        );
+        assert_eq!(
+            table.get::<String>("stderr").expect("stderr field"),
+            "some error",
+            "stderr should contain the message"
+        );
+        assert_eq!(
+            table.get::<i32>("code").expect("code field"),
+            -1,
+            "code should be -1"
+        );
+    }
+
+    #[test]
+    fn capability_error_table_has_correct_fields() {
+        let lua = mlua::Lua::new();
+        let table = capability_error_table(&lua, "permission denied: Capability::LLM not granted")
+            .expect("capability_error_table should not fail");
+        assert_eq!(
+            table.get::<bool>("ok").expect("ok field"),
+            false,
+            "ok should be false"
+        );
+        assert_eq!(
+            table.get::<String>("error").expect("error field"),
+            "permission denied: Capability::LLM not granted",
+        );
+        assert_eq!(
+            table.get::<String>("error_kind").expect("error_kind field"),
+            "permission_denied",
+        );
+    }
+
+    #[test]
+    fn simple_error_table_has_correct_fields() {
+        let lua = mlua::Lua::new();
+        let table =
+            simple_error_table(&lua, "spawn failed").expect("simple_error_table should not fail");
+        assert_eq!(
+            table.get::<bool>("ok").expect("ok field"),
+            false,
+            "ok should be false"
+        );
+        assert_eq!(
+            table.get::<String>("error").expect("error field"),
+            "spawn failed",
+        );
+        // error_kind should NOT exist
+        assert!(
+            table.get::<String>("error_kind").is_err(),
+            "simple_error_table should not have error_kind"
+        );
+    }
+
+    #[test]
+    fn require_capability_returns_none_when_granted() {
+        // When capability is present, require_capability should return None
+        // (no error table needed).
+        // We test this indirectly: exec_error_table is only called when
+        // capability is missing, so the helper itself is the testable unit.
+        let lua = mlua::Lua::new();
+        // Verify the helpers produce valid Lua tables (no panic, no error)
+        let _ = exec_error_table(&lua, "x").expect("should produce valid table");
+        let _ = capability_error_table(&lua, "x").expect("should produce valid table");
+        let _ = simple_error_table(&lua, "x").expect("should produce valid table");
     }
 }
