@@ -68,6 +68,8 @@ const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 struct RunnerExitNotice {
     channel_id: ChannelId,
     component_fqn: String,
+    /// Why the runner exited. Forwarded from [`RunnerResult::exit_reason`].
+    exit_reason: crate::channel::ExitReason,
 }
 
 /// OrcsEngine - Main runtime for ORCS CLI.
@@ -282,6 +284,7 @@ impl OrcsEngine {
             let _ = exit_tx.send(RunnerExitNotice {
                 channel_id,
                 component_fqn: fqn,
+                exit_reason: result.exit_reason.clone(),
             });
             result
         });
@@ -711,10 +714,12 @@ impl OrcsEngine {
         let shared_handles = self.eventbus.shared_handles();
         let task = tokio::spawn(async move {
             while let Some(notice) = exit_rx.recv().await {
+                let reason_str = notice.exit_reason.as_str();
                 warn!(
                     channel = %notice.channel_id,
                     component = %notice.component_fqn,
-                    "Runner exited unexpectedly during normal operation"
+                    exit_reason = reason_str,
+                    "Runner exited"
                 );
 
                 // Broadcast Lifecycle event so Lua components can react.
@@ -725,6 +730,7 @@ impl OrcsEngine {
                     payload: serde_json::json!({
                         "channel_id": notice.channel_id.to_string(),
                         "component_fqn": notice.component_fqn,
+                        "exit_reason": reason_str,
                     }),
                 };
                 let handles = shared_handles.read();
@@ -737,6 +743,7 @@ impl OrcsEngine {
                 debug!(
                     channel = %notice.channel_id,
                     component = %notice.component_fqn,
+                    exit_reason = reason_str,
                     delivered,
                     "Lifecycle::runner_exited event broadcast"
                 );

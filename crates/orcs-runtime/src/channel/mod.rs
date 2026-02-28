@@ -162,8 +162,8 @@ pub use error::ChannelError;
 pub use manager::{WorldCommandSender, WorldManager};
 pub use runner::{
     ChannelHandle, ChannelRunner, ChannelRunnerBuilder, ChildContextImpl, ChildSpawner,
-    ClientRunner, ClientRunnerConfig, Event, EventEmitter, LuaChildLoader, OutputReceiver,
-    OutputSender, RunnerResult, SpawnedChildHandle,
+    ClientRunner, ClientRunnerConfig, Event, EventEmitter, ExitReason, LuaChildLoader,
+    OutputReceiver, OutputSender, RunnerResult, SpawnedChildHandle,
 };
 pub use traits::{ChannelCore, ChannelMut};
 pub use world::World;

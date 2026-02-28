@@ -2,7 +2,7 @@
 -- Agent Manager component: routes UserInput to CommonAgent instances and workers.
 --
 -- Architecture (Event-driven + RPC hybrid, parent-child agent hierarchy):
---   agent_mgr (Router Component, subscriptions=UserInput,DelegateResult)
+--   agent_mgr (Router Component, subscriptions=UserInput,DelegateResult,Lifecycle)
 --     │
 --     ├─ @prefix commands → targeted RPC to specific components or agents
 --     │
@@ -815,6 +815,58 @@ local DELEGATION_RESULTS_LIMIT = 5
 -- Counter for generating unique delegation request IDs.
 local delegation_counter = 0
 
+-- Restart intensity tracking (Erlang-inspired: max N restarts in T seconds).
+local restart_counts = {}  -- { [fqn] = { count = N, window_start = epoch } }
+local MAX_RESTARTS = 3
+local RESTART_WINDOW_SECS = 60
+
+--- Check whether a restart is allowed for the given FQN.
+--- Returns true if under the intensity limit, false if exceeded.
+--- @param fqn string  Component FQN to check
+--- @return boolean
+local function check_restart_allowed(fqn)
+    local now = os.time()
+    local entry = restart_counts[fqn]
+    if not entry or (now - entry.window_start) > RESTART_WINDOW_SECS then
+        restart_counts[fqn] = { count = 1, window_start = now }
+        return true
+    end
+    entry.count = entry.count + 1
+    if entry.count > MAX_RESTARTS then
+        orcs.log("error", string.format(
+            "AgentMgr: restart intensity exceeded for %s (%d/%d in %ds)",
+            fqn, entry.count, MAX_RESTARTS, RESTART_WINDOW_SECS
+        ))
+        return false
+    end
+    return true
+end
+
+--- Attempt to restart the builtin concierge.
+--- Uses check_restart_allowed() to prevent restart storms.
+--- @param old_fqn string|nil  FQN of the concierge that just died (for rate-limit tracking).
+--- @return boolean  true if restart succeeded
+local function attempt_restart_concierge(old_fqn)
+    local check_fqn = old_fqn or concierge_fqn or "builtin::concierge"
+    if not check_restart_allowed(check_fqn) then
+        return false
+    end
+    local result = orcs.spawn_runner({
+        builtin = "concierge.lua",
+        globals = {
+            _delegate_timeout_ms = delegate_timeout_ms,
+            _concierge_timeout_ms = concierge_timeout_ms,
+        },
+    })
+    if result and result.ok then
+        concierge_fqn = result.fqn
+        orcs.log("info", "AgentMgr: concierge restarted as " .. concierge_fqn)
+        return true
+    end
+    orcs.log("error", "AgentMgr: concierge restart failed: " .. (result and result.error or "unknown"))
+    return false
+end
+
 -- Valid prompt placement strategies
 local VALID_PLACEMENTS = { top = true, both = true, bottom = true }
 
@@ -1108,7 +1160,7 @@ end
 return {
     id = "agent_mgr",
     namespace = "builtin",
-    subscriptions = {"UserInput", "DelegateResult"},
+    subscriptions = {"UserInput", "DelegateResult", "Lifecycle"},
     output_to_io = true,
     elevated = true,
     child_spawner = true,
@@ -1158,6 +1210,64 @@ return {
                 dispatch_llm("[Delegate " .. request_id .. " " .. status
                     .. "] Review the delegation result and briefly report to the user.")
             end
+            return { success = true }
+        end
+
+        -- Handle Lifecycle::runner_exited events from Engine monitor.
+        -- Detects when child runners (concierge, delegate-workers, agents) exit.
+        if operation == "runner_exited" then
+            local payload = request.payload or {}
+            local fqn = payload.component_fqn or "unknown"
+            local reason = payload.exit_reason or "unknown"
+
+            orcs.log("warn", string.format(
+                "AgentMgr: runner exited: %s (reason=%s)", fqn, reason
+            ))
+
+            -- Concierge died → attempt restart, clear fqn if restart fails.
+            if fqn == concierge_fqn then
+                local old_fqn = concierge_fqn
+                concierge_fqn = nil
+                orcs.output_with_level(
+                    "[AgentMgr] Concierge exited (" .. reason .. "). Attempting restart...",
+                    "warn"
+                )
+                if attempt_restart_concierge(old_fqn) then
+                    orcs.output("[AgentMgr] Concierge restarted successfully.")
+                else
+                    orcs.output_with_level(
+                        "[AgentMgr] Concierge restart failed. LLM processing unavailable.",
+                        "error"
+                    )
+                end
+
+            -- Delegate worker died → record failure in delegation_results.
+            -- FQN format: "builtin::delegate-{request_id}" (see delegate spawn in dispatch).
+            elseif fqn and fqn:match("^builtin::delegate%-") then
+                local request_id = fqn:match("^builtin::delegate%-(.+)$")
+                if request_id then
+                    delegation_results[#delegation_results + 1] = {
+                        request_id = request_id,
+                        summary = "Worker exited: " .. reason,
+                        success = false,
+                        timestamp = os.time(),
+                    }
+                    while #delegation_results > DELEGATION_RESULTS_LIMIT do
+                        table.remove(delegation_results, 1)
+                    end
+                    orcs.output_with_level(
+                        "[AgentMgr] Delegate " .. request_id .. " worker exited: " .. reason,
+                        "error"
+                    )
+                end
+
+            -- Other component died → log only.
+            else
+                orcs.log("info", string.format(
+                    "AgentMgr: component exited (not managed): %s (%s)", fqn, reason
+                ))
+            end
+
             return { success = true }
         end
 

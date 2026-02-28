@@ -64,7 +64,9 @@ mod emitter;
 mod paused_queue;
 mod rpc;
 
-pub use base::{ChannelHandle, ChannelRunner, Event, OutputReceiver, OutputSender, RunnerResult};
+pub use base::{
+    ChannelHandle, ChannelRunner, Event, ExitReason, OutputReceiver, OutputSender, RunnerResult,
+};
 // Builder is re-exported for external use (internal code uses it via base::ChannelRunnerBuilder)
 #[allow(unused_imports)]
 pub use base::ChannelRunnerBuilder;

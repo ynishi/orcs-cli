@@ -29,7 +29,7 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 
-use super::base::{ChannelHandle, Event, InboundEvent, RunnerResult};
+use super::base::{ChannelHandle, Event, ExitReason, InboundEvent, RunnerResult};
 use super::common::{
     determine_channel_action, is_channel_active, is_channel_paused, send_abort, send_transition,
     SignalAction,
@@ -270,6 +270,10 @@ impl ClientRunner {
     pub async fn run(mut self) -> RunnerResult {
         info!("ClientRunner {} started", self.id);
 
+        // Default fallback: overwritten by each break-point in the loop.
+        #[allow(unused_assignments)]
+        let mut exit_reason = ExitReason::Signal;
+
         loop {
             tokio::select! {
                 // Priority 1: Signals (control)
@@ -279,11 +283,13 @@ impl ClientRunner {
                     match signal {
                         Ok(sig) => {
                             if !self.handle_signal(sig).await {
+                                exit_reason = ExitReason::Signal;
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!("ClientRunner {}: signal channel closed", self.id);
+                            exit_reason = ExitReason::SignalChannelClosed;
                             break;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -297,11 +303,13 @@ impl ClientRunner {
                     match event {
                         Some(evt) => {
                             if !self.handle_event(evt).await {
+                                exit_reason = ExitReason::ComponentStopped;
                                 break;
                             }
                         }
                         None => {
                             info!("ClientRunner {}: event channel closed", self.id);
+                            exit_reason = ExitReason::EventChannelClosed;
                             break;
                         }
                     }
@@ -314,17 +322,20 @@ impl ClientRunner {
                             // User input converted to Signal → process it
                             debug!("ClientRunner {}: IO input → {:?}", self.id, signal.kind);
                             if !self.handle_signal(signal).await {
+                                exit_reason = ExitReason::Signal;
                                 break;
                             }
                         }
                         Some(Err(cmd)) => {
                             // Non-signal command (Quit, Unknown, etc.)
                             if !self.handle_io_command(cmd).await {
+                                exit_reason = ExitReason::UserQuit;
                                 break;
                             }
                         }
                         None => {
                             info!("ClientRunner {}: IO closed", self.id);
+                            exit_reason = ExitReason::IoChannelClosed;
                             break;
                         }
                     }
@@ -334,16 +345,18 @@ impl ClientRunner {
             // Check if channel is still active
             if !is_channel_active(&self.world, self.id).await {
                 debug!("ClientRunner {}: channel no longer active", self.id);
+                exit_reason = ExitReason::ChannelInactive;
                 break;
             }
         }
 
-        info!("ClientRunner {} stopped", self.id);
+        info!("ClientRunner {} stopped (reason={})", self.id, exit_reason);
 
         RunnerResult {
             channel_id: self.id,
             component_fqn: std::borrow::Cow::Borrowed(CLIENT_RUNNER_FQN),
             snapshot: None,
+            exit_reason,
         }
     }
 
