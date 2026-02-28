@@ -120,6 +120,29 @@ pub(crate) fn get_or_init_http_client(lua: &Lua) -> Result<reqwest::Client, mlua
     Ok(client)
 }
 
+// ── HIL Turn Accumulator ─────────────────────────────────────────────
+
+/// Tracks consumed tool turns across HIL re-dispatches within a single Lua VM.
+///
+/// When `hil_intents=true` and a `Suspended` error occurs, the resolve loop
+/// saves the number of consumed turns here.  On re-dispatch, the next
+/// `llm_request_impl` call reads this value as `turn_offset` so the total
+/// turn budget is preserved across HIL interruptions.
+struct HilTurnAccumulator(u32);
+
+/// Read and reset the HIL turn accumulator.  Returns the stored offset
+/// (0 if none).  The reset ensures a clean slate for the current call;
+/// only a subsequent `Suspended` will write a new value.
+fn take_hil_turn_accumulator(lua: &Lua) -> u32 {
+    lua.remove_app_data::<HilTurnAccumulator>()
+        .map_or(0, |acc| acc.0)
+}
+
+/// Save accumulated turns for the next HIL re-dispatch.
+fn set_hil_turn_accumulator(lua: &Lua, turns: u32) {
+    lua.set_app_data(HilTurnAccumulator(turns));
+}
+
 // ── Parsed Options ─────────────────────────────────────────────────────
 
 /// Parsed and validated options from the Lua opts table.
@@ -535,9 +558,29 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     // are removed on rollback, allowing a clean replay after ChannelRunner re-dispatch.
     let session_checkpoint = session_message_count(lua, &session_id);
 
+    // ── HIL turn offset ──
+    // When hil_intents=true and a previous call was Suspended, the accumulator
+    // holds the number of turns already consumed.  Read-and-reset so only a
+    // subsequent Suspended writes a new value.
+    let turn_offset = if llm_opts.hil_intents {
+        take_hil_turn_accumulator(lua)
+    } else {
+        0
+    };
+    let remaining_budget = llm_opts.max_tool_turns.saturating_sub(turn_offset);
+
     // ── Tool loop ──
     // Each iteration: build body → send → parse → if tool_use && resolve → dispatch → append results → repeat
-    for tool_turn in 0..=llm_opts.max_tool_turns {
+    tracing::debug!(
+        max_tool_turns = llm_opts.max_tool_turns,
+        turn_offset = turn_offset,
+        remaining_budget = remaining_budget,
+        resolve = llm_opts.resolve,
+        reminder_threshold = TURN_REMINDER_THRESHOLD,
+        "resolve loop config"
+    );
+    for tool_turn in 0..=remaining_budget {
+        let global_turn = turn_offset + tool_turn;
         let request_body = match build_request_body(&llm_opts, &messages, tools_json.as_ref()) {
             Ok(body) => body,
             Err(e) => {
@@ -556,7 +599,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             .map_or(0, |a| a.len());
         tracing::info!(
             "llm request turn={}: {} {} ({}B, tools={})",
-            tool_turn,
+            global_turn,
             llm_opts.provider.chat_path(),
             llm_opts.model,
             body_str.len(),
@@ -582,14 +625,14 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         let should_resolve = is_tool_use && llm_opts.resolve && !parsed_resp.intents.is_empty();
         tracing::info!(
             "llm response turn={}: stop_reason={:?}, intents={}, resolve={}, content_len={}",
-            tool_turn,
+            global_turn,
             parsed_resp.stop_reason,
             parsed_resp.intents.len(),
             should_resolve,
             parsed_resp.content.len()
         );
 
-        if should_resolve && tool_turn < llm_opts.max_tool_turns {
+        if should_resolve && global_turn < llm_opts.max_tool_turns {
             // ── Auto-resolve: dispatch intents and continue loop ──
 
             // Build assistant message with ContentBlocks (preserves tool_use blocks)
@@ -621,8 +664,9 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 Ok(content) => content,
                 Err(e) => {
                     if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
-                        // HIL mode: roll back session to the checkpoint so the
-                        // conversation replays cleanly after approval + re-dispatch.
+                        // HIL mode: save consumed turns so the next re-dispatch
+                        // continues from where we left off, then roll back session.
+                        set_hil_turn_accumulator(lua, global_turn + 1);
                         truncate_session(lua, &session_id, session_checkpoint);
                         return Err(e);
                     }
@@ -650,21 +694,31 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             // Inject a reminder when approaching the turn limit so the LLM
             // can prioritize remaining work (research shows 27-60% perf drop
             // without reminders).
-            let remaining = llm_opts.max_tool_turns.saturating_sub(tool_turn + 1);
+            let remaining = llm_opts.max_tool_turns.saturating_sub(global_turn + 1);
             if remaining > 0 && remaining <= TURN_REMINDER_THRESHOLD {
-                if let MessageContent::Blocks(ref mut blocks) = tool_result_content {
-                    blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System] You have {} tool turn(s) remaining before the limit. \
-                             Prioritize completing the most important remaining work.",
-                            remaining
-                        ),
-                    });
-                    tracing::info!(
-                        "tool turn {}: injected turn budget reminder ({} remaining)",
-                        tool_turn,
-                        remaining
-                    );
+                match tool_result_content {
+                    MessageContent::Blocks(ref mut blocks) => {
+                        blocks.push(ContentBlock::Text {
+                            text: format!(
+                                "[System] You have {} tool turn(s) remaining before the limit. \
+                                 Prioritize completing the most important remaining work.",
+                                remaining
+                            ),
+                        });
+                        tracing::warn!(
+                            tool_turn = global_turn,
+                            remaining = remaining,
+                            max_tool_turns = llm_opts.max_tool_turns,
+                            "turn budget reminder injected"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            tool_turn = global_turn,
+                            remaining = remaining,
+                            "turn budget reminder skipped: tool_result_content is not Blocks"
+                        );
+                    }
                 }
             }
 
@@ -686,7 +740,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 .collect();
             tracing::info!(
                 "tool turn {}: resolved {} intent(s) [{}], continuing",
-                tool_turn,
+                global_turn,
                 parsed_resp.intents.len(),
                 intent_names.join(", ")
             );
@@ -704,12 +758,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         //       left off.
         let should_continue_on_max_tokens = parsed_resp.stop_reason == StopReason::MaxTokens
             && llm_opts.resolve
-            && tool_turn < llm_opts.max_tool_turns;
+            && global_turn < llm_opts.max_tool_turns;
 
         if should_continue_on_max_tokens {
             tracing::warn!(
                 "llm response truncated by max_tokens at turn={} (intents={}, content_len={}), attempting continuation",
-                tool_turn,
+                global_turn,
                 parsed_resp.intents.len(),
                 parsed_resp.content.len()
             );
@@ -736,6 +790,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                     Ok(content) => content,
                     Err(e) => {
                         if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
+                            set_hil_turn_accumulator(lua, global_turn + 1);
                             truncate_session(lua, &session_id, session_checkpoint);
                             return Err(e);
                         }
@@ -809,6 +864,12 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     }
 
     // Tool loop exhausted
+    tracing::warn!(
+        max_tool_turns = llm_opts.max_tool_turns,
+        turn_offset = turn_offset,
+        session_id = %session_id,
+        "tool loop exhausted: reached max_tool_turns limit"
+    );
     let result = lua.create_table()?;
     result.set("ok", false)?;
     result.set(
