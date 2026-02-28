@@ -857,6 +857,66 @@ impl ChannelRunner {
         true
     }
 
+    /// Enters the approval workflow for a suspended component.
+    ///
+    /// Stores the pending approval, transitions the channel to `AwaitingApproval`,
+    /// and sends an `approval_request` notification to the user via IO output.
+    async fn handle_suspended(
+        &mut self,
+        approval_id: String,
+        grant_pattern: String,
+        pending_request: serde_json::Value,
+        original_request: Request,
+    ) {
+        info!(
+            approval_id = %approval_id,
+            grant_pattern = %grant_pattern,
+            "entering approval workflow"
+        );
+
+        self.pending_approval = Some(PendingApproval {
+            approval_id: approval_id.clone(),
+            grant_pattern,
+            original_request,
+        });
+
+        send_transition(
+            &self.world_tx,
+            self.id,
+            StateTransition::AwaitApproval {
+                request_id: approval_id.clone(),
+            },
+        )
+        .await;
+
+        let description = pending_request
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("command execution")
+            .to_string();
+        let command = pending_request
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(io_tx) = &self.io_output_tx {
+            let output_event = Event {
+                category: EventCategory::Output,
+                operation: "approval_request".to_string(),
+                source: self.component_id.clone(),
+                payload: serde_json::json!({
+                    "type": "approval_request",
+                    "approval_id": approval_id,
+                    "operation": "exec",
+                    "description": format!("{}: {}", description, command),
+                    "source": self.component_id.fqn(),
+                }),
+            };
+            let _ = io_tx.try_send_direct(output_event);
+        }
+    }
+
     /// Handles post-approval: grants the permission pattern and re-dispatches the request.
     ///
     /// Called after a `ResolveApproval` transition succeeds (channel returns to Running).
@@ -927,53 +987,13 @@ impl ChannelRunner {
                 // Cascading approval: re-dispatch hit a different permission gate.
                 // Enter a new approval cycle with the same original request so that
                 // accumulated grants will all be in effect on the next re-dispatch.
-                info!(
-                    approval_id = %new_approval_id,
-                    grant_pattern = %new_grant_pattern,
-                    "re-dispatch triggered cascading approval"
-                );
-
-                self.pending_approval = Some(PendingApproval {
-                    approval_id: new_approval_id.clone(),
-                    grant_pattern: new_grant_pattern,
-                    original_request: pending.original_request,
-                });
-
-                send_transition(
-                    &self.world_tx,
-                    self.id,
-                    StateTransition::AwaitApproval {
-                        request_id: new_approval_id.clone(),
-                    },
+                self.handle_suspended(
+                    new_approval_id,
+                    new_grant_pattern,
+                    new_pending_request,
+                    pending.original_request,
                 )
                 .await;
-
-                let description = new_pending_request
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("command execution")
-                    .to_string();
-                let command = new_pending_request
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if let Some(io_tx) = &self.io_output_tx {
-                    let output_event = Event {
-                        category: EventCategory::Output,
-                        operation: "approval_request".to_string(),
-                        source: self.component_id.clone(),
-                        payload: serde_json::json!({
-                            "type": "approval_request",
-                            "approval_id": new_approval_id,
-                            "operation": "exec",
-                            "description": format!("{}: {}", description, command),
-                            "source": self.component_id.fqn(),
-                        }),
-                    };
-                    let _ = io_tx.try_send_direct(output_event);
-                }
             }
             Err(e) => {
                 warn!(error = %e, "re-dispatched request failed after approval");
@@ -1123,56 +1143,8 @@ impl ChannelRunner {
                 grant_pattern,
                 pending_request,
             }) => {
-                info!(
-                    approval_id = %approval_id,
-                    grant_pattern = %grant_pattern,
-                    "component suspended pending approval"
-                );
-
-                // Store the pending approval for re-dispatch after approval.
-                self.pending_approval = Some(PendingApproval {
-                    approval_id: approval_id.clone(),
-                    grant_pattern,
-                    original_request: request,
-                });
-
-                // Transition channel to AwaitingApproval state.
-                send_transition(
-                    &self.world_tx,
-                    self.id,
-                    StateTransition::AwaitApproval {
-                        request_id: approval_id.clone(),
-                    },
-                )
-                .await;
-
-                // Notify user via IOOutput (ClientRunner → IOBridge → console).
-                let description = pending_request
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("command execution")
-                    .to_string();
-                let command = pending_request
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let output_event = Event {
-                    category: EventCategory::Output,
-                    operation: "approval_request".to_string(),
-                    source: self.component_id.clone(),
-                    payload: serde_json::json!({
-                        "type": "approval_request",
-                        "approval_id": approval_id,
-                        "operation": "exec",
-                        "description": format!("{}: {}", description, command),
-                        "source": self.component_id.fqn(),
-                    }),
-                };
-                if let Some(io_tx) = &self.io_output_tx {
-                    let _ = io_tx.try_send_direct(output_event);
-                }
+                self.handle_suspended(approval_id, grant_pattern, pending_request, request)
+                    .await;
             }
             Err(ComponentError::Aborted) => {
                 info!("component aborted");
