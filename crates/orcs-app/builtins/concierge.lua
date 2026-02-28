@@ -16,6 +16,11 @@
 
 -- === Module State ===
 
+-- Configurable timeouts (overridden via _delegate_timeout_ms global if set)
+local delegate_timeout_ms = (_delegate_timeout_ms and type(_delegate_timeout_ms) == "number")
+    and _delegate_timeout_ms
+    or 600000  -- 10 minutes default
+
 local busy = false
 local session_id = nil
 local turn_count = 0
@@ -191,7 +196,7 @@ local function register_delegate_intent()
             .. "results appear in your context on the next turn.",
         component = "builtin::agent_mgr",
         operation = "delegate",
-        timeout_ms = 600000,
+        timeout_ms = delegate_timeout_ms,
         params = {
             description = {
                 type = "string",

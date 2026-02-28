@@ -54,6 +54,9 @@ pub struct OrcsConfig {
 
     /// MCP (Model Context Protocol) server configuration.
     pub mcp: McpConfig,
+
+    /// Timeout configuration.
+    pub timeouts: TimeoutsConfig,
 }
 
 impl OrcsConfig {
@@ -99,6 +102,7 @@ impl OrcsConfig {
     /// | `ui.verbose` | bool | Verbose output |
     /// | `ui.color` | bool | Color output |
     /// | `ui.emoji` | bool | Emoji output |
+    /// | `timeouts.delegate_ms` | number | Delegate task timeout (ms) |
     ///
     /// # Excluded fields
     ///
@@ -120,6 +124,9 @@ impl OrcsConfig {
                 "verbose": self.ui.verbose,
                 "color": self.ui.color,
                 "emoji": self.ui.emoji,
+            },
+            "timeouts": {
+                "delegate_ms": self.timeouts.delegate_ms,
             },
         })
     }
@@ -144,6 +151,7 @@ impl OrcsConfig {
         self.components.merge(&other.components);
         self.hooks.merge(&other.hooks);
         self.mcp.merge(&other.mcp);
+        self.timeouts.merge(&other.timeouts);
     }
 }
 
@@ -317,6 +325,44 @@ impl UiConfig {
     }
 }
 
+/// Timeout configuration for Lua component operations.
+///
+/// These values are injected into `cfg._global.timeouts` for Lua access.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [timeouts]
+/// delegate_ms = 600000
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TimeoutsConfig {
+    /// Timeout for delegate/invoke operations in milliseconds.
+    ///
+    /// Used by agent_mgr, concierge, and delegate_worker for task
+    /// delegation. Default: 600000 (10 minutes).
+    pub delegate_ms: u64,
+}
+
+impl Default for TimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            delegate_ms: 600_000,
+        }
+    }
+}
+
+impl TimeoutsConfig {
+    fn merge(&mut self, other: &Self) {
+        let default = Self::default();
+
+        if other.delegate_ms != default.delegate_ms {
+            self.delegate_ms = other.delegate_ms;
+        }
+    }
+}
+
 /// Script loading configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -455,6 +501,13 @@ pub struct ComponentsConfig {
     /// | `llm_temperature` | number | none | Sampling temperature |
     /// | `llm_max_tokens` | number | none | Max completion tokens |
     /// | `llm_timeout` | number | `120` | Request timeout (seconds) |
+    /// | `ping_timeout_ms` | number | `5000` | External agent ping timeout (ms) |
+    ///
+    /// ## `lua_sandbox`
+    ///
+    /// | Key | Type | Default | Description |
+    /// |-----|------|---------|-------------|
+    /// | `sandbox_timeout_ms` | number | `30000` | Sandbox execution timeout (ms) |
     ///
     /// ## `skill_manager`
     ///

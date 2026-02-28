@@ -22,6 +22,11 @@
 
 local delegate_payload = _delegate_payload  -- luacheck: ignore 113
 
+-- Configurable timeouts (overridden via _delegate_timeout_ms global if set)
+local delegate_timeout_ms = (_delegate_timeout_ms and type(_delegate_timeout_ms) == "number")
+    and _delegate_timeout_ms
+    or 600000  -- 10 minutes default
+
 -- === Module State ===
 
 local busy = false
@@ -80,7 +85,7 @@ local function handle_process(payload)
             -- Route through external backend component (e.g. custom::my_llm)
             local result = orcs.request(delegate_backend, "process", {
                 message = prompt,
-            }, { timeout_ms = 600000 })
+            }, { timeout_ms = delegate_timeout_ms })
             if result and result.success then
                 summary = (result.data and result.data.response) or ""
                 cost = result.data and result.data.cost
