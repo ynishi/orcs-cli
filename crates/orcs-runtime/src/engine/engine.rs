@@ -327,68 +327,6 @@ impl OrcsEngine {
     /// the Emitter trait. The Component can emit output via `emit_output()`.
     ///
     /// Use this for ChannelRunner-based execution instead of ClientRunner.
-    /// The Component receives events via `on_request()` and emits output via Emitter.
-    ///
-    /// # Arguments
-    ///
-    /// * `channel_id` - The channel to run
-    /// * `component` - The Component to bind (must implement `set_emitter`)
-    /// * `output_tx` - Optional sender for routing Output events to IO channel
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Lua scripts can use orcs.output() after emitter is set
-    /// let lua_component = LuaComponent::from_script("...")?;
-    ///
-    /// // Without output routing (Output stays in this channel)
-    /// let handle = engine.spawn_runner_with_emitter(channel_id, component, None);
-    ///
-    /// // With output routing to IO channel
-    /// let (_, io_event_tx) = engine.spawn_client_runner(io_channel, io_port, principal);
-    /// let handle = engine.spawn_runner_with_emitter(channel_id, component, Some(io_event_tx));
-    /// ```
-    pub fn spawn_runner_with_emitter(
-        &mut self,
-        channel_id: ChannelId,
-        component: Box<dyn Component>,
-        output_tx: Option<OutputSender>,
-    ) -> ChannelHandle {
-        let signal_rx = self.signal_tx.subscribe();
-        let component_id = component.id().clone();
-
-        // Use builder with emitter to ensure event_tx/event_rx consistency
-        let mut builder = ChannelRunner::builder(
-            channel_id,
-            self.world_tx.clone(),
-            Arc::clone(&self.world_read),
-            signal_rx,
-            component,
-        )
-        .with_emitter(self.signal_tx.clone())
-        .with_shared_handles(self.eventbus.shared_handles())
-        .with_component_channel_map(self.eventbus.shared_component_channel_map())
-        .with_board(Arc::clone(&self.board))
-        .with_request_channel();
-
-        // Route Output events to IO channel if specified
-        if let Some(tx) = output_tx {
-            builder = builder.with_output_channel(tx);
-        }
-
-        let (runner, handle) = self
-            .apply_mcp_manager(self.apply_hook_registry(builder))
-            .build();
-
-        let handle = self.finalize_runner(channel_id, &component_id, runner, handle);
-        info!(
-            "Spawned runner with emitter for channel {} (component={})",
-            channel_id,
-            component_id.fqn()
-        );
-        handle
-    }
-
     /// Spawn a ClientRunner for an IO channel (no component).
     ///
     /// ClientRunner is dedicated to Human I/O bridging. It broadcasts UserInput

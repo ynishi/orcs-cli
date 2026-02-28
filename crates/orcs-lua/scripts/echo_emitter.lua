@@ -6,7 +6,7 @@
 --
 -- Usage:
 --   let component = ScriptLoader::load_embedded("echo_emitter")?;
---   engine.spawn_runner_with_emitter(channel_id, Box::new(component));
+--   engine.spawn_runner_full_auth(channel_id, Box::new(component), ...);
 return {
     id = "echo_emitter",
     namespace = "builtin",
