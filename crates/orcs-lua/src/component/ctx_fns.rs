@@ -635,8 +635,29 @@ pub(super) fn register(
     })?;
     orcs_table.set("spawn_runner", spawn_runner_fn)?;
 
+    // orcs.request_stop() -> { ok, error? }
+    // Requests graceful termination of this component's own ChannelRunner.
+    // The runner will exit its event loop after the current request completes.
+    let ctx_clone = Arc::clone(&ctx);
+    let request_stop_fn = lua.create_function(move |lua, ()| {
+        let ctx_guard = ctx_clone.lock();
+
+        let result_table = lua.create_table()?;
+        match ctx_guard.request_stop() {
+            Ok(()) => {
+                result_table.set("ok", true)?;
+            }
+            Err(e) => {
+                result_table.set("ok", false)?;
+                result_table.set("error", e)?;
+            }
+        }
+        Ok(result_table)
+    })?;
+    orcs_table.set("request_stop", request_stop_fn)?;
+
     tracing::debug!(
-        "Registered orcs.spawn_child, child_count, max_children, send_to_child, send_to_children_batch, request_batch, spawn_runner functions"
+        "Registered orcs.spawn_child, child_count, max_children, send_to_child, send_to_children_batch, request_batch, spawn_runner, request_stop functions"
     );
     Ok(())
 }

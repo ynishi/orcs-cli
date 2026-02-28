@@ -1,16 +1,26 @@
 -- delegate_worker.lua
--- Default worker agent: handles DelegateTask events for sub-agent delegation.
+-- Worker agent: handles delegated tasks for sub-agent delegation.
 --
--- Spawned by agent_mgr when an LLM-initiated delegate_task action is dispatched.
--- Runs an independent LLM session to complete a delegated task, then emits
--- a DelegateResult event for context injection into the next concierge turn.
+-- Two modes of operation:
+--
+-- 1. **Shared worker** (legacy): spawned once at init, subscribes to "DelegateTask"
+--    events and processes them sequentially.
+--
+-- 2. **Per-delegation worker** (parallel): spawned per delegation with
+--    `_delegate_payload` global injected via `spawn_runner({ globals = ... })`.
+--    Subscribes to a unique "DelegateTask-{request_id}" event for isolation.
+--    Multiple per-delegation workers run concurrently in independent Lua VMs.
 --
 -- Operations:
---   process  — execute delegated task (from DelegateTask event)
+--   process  — execute delegated task (from DelegateTask/DelegateTask-{id} event)
 --   status   — return current state for observability
 --
 -- This is a spawned delegate agent (child of agent_mgr).
 -- It runs in its own Lua VM with an independent event loop.
+
+-- === Per-delegation payload (injected via globals, nil for shared worker) ===
+
+local delegate_payload = _delegate_payload  -- luacheck: ignore 113
 
 -- === Module State ===
 
@@ -30,6 +40,7 @@ local function handle_status()
             task_count = task_count,
             last_request_id = last_request_id,
             last_cost = last_cost,
+            mode = delegate_payload and "per-delegation" or "shared",
         },
     }
 end
@@ -190,15 +201,32 @@ local function handle_process(payload)
         orcs.log("error", "delegate-worker: task " .. request_id .. " threw: " .. err_str)
     end
 
+    -- Per-delegation mode: self-terminate after task completion.
+    -- The runner is no longer needed (unique subscription won't receive more events).
+    if delegate_payload and orcs.request_stop then
+        orcs.log("info", "delegate-worker: " .. request_id .. " requesting self-stop")
+        orcs.request_stop()
+    end
+
     return { success = true }
 end
 
 -- === Component Definition ===
 
+-- Per-delegation mode: unique ID and targeted subscription for isolation.
+-- Shared mode: generic ID and broad DelegateTask subscription (legacy).
+local component_id = delegate_payload
+    and ("delegate-" .. (delegate_payload.request_id or "adhoc"))
+    or "delegate-worker"
+
+local subscriptions = delegate_payload
+    and { "DelegateTask-" .. delegate_payload.request_id }
+    or { "DelegateTask" }
+
 return {
-    id = "delegate-worker",
+    id = component_id,
     namespace = "builtin",
-    subscriptions = {"DelegateTask"},
+    subscriptions = subscriptions,
 
     on_request = function(request)
         local operation = request.operation or ""

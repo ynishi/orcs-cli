@@ -1186,6 +1186,32 @@ impl ChildContext for ChildContextImpl {
         })
     }
 
+    fn request_stop(&self) -> Result<(), String> {
+        let world_tx = self
+            .world_tx
+            .as_ref()
+            .ok_or("request_stop: no world_tx (runner spawning not configured)")?;
+        let channel_id = self
+            .channel_id
+            .ok_or("request_stop: no channel_id (not running in a ChannelRunner)")?;
+
+        let reason = format!("component {} requested self-stop", self.parent_id);
+        let tx = world_tx.clone();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                super::common::send_abort(&tx, channel_id, &reason).await;
+            });
+        });
+
+        tracing::info!(
+            component = %self.parent_id,
+            channel = %channel_id,
+            "request_stop: abort sent"
+        );
+        Ok(())
+    }
+
     fn extension(&self, key: &str) -> Option<Box<dyn std::any::Any + Send + Sync>> {
         match key {
             "hook_registry" => self

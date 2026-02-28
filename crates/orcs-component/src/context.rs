@@ -693,6 +693,24 @@ pub trait ChildContext: Send + Sync + Debug {
         None
     }
 
+    /// Requests graceful termination of this component's own ChannelRunner.
+    ///
+    /// Sends an `Abort` transition to the WorldManager, causing the runner
+    /// to exit its event loop cleanly after the current request completes.
+    /// The RunnerMonitor will broadcast a `Lifecycle::runner_exited` event.
+    ///
+    /// # Use Cases
+    ///
+    /// - Per-delegation workers that complete a single task and should release resources
+    /// - Components that detect they are no longer needed
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an error indicating self-stop is not supported.
+    fn request_stop(&self) -> Result<(), String> {
+        Err("request_stop not supported by this context".into())
+    }
+
     /// Clones this context into a boxed trait object.
     fn clone_box(&self) -> Box<dyn ChildContext>;
 }

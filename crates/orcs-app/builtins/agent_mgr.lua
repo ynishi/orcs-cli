@@ -1190,18 +1190,16 @@ return {
         end
 
         -- Handle delegation requests from concierge (via IntentRegistry dispatch).
-        -- Spawns delegate-worker task via DelegateTask event.
+        -- Spawns a per-delegation worker for parallel execution.
+        --
+        -- Each delegation gets its own Lua VM (via spawn_runner) that subscribes
+        -- to a unique "DelegateTask-{request_id}" event. Multiple delegations
+        -- issued in the same LLM turn run concurrently in independent VMs.
         if operation == "delegate" then
             local payload = request.payload or {}
             local description = payload.description or ""
             if description == "" then
                 return { success = false, error = "delegate_task requires a description" }
-            end
-
-            -- Guard: delegate-worker must be available
-            if not delegate_worker_fqn then
-                orcs.output_with_level("[AgentMgr] Error: delegate-worker not available", "error")
-                return { success = false, error = "delegate-worker not available" }
             end
 
             -- Generate unique request ID
@@ -1215,29 +1213,55 @@ return {
             local delegate_backend = component_settings.delegate_backend
             if delegate_backend == "" then delegate_backend = nil end
 
-            -- Emit DelegateTask event (fire-and-forget)
-            local delivered = orcs.emit_event("DelegateTask", "process", {
+            local task_payload = {
                 request_id = request_id,
                 description = description,
                 context = payload.context or "",
                 llm_config = llm_config,
                 delegate_backend = delegate_backend,
+            }
+
+            -- Spawn a dedicated worker per delegation (parallel execution).
+            -- The worker reads _delegate_payload to determine its unique event
+            -- subscription ("DelegateTask-{request_id}") and component ID.
+            local worker = orcs.spawn_runner({
+                builtin = "delegate_worker.lua",
+                id = "delegate-" .. request_id,
+                globals = { _delegate_payload = task_payload },
             })
 
+            if not worker or not worker.ok then
+                local spawn_err = (worker and worker.error) or "unknown"
+                orcs.output_with_level(
+                    "[AgentMgr] Error: failed to spawn delegate worker for " .. request_id,
+                    "error"
+                )
+                return { success = false, error = "failed to spawn delegate worker: " .. spawn_err }
+            end
+
+            -- Emit targeted event to the specific worker (fire-and-forget).
+            -- Event kind includes request_id so only this worker receives it.
+            local event_kind = "DelegateTask-" .. request_id
+            local delivered = orcs.emit_event(event_kind, "process", task_payload)
+
             if not delivered then
-                orcs.output_with_level("[AgentMgr] Error: DelegateTask event not delivered", "error")
+                orcs.output_with_level(
+                    "[AgentMgr] Error: DelegateTask event not delivered to worker " .. request_id,
+                    "error"
+                )
                 return { success = false, error = "DelegateTask event delivery failed" }
             end
 
             orcs.log("info", string.format(
-                "AgentMgr: delegated task %s (%d chars)",
-                request_id, #description
+                "AgentMgr: delegated task %s to dedicated worker (fqn=%s, %d chars)",
+                request_id, worker.fqn, #description
             ))
 
             return {
                 success = true,
                 data = {
                     request_id = request_id,
+                    worker_fqn = worker.fqn,
                     message = "Task delegated to sub-agent (id: " .. request_id .. "). Results will appear in your context on the next turn.",
                 },
             }
