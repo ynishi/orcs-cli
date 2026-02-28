@@ -3,7 +3,26 @@
 //! Tests pure Lua logic in builtins without ORCS runtime dependencies.
 //! These tests are also executable from the lua-debugger MCP via `test_launch`.
 //!
-//! Run with: `cargo test --test lspec_builtins`
+//! # Test strategies
+//!
+//! Two patterns are used depending on what is being tested:
+//!
+//! - **Pure function extraction** — Copy a small pure function from the Lua source
+//!   into the test code and test it in isolation (e.g. `concierge_build_llm_opts`,
+//!   `console_metrics_helpers`). Useful when the function has no side effects.
+//!
+//! - **Mock injection** — Load the real `.lua` file via `dofile()` after replacing
+//!   the `orcs` global with a recording mock. Each call to `fresh_concierge()`
+//!   creates an isolated component instance with independent module state, so
+//!   tests do not interfere with each other. The mock captures all `orcs.*` calls
+//!   (`log`, `output`, `request`, `llm`, etc.) for assertion. See
+//!   [`concierge_mock_setup`] for the factory that generates the mock harness.
+//!
+//! # Run
+//!
+//! ```bash
+//! cargo test --test lspec_builtins
+//! ```
 
 use std::path::Path;
 
@@ -115,8 +134,28 @@ fn echo_component() {
 // Concierge Component (mock-injected full component test)
 // =============================================================================
 
-/// Reusable mock factory for concierge tests.
-/// Returns Lua code that sets up `orcs` global with captured calls.
+/// Generate Lua source that bootstraps a mock `orcs` global for concierge tests.
+///
+/// The returned code defines two Lua-side factories:
+///
+/// - `create_mock(overrides)` — builds a recording mock table `m` and installs
+///   it as the `orcs` global. All `orcs.*` calls (`log`, `output`, `request`,
+///   `llm`, `llm_ping`, `register_intent`, `emit_event`) are recorded into `m`
+///   for later assertion. `overrides` allows customising mock responses:
+///   - `llm_response` — return value of `orcs.llm()` (default: success with
+///     `content = "mock reply"`, `session_id = "sess-1"`, `cost = 0.0042`).
+///   - `foundation` — foundation segments returned by the `get_all` RPC.
+///   - `metrics_formatted` — console metrics string.
+///   - `skills` — skill recommendations returned by the `recommend` RPC.
+///
+/// - `fresh_concierge(overrides)` — calls `create_mock`, then `dofile()` on the
+///   real `concierge.lua`. Returns `(component, mock)` where `component` is the
+///   table returned by `concierge.lua` (with `on_request` / `on_signal`) and
+///   `mock` is the recording table for assertions.
+///
+/// Because `dofile()` re-executes the script from scratch, each call produces a
+/// component with fresh module-local state (`busy`, `session_id`, `turn_count`,
+/// etc.), guaranteeing test isolation.
 fn concierge_mock_setup() -> String {
     format!(
         r#"
