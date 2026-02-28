@@ -698,8 +698,8 @@ mod tests {
         assert_eq!(msgs.len(), 1, "system message should be filtered out");
         assert_eq!(msgs[0]["role"], "user");
 
-        // max_tokens defaults to 4096
-        assert_eq!(body["max_tokens"], 4096);
+        // max_tokens defaults to ANTHROPIC_DEFAULT_MAX_TOKENS (8192)
+        assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["stream"], false);
     }
 

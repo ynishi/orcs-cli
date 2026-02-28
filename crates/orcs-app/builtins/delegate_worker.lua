@@ -122,6 +122,16 @@ local function handle_process(payload)
                 summary = resp.content or ""
                 cost = resp.cost
                 sess_id = resp.session_id
+                if resp.stop_reason == "max_tokens" then
+                    orcs.log("warn", string.format(
+                        "delegate-worker: task %s response truncated by max_tokens (content_len=%d)",
+                        request_id, #summary
+                    ))
+                    orcs.output_with_level(
+                        "[Delegate:" .. request_id .. "] Warning: response truncated by output token limit.",
+                        "warn"
+                    )
+                end
             else
                 err = (resp and resp.error) or "unknown error"
             end
