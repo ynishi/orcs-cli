@@ -67,7 +67,7 @@ use resolve::{
 use retry::{build_classified_error_result, build_error_result, send_with_retry, SendError};
 use session::{
     append_message, build_messages, ensure_session_store, resolve_session_id,
-    session_message_count, truncate_session, update_session, Message, SessionStore,
+    session_message_count, update_session, Message, SessionStore,
 };
 
 /// Default timeout in seconds for LLM requests.
@@ -143,6 +143,23 @@ fn set_hil_turn_accumulator(lua: &Lua, turns: u32) {
     lua.set_app_data(HilTurnAccumulator(turns));
 }
 
+/// Preserves the session ID across HIL re-dispatches within a single Lua VM.
+///
+/// On `Suspended`, the resolve loop saves the current session ID here so the
+/// re-dispatched `llm_request_impl` call can resume the same conversation
+/// (with full message history) instead of starting a blank session.
+struct HilSessionId(String);
+
+/// Read and reset the HIL session ID.  Returns `None` if no session was saved.
+fn take_hil_session_id(lua: &Lua) -> Option<String> {
+    lua.remove_app_data::<HilSessionId>().map(|s| s.0)
+}
+
+/// Save session ID for the next HIL re-dispatch.
+fn set_hil_session_id(lua: &Lua, session_id: String) {
+    lua.set_app_data(HilSessionId(session_id));
+}
+
 // ── Parsed Options ─────────────────────────────────────────────────────
 
 /// Parsed and validated options from the Lua opts table.
@@ -172,8 +189,8 @@ pub(super) struct LlmOpts {
     ///
     /// When `true`, intent permission denials bubble up as
     /// `ComponentError::Suspended`, allowing the ChannelRunner to trigger
-    /// the HIL approval flow.  The session is rolled back so the LLM
-    /// conversation replays cleanly after the user grants permission.
+    /// the HIL approval flow.  The session is preserved with synthetic
+    /// tool_results so the LLM retains full context on re-dispatch.
     ///
     /// When `false` (default), `Suspended` is caught and returned as an
     /// `is_error = true` tool_result so the LLM can adapt (e.g., delegate
@@ -537,8 +554,17 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         return Ok(result);
     }
 
-    // Session management: get or create session
-    let session_id = resolve_session_id(lua, &llm_opts.session_id);
+    // Session management: check for HIL resume session first, then get or create.
+    let hil_resume = if llm_opts.hil_intents {
+        take_hil_session_id(lua)
+    } else {
+        None
+    };
+    let session_id = if let Some(ref saved) = hil_resume {
+        saved.clone()
+    } else {
+        resolve_session_id(lua, &llm_opts.session_id)
+    };
 
     // Build tools JSON from IntentRegistry (when opts.tools is true)
     tracing::info!(
@@ -564,12 +590,29 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     let client = get_or_init_http_client(lua)?;
 
     // ── First turn: build messages from history + prompt ──
-    let mut messages = build_messages(lua, &session_id, &prompt, &llm_opts);
+    //
+    // HIL resume: the session already contains full conversation history
+    // (including a synthetic tool_result for the approved operation).
+    // Use a short continuation prompt instead of repeating the original task.
+    let effective_prompt: std::borrow::Cow<'_, str> = if hil_resume.is_some() {
+        "The previously suspended operation has been approved by the user. \
+         Please execute it now."
+            .into()
+    } else {
+        std::borrow::Cow::Borrowed(&prompt)
+    };
+    let mut messages = build_messages(lua, &session_id, &effective_prompt, &llm_opts);
 
-    // Checkpoint: record session length so hil_intents can roll back on Suspended.
-    // Messages appended during the resolve loop (assistant tool_use, user tool_result)
-    // are removed on rollback, allowing a clean replay after ChannelRunner re-dispatch.
-    let session_checkpoint = session_message_count(lua, &session_id);
+    // Store initial prompt in session so HIL resume can reconstruct the
+    // full message sequence (API requires first message to be user role).
+    if hil_resume.is_none() && session_message_count(lua, &session_id) == 0 {
+        append_message(
+            lua,
+            &session_id,
+            orcs_types::intent::Role::User,
+            MessageContent::Text(prompt.to_string()),
+        );
+    }
 
     // ── HIL turn offset ──
     // When hil_intents=true and a previous call was Suspended, the accumulator
@@ -701,8 +744,9 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
 
             // Dispatch each intent and collect tool results.
             //
-            // hil_intents=true: Suspended propagates → session rolled back →
-            //   ChannelRunner triggers HIL → user approves → on_request replays.
+            // hil_intents=true: Suspended propagates → session preserved with
+            //   synthetic tool_results → ChannelRunner triggers HIL → user
+            //   approves → on_request replays with full conversation context.
             //
             // hil_intents=false: Suspended caught → error tool_results synthesized
             //   so the session stays consistent (every tool_use has a matching
@@ -715,10 +759,30 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 Ok(content) => content,
                 Err(e) => {
                     if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
-                        // HIL mode: save consumed turns so the next re-dispatch
-                        // continues from where we left off, then roll back session.
+                        // HIL resume mode: keep session history intact so the
+                        // re-dispatched call can continue with full context.
+                        // Add synthetic tool_results so every tool_use has a
+                        // matching result (API requirement).
                         set_hil_turn_accumulator(lua, global_turn + 1);
-                        truncate_session(lua, &session_id, session_checkpoint);
+                        let resume_blocks: Vec<ContentBlock> = parsed_resp
+                            .intents
+                            .iter()
+                            .map(|intent| ContentBlock::ToolResult {
+                                tool_use_id: intent.id.clone(),
+                                content: "Operation suspended pending user approval. \
+                                          Once approved, please retry this operation."
+                                    .to_string(),
+                                is_error: Some(false),
+                            })
+                            .collect();
+                        let resume_content = MessageContent::Blocks(resume_blocks);
+                        append_message(
+                            lua,
+                            &session_id,
+                            orcs_types::intent::Role::User,
+                            resume_content,
+                        );
+                        set_hil_session_id(lua, session_id.clone());
                         return Err(e);
                     }
                     // Non-HIL: synthesize error tool_results for session consistency.
@@ -842,7 +906,25 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                     Err(e) => {
                         if llm_opts.hil_intents && crate::extract_suspended_info(&e).is_some() {
                             set_hil_turn_accumulator(lua, global_turn + 1);
-                            truncate_session(lua, &session_id, session_checkpoint);
+                            let resume_blocks: Vec<ContentBlock> = parsed_resp
+                                .intents
+                                .iter()
+                                .map(|intent| ContentBlock::ToolResult {
+                                    tool_use_id: intent.id.clone(),
+                                    content: "Operation suspended pending user approval. \
+                                              Once approved, please retry this operation."
+                                        .to_string(),
+                                    is_error: Some(false),
+                                })
+                                .collect();
+                            let resume_content = MessageContent::Blocks(resume_blocks);
+                            append_message(
+                                lua,
+                                &session_id,
+                                orcs_types::intent::Role::User,
+                                resume_content,
+                            );
+                            set_hil_session_id(lua, session_id.clone());
                             return Err(e);
                         }
                         let error_blocks: Vec<ContentBlock> = parsed_resp
