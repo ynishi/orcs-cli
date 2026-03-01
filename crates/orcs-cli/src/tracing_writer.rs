@@ -1,65 +1,59 @@
-//! Custom tracing writer that routes log output through rustyline's ExternalPrinter
-//! AND simultaneously writes to a persistent log file.
+//! Tracing writers for independent terminal and file log layers.
 //!
-//! **Terminal output**: When the shared printer slot contains a printer
-//! (interactive mode), log lines are sent through it via non-blocking
-//! `try_print()`. When the slot is empty (startup, shutdown, non-interactive),
-//! output falls back to stdout. When the intermediary channel is full,
-//! messages are silently dropped from terminal (the log file retains all).
+//! Two separate [`MakeWriter`](tracing_subscriber::fmt::MakeWriter) implementations
+//! allow independent `EnvFilter` per output target:
 //!
-//! **File output**: Every log line is appended to the log file regardless of
-//! printer state. This ensures no information is lost.
+//! - [`TerminalMakeWriter`]: routes through [`SharedPrinterSlot`] (interactive) or
+//!   falls back to stdout. Non-blocking — drops messages when channel is full.
+//! - [`FileMakeWriter`]: appends to the persistent log file. File layer should be
+//!   configured with `.with_ansi(false)` so no ANSI stripping is needed.
 
 use orcs_app::{PrintResult, SharedPrinterSlot};
 use parking_lot::Mutex;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-/// A [`MakeWriter`](tracing_subscriber::fmt::MakeWriter) that dispatches
-/// each log event to both:
-/// 1. Non-blocking ExternalPrinter (or stdout fallback) — terminal display
-/// 2. Log file — persistent record
+// ---------------------------------------------------------------------------
+// Terminal layer writer
+// ---------------------------------------------------------------------------
+
+/// [`MakeWriter`](tracing_subscriber::fmt::MakeWriter) for the terminal layer.
+///
+/// Routes log output through rustyline's `ExternalPrinter` (interactive mode)
+/// or falls back to stdout. When the intermediary channel is full, messages
+/// are silently dropped from terminal display (the file layer retains them).
 #[derive(Clone)]
-pub struct TracingMakeWriter {
+pub struct TerminalMakeWriter {
     slot: SharedPrinterSlot,
-    log_file: Option<Arc<Mutex<std::fs::File>>>,
 }
 
-impl TracingMakeWriter {
-    /// Creates a new writer from a [`SharedPrinterSlot`] and an optional log file.
-    pub fn new(slot: &SharedPrinterSlot, log_file: Option<Arc<Mutex<std::fs::File>>>) -> Self {
-        Self {
-            slot: slot.clone(),
-            log_file,
-        }
+impl TerminalMakeWriter {
+    pub fn new(slot: &SharedPrinterSlot) -> Self {
+        Self { slot: slot.clone() }
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TracingMakeWriter {
-    type Writer = TracingWriter;
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TerminalMakeWriter {
+    type Writer = TerminalWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        TracingWriter {
+        TerminalWriter {
             slot: self.slot.clone(),
-            log_file: self.log_file.as_ref().map(Arc::clone),
             buf: Vec::with_capacity(256),
         }
     }
 }
 
-/// Per-event writer returned by [`TracingMakeWriter`].
+/// Per-event writer for terminal output.
 ///
-/// Buffers bytes written by the tracing formatter. On [`Drop`], the
-/// accumulated buffer is:
-/// 1. Sent through non-blocking printer (if available) or written to stdout
-/// 2. Appended to the log file (if configured)
-pub struct TracingWriter {
+/// Buffers bytes from the tracing formatter. On [`Drop`], sends
+/// the buffer through the non-blocking printer slot.
+pub struct TerminalWriter {
     slot: SharedPrinterSlot,
-    log_file: Option<Arc<Mutex<std::fs::File>>>,
     buf: Vec<u8>,
 }
 
-impl Write for TracingWriter {
+impl Write for TerminalWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(data);
         Ok(data.len())
@@ -70,56 +64,86 @@ impl Write for TracingWriter {
     }
 }
 
-impl Drop for TracingWriter {
+impl Drop for TerminalWriter {
     fn drop(&mut self) {
         if self.buf.is_empty() {
             return;
         }
 
-        // 1. Terminal output: non-blocking via SharedPrinterSlot
-        {
-            let msg = String::from_utf8_lossy(&self.buf).into_owned();
-            match self.slot.try_print(msg) {
-                PrintResult::Sent => {}
-                PrintResult::NoPrinter => {
-                    let _ = io::stdout().write_all(&self.buf);
-                    let _ = io::stdout().flush();
-                }
-                PrintResult::Dropped => {
-                    // Channel full — silently dropped from terminal.
-                    // Log file below still captures it.
-                }
+        let msg = String::from_utf8_lossy(&self.buf).into_owned();
+        match self.slot.try_print(msg) {
+            PrintResult::Sent => {}
+            PrintResult::NoPrinter => {
+                let _ = io::stdout().write_all(&self.buf);
+                let _ = io::stdout().flush();
             }
-        }
-
-        // 2. File output: always append, strip ANSI escape codes for clean log
-        if let Some(ref file_mutex) = self.log_file {
-            let clean = strip_ansi(&self.buf);
-            let mut file = file_mutex.lock();
-            let _ = file.write_all(&clean);
-            let _ = file.flush();
+            PrintResult::Dropped => {
+                // Channel full — silently dropped from terminal.
+                // The file layer retains all messages independently.
+            }
         }
     }
 }
 
-/// Strips ANSI escape sequences (CSI sequences: ESC `[` ... `<final byte>`).
-fn strip_ansi(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'[' {
-            // Skip ESC [ ... until final byte (0x40-0x7E)
-            i += 2;
-            while i < input.len() && !(0x40..=0x7E).contains(&input[i]) {
-                i += 1;
-            }
-            if i < input.len() {
-                i += 1; // skip final byte
-            }
-        } else {
-            out.push(input[i]);
-            i += 1;
+// ---------------------------------------------------------------------------
+// File layer writer
+// ---------------------------------------------------------------------------
+
+/// [`MakeWriter`](tracing_subscriber::fmt::MakeWriter) for the file layer.
+///
+/// Appends every log line to the persistent log file. The file layer
+/// should be constructed with `.with_ansi(false)` so the formatter
+/// never emits ANSI escape codes.
+#[derive(Clone)]
+pub struct FileMakeWriter {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+impl FileMakeWriter {
+    pub fn new(file: Arc<Mutex<std::fs::File>>) -> Self {
+        Self { file }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileMakeWriter {
+    type Writer = FileWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        FileWriter {
+            file: Arc::clone(&self.file),
+            buf: Vec::with_capacity(256),
         }
     }
-    out
+}
+
+/// Per-event writer for file output.
+///
+/// Buffers bytes from the tracing formatter. On [`Drop`], appends
+/// the buffer to the log file under a lock.
+pub struct FileWriter {
+    file: Arc<Mutex<std::fs::File>>,
+    buf: Vec<u8>,
+}
+
+impl Write for FileWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+
+        let mut file = self.file.lock();
+        let _ = file.write_all(&self.buf);
+        let _ = file.flush();
+    }
 }

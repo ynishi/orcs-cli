@@ -57,6 +57,9 @@ pub struct OrcsConfig {
 
     /// Timeout configuration.
     pub timeouts: TimeoutsConfig,
+
+    /// Logging configuration.
+    pub logging: LoggingConfig,
 }
 
 impl OrcsConfig {
@@ -153,6 +156,7 @@ impl OrcsConfig {
         self.hooks.merge(&other.hooks);
         self.mcp.merge(&other.mcp);
         self.timeouts.merge(&other.timeouts);
+        self.logging.merge(&other.logging);
     }
 }
 
@@ -371,6 +375,99 @@ impl TimeoutsConfig {
         }
         if other.concierge_ms != default.concierge_ms {
             self.concierge_ms = other.concierge_ms;
+        }
+    }
+}
+
+/// Logging configuration.
+///
+/// Controls file logging independently from terminal output.
+/// Terminal log level is controlled by `--debug`/`--verbose`/`RUST_LOG`.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [logging]
+/// file = true
+/// file_path = "~/.orcs/logs"
+/// file_level = "debug"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LoggingConfig {
+    /// Enable file logging.
+    ///
+    /// When `true`, all log messages at `file_level` or above
+    /// are written to a persistent log file (ANSI codes stripped).
+    pub file: bool,
+
+    /// Log file directory path.
+    ///
+    /// Supports `~` expansion. Defaults to `~/.orcs/logs`.
+    /// The actual file is `<file_path>/orcs.log`.
+    pub file_path: Option<PathBuf>,
+
+    /// Log level for the file output.
+    ///
+    /// Independent of the terminal log level. Accepts standard
+    /// tracing filter directives (e.g. `"debug"`, `"info"`,
+    /// `"debug,hyper=warn"`).
+    ///
+    /// Defaults to `"debug"` with noisy external crates suppressed.
+    pub file_level: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            file: true,
+            file_path: None,
+            file_level: "debug".into(),
+        }
+    }
+}
+
+impl LoggingConfig {
+    /// Returns the resolved log directory with tilde expansion.
+    ///
+    /// Falls back to `~/.orcs/logs` when `file_path` is `None`.
+    #[must_use]
+    pub fn resolved_file_path(&self) -> PathBuf {
+        self.file_path
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".orcs")
+                    .join("logs")
+            })
+    }
+
+    /// Returns the file-level filter directive with noisy crates suppressed.
+    ///
+    /// Appends `hyper=warn,h2=warn,...` to prevent external library
+    /// debug output from flooding the log file.
+    #[must_use]
+    pub fn file_filter_directive(&self) -> String {
+        let base = &self.file_level;
+        // Suppress noisy external crates regardless of user-specified level
+        format!(
+            "{base},hyper=warn,h2=warn,reqwest=warn,rustls=warn,tokio=warn,tungstenite=warn,rustyline=warn"
+        )
+    }
+
+    fn merge(&mut self, other: &Self) {
+        let default = Self::default();
+
+        if other.file != default.file {
+            self.file = other.file;
+        }
+        if other.file_path.is_some() {
+            self.file_path = other.file_path.clone();
+        }
+        if other.file_level != default.file_level {
+            self.file_level = other.file_level.clone();
         }
     }
 }
@@ -1220,5 +1317,146 @@ max_history = 20
             restored.paths.history_file,
             Some(PathBuf::from("/custom/history"))
         );
+    }
+
+    // === LoggingConfig tests ===
+
+    #[test]
+    fn logging_config_default() {
+        let config = LoggingConfig::default();
+        assert!(config.file);
+        assert!(config.file_path.is_none());
+        assert_eq!(config.file_level, "debug");
+    }
+
+    #[test]
+    fn logging_config_resolved_file_path_default() {
+        let config = LoggingConfig::default();
+        let path = config.resolved_file_path();
+        assert!(
+            path.ends_with(".orcs/logs"),
+            "default should end with .orcs/logs, got: {:?}",
+            path
+        );
+    }
+
+    #[test]
+    fn logging_config_resolved_file_path_custom() {
+        let config = LoggingConfig {
+            file_path: Some(PathBuf::from("/custom/logs")),
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_file_path(), PathBuf::from("/custom/logs"));
+    }
+
+    #[test]
+    fn logging_config_file_filter_directive() {
+        let config = LoggingConfig::default();
+        let directive = config.file_filter_directive();
+        assert!(
+            directive.starts_with("debug,"),
+            "should start with level: {}",
+            directive
+        );
+        assert!(
+            directive.contains("hyper=warn"),
+            "should suppress hyper: {}",
+            directive
+        );
+    }
+
+    #[test]
+    fn logging_config_file_filter_directive_custom_level() {
+        let config = LoggingConfig {
+            file_level: "info".into(),
+            ..Default::default()
+        };
+        let directive = config.file_filter_directive();
+        assert!(
+            directive.starts_with("info,"),
+            "should start with custom level: {}",
+            directive
+        );
+    }
+
+    #[test]
+    fn logging_config_merge_overrides() {
+        let mut base = LoggingConfig::default();
+        let overlay = LoggingConfig {
+            file: false,
+            file_path: Some(PathBuf::from("/overlay/logs")),
+            file_level: "info".into(),
+        };
+        base.merge(&overlay);
+        assert!(!base.file);
+        assert_eq!(base.file_path, Some(PathBuf::from("/overlay/logs")));
+        assert_eq!(base.file_level, "info");
+    }
+
+    #[test]
+    fn logging_config_merge_preserves_base_when_overlay_default() {
+        let mut base = LoggingConfig {
+            file: true,
+            file_path: Some(PathBuf::from("/base/logs")),
+            file_level: "trace".into(),
+        };
+        let overlay = LoggingConfig::default();
+        base.merge(&overlay);
+        // file_path preserved (overlay is None = default)
+        assert_eq!(base.file_path, Some(PathBuf::from("/base/logs")));
+        // file_level preserved (overlay is "debug" = default, so NOT overridden)
+        assert_eq!(base.file_level, "trace");
+    }
+
+    #[test]
+    fn logging_config_toml_parse() {
+        let toml = r#"
+[logging]
+file = false
+file_path = "/custom/logs"
+file_level = "trace"
+"#;
+        let config = OrcsConfig::from_toml(toml).expect("should parse logging config from TOML");
+        assert!(!config.logging.file);
+        assert_eq!(
+            config.logging.file_path,
+            Some(PathBuf::from("/custom/logs"))
+        );
+        assert_eq!(config.logging.file_level, "trace");
+    }
+
+    #[test]
+    fn logging_config_toml_roundtrip() {
+        let mut config = OrcsConfig::default();
+        config.logging.file = false;
+        config.logging.file_path = Some(PathBuf::from("/custom/logs"));
+        config.logging.file_level = "info".into();
+        let toml = config
+            .to_toml()
+            .expect("should serialize logging config to TOML");
+        let restored =
+            OrcsConfig::from_toml(&toml).expect("should deserialize logging config from TOML");
+        assert_eq!(config.logging, restored.logging);
+    }
+
+    #[test]
+    fn logging_config_in_orcs_config_default() {
+        let config = OrcsConfig::default();
+        assert!(config.logging.file);
+        assert_eq!(config.logging.file_level, "debug");
+    }
+
+    #[test]
+    fn logging_config_orcs_merge() {
+        let mut base = OrcsConfig::default();
+        let overlay = OrcsConfig {
+            logging: LoggingConfig {
+                file: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert!(!base.logging.file);
     }
 }
