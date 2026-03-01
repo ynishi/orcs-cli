@@ -57,7 +57,10 @@ impl NonBlockingPrinter {
     fn new(mut printer: Box<dyn ExternalPrinter + Send>) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<String>(Self::CHANNEL_CAPACITY);
 
-        std::thread::Builder::new()
+        // If thread spawn fails, the printer will not drain — but this is
+        // non-critical: logs still go to the log file, only terminal display
+        // is lost.  Logging the error to stderr is the safest fallback.
+        if let Err(e) = std::thread::Builder::new()
             .name("orcs-printer-drain".into())
             .spawn(move || {
                 while let Ok(msg) = rx.recv() {
@@ -67,7 +70,9 @@ impl NonBlockingPrinter {
                     let _ = printer.print(msg);
                 }
             })
-            .expect("failed to spawn printer drain thread");
+        {
+            eprintln!("warning: failed to spawn printer drain thread: {e}");
+        }
 
         Self { tx }
     }

@@ -651,11 +651,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             body_str.len(),
             tool_count
         );
-        tracing::debug!(
-            turn = global_turn,
-            "llm request body:\n{}",
-            body_str
-        );
+        tracing::debug!(turn = global_turn, "llm request body:\n{}", body_str);
 
         // Send with retry
         let resp = match send_with_retry(&client, &url, &llm_opts, &body_str) {
