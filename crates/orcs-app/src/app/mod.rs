@@ -399,8 +399,9 @@ impl OrcsApp {
     /// to avoid corrupting rustyline's terminal state (raw mode, prompt redraw).
     fn render_safe(&self, output: &IOOutput) {
         if let Some(formatted) = Self::format_io_output(output, self.renderer.is_verbose()) {
-            if self.printer_slot.print(formatted) {
-                return;
+            match self.printer_slot.try_print(formatted) {
+                crate::PrintResult::Sent | crate::PrintResult::Dropped => return,
+                crate::PrintResult::NoPrinter => {}
             }
         }
         // Fallback: direct console output (no printer installed)
