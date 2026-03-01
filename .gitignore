@@ -4,3 +4,9 @@ target/
 /workspace
 .orcs
 .env
+
+# Tools / artifacts
+.codedash.lua
+.ryo
+.DS_Store
+tmp/
