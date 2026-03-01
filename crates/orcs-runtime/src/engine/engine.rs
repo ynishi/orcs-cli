@@ -68,6 +68,8 @@ const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 struct RunnerExitNotice {
     channel_id: ChannelId,
     component_fqn: String,
+    /// Why the runner exited. Forwarded from [`RunnerResult::exit_reason`].
+    exit_reason: crate::channel::ExitReason,
 }
 
 /// OrcsEngine - Main runtime for ORCS CLI.
@@ -282,6 +284,7 @@ impl OrcsEngine {
             let _ = exit_tx.send(RunnerExitNotice {
                 channel_id,
                 component_fqn: fqn,
+                exit_reason: result.exit_reason,
             });
             result
         });
@@ -709,12 +712,15 @@ impl OrcsEngine {
         };
 
         let shared_handles = self.eventbus.shared_handles();
+        let shared_ccm = self.eventbus.shared_component_channel_map();
         let task = tokio::spawn(async move {
             while let Some(notice) = exit_rx.recv().await {
+                let reason_str = notice.exit_reason.as_str();
                 warn!(
                     channel = %notice.channel_id,
                     component = %notice.component_fqn,
-                    "Runner exited unexpectedly during normal operation"
+                    exit_reason = reason_str,
+                    "Runner exited"
                 );
 
                 // Broadcast Lifecycle event so Lua components can react.
@@ -725,20 +731,41 @@ impl OrcsEngine {
                     payload: serde_json::json!({
                         "channel_id": notice.channel_id.to_string(),
                         "component_fqn": notice.component_fqn,
+                        "exit_reason": reason_str,
                     }),
                 };
-                let handles = shared_handles.read();
-                let mut delivered = 0usize;
-                for handle in handles.values() {
-                    if handle.try_inject(event.clone()).is_ok() {
-                        delivered += 1;
+                {
+                    let handles = shared_handles.read();
+                    let mut delivered = 0usize;
+                    for handle in handles.values() {
+                        if handle.try_inject(event.clone()).is_ok() {
+                            delivered += 1;
+                        }
                     }
+                    info!(
+                        channel = %notice.channel_id,
+                        component = %notice.component_fqn,
+                        exit_reason = reason_str,
+                        delivered,
+                        "Lifecycle::runner_exited event broadcast"
+                    );
+                }
+
+                // Clean up dead handle and component mapping.
+                // The Lifecycle event is already injected into surviving channels'
+                // event queues, so removing the dead handle is safe.
+                {
+                    let mut handles = shared_handles.write();
+                    handles.remove(&notice.channel_id);
+                }
+                {
+                    let mut ccm = shared_ccm.write();
+                    ccm.retain(|_, cid| *cid != notice.channel_id);
                 }
                 debug!(
                     channel = %notice.channel_id,
                     component = %notice.component_fqn,
-                    delivered,
-                    "Lifecycle::runner_exited event broadcast"
+                    "Dead channel handle removed"
                 );
             }
             debug!("Runner monitor stopped (all exit senders dropped)");

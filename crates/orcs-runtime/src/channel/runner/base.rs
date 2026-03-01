@@ -188,6 +188,50 @@ impl OutputReceiver {
 
 /// Result of a ChannelRunner's execution.
 ///
+/// Why a [`ChannelRunner`] exited its event loop.
+///
+/// Carried in [`RunnerResult`] and forwarded to the engine monitor
+/// via [`RunnerExitNotice`](super::super::engine::RunnerExitNotice)
+/// so that Lua components can react to unexpected terminations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// Signal-initiated stop (Veto, Cancel, etc.).
+    Signal,
+    /// Event channel closed — no more events will arrive.
+    EventChannelClosed,
+    /// Signal channel closed — engine is shutting down.
+    SignalChannelClosed,
+    /// Channel became inactive in World (parent stopped, etc.).
+    ChannelInactive,
+    /// Component's `handle_event` returned `false` (self-stop).
+    ComponentStopped,
+    /// IO bridge closed — user terminal disconnected (ClientRunner only).
+    IoChannelClosed,
+    /// User issued a quit command via IO (ClientRunner only).
+    UserQuit,
+}
+
+impl ExitReason {
+    /// Short machine-readable tag for JSON serialization.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Signal => "signal",
+            Self::EventChannelClosed => "event_channel_closed",
+            Self::SignalChannelClosed => "signal_channel_closed",
+            Self::ChannelInactive => "channel_inactive",
+            Self::ComponentStopped => "component_stopped",
+            Self::IoChannelClosed => "io_channel_closed",
+            Self::UserQuit => "user_quit",
+        }
+    }
+}
+
+impl std::fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Returned by [`ChannelRunner::run()`] after the event loop exits and
 /// the shutdown sequence completes. Contains the channel ID, component
 /// FQN, and an optional snapshot captured during graceful shutdown.
@@ -202,6 +246,8 @@ pub struct RunnerResult {
     pub component_fqn: Cow<'static, str>,
     /// Snapshot captured during shutdown (None if component doesn't support snapshots).
     pub snapshot: Option<ComponentSnapshot>,
+    /// Why the runner exited its event loop.
+    pub exit_reason: ExitReason,
 }
 
 /// An RPC request paired with its reply channel.
@@ -637,6 +683,10 @@ impl ChannelRunner {
             );
         }
 
+        // Default fallback: overwritten by each break-point in the loop.
+        // The initial value is a safety net for edge cases (e.g. immediate break).
+        #[allow(unused_assignments)]
+        let mut exit_reason = ExitReason::Signal;
         loop {
             tokio::select! {
                 // Priority: signals > requests > events
@@ -646,11 +696,13 @@ impl ChannelRunner {
                     match signal {
                         Ok(sig) => {
                             if !self.handle_signal(sig).await {
+                                exit_reason = ExitReason::Signal;
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!("signal channel closed");
+                            exit_reason = ExitReason::SignalChannelClosed;
                             break;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -670,11 +722,13 @@ impl ChannelRunner {
                     match event {
                         Some(evt) => {
                             if !self.handle_event(evt).await {
+                                exit_reason = ExitReason::ComponentStopped;
                                 break;
                             }
                         }
                         None => {
                             info!("event channel closed");
+                            exit_reason = ExitReason::EventChannelClosed;
                             break;
                         }
                     }
@@ -684,6 +738,7 @@ impl ChannelRunner {
             // Check if channel is still running
             if !is_channel_active(&self.world, self.id).await {
                 debug!("channel no longer active");
+                exit_reason = ExitReason::ChannelInactive;
                 break;
             }
         }
@@ -723,12 +778,13 @@ impl ChannelRunner {
             (fqn, snapshot)
         };
 
-        info!("ChannelRunner stopped");
+        info!(exit_reason = %exit_reason, "ChannelRunner stopped");
 
         RunnerResult {
             channel_id: self.id,
             component_fqn: Cow::Owned(component_fqn),
             snapshot,
+            exit_reason,
         }
     }
 
@@ -2734,5 +2790,56 @@ mod tests {
             !handle.is_alive(),
             "handle should not be alive after receiver is dropped"
         );
+    }
+
+    // --- ExitReason tests ---
+
+    #[test]
+    fn exit_reason_as_str_covers_all_variants() {
+        let cases = [
+            (ExitReason::Signal, "signal"),
+            (ExitReason::EventChannelClosed, "event_channel_closed"),
+            (ExitReason::SignalChannelClosed, "signal_channel_closed"),
+            (ExitReason::ChannelInactive, "channel_inactive"),
+            (ExitReason::ComponentStopped, "component_stopped"),
+            (ExitReason::IoChannelClosed, "io_channel_closed"),
+            (ExitReason::UserQuit, "user_quit"),
+        ];
+        for (variant, expected) in &cases {
+            assert_eq!(
+                variant.as_str(),
+                *expected,
+                "ExitReason::{:?}.as_str() mismatch",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn exit_reason_display_matches_as_str() {
+        let variants = [
+            ExitReason::Signal,
+            ExitReason::EventChannelClosed,
+            ExitReason::SignalChannelClosed,
+            ExitReason::ChannelInactive,
+            ExitReason::ComponentStopped,
+            ExitReason::IoChannelClosed,
+            ExitReason::UserQuit,
+        ];
+        for variant in &variants {
+            assert_eq!(
+                variant.to_string(),
+                variant.as_str(),
+                "Display and as_str() should match for {:?}",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn exit_reason_clone_and_eq() {
+        let original = ExitReason::ComponentStopped;
+        let cloned = original.clone();
+        assert_eq!(original, cloned, "Clone should produce equal value");
     }
 }

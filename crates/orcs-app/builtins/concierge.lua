@@ -415,6 +415,12 @@ local function handle_process(input)
                 }
             else
                 local err = (llm_resp and llm_resp.error) or "llm resume failed"
+                local kind = (llm_resp and llm_resp.error_kind) or "unknown"
+                if kind == "overall_timeout" then
+                    orcs.log("error", "concierge: overall timeout exceeded during resume (session=" .. tostring(resume_sid) .. ")")
+                else
+                    orcs.log("warn", "concierge: LLM resume failed (" .. kind .. "): " .. tostring(err))
+                end
                 orcs.output_with_level("[concierge] Error: " .. tostring(err), "error")
                 return { success = false, error = err }
             end
@@ -509,6 +515,12 @@ local function handle_process(input)
             }
         else
             local err = (llm_resp and llm_resp.error) or "llm call failed"
+            local kind = (llm_resp and llm_resp.error_kind) or "unknown"
+            if kind == "overall_timeout" then
+                orcs.log("error", "concierge: overall timeout exceeded (" .. tostring(err) .. ")")
+            else
+                orcs.log("warn", "concierge: LLM call failed (" .. kind .. "): " .. tostring(err))
+            end
             orcs.output_with_level("[concierge] Error: " .. tostring(err), "error")
             return {
                 success = false,
@@ -560,6 +572,7 @@ return {
 
     on_signal = function(signal)
         if signal.kind == "Veto" then
+            orcs.log("warn", "concierge: aborted by Veto signal (busy=" .. tostring(busy) .. ")")
             return "Abort"
         end
         return "Handled"
