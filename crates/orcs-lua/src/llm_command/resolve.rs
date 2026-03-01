@@ -115,6 +115,8 @@ pub(super) fn parse_response_body(
         }
     };
 
+    tracing::debug!(status = status, "llm response body:\n{}", body_text);
+
     // Non-2xx status
     if !(200..300).contains(&status) {
         let result = lua.create_table()?;

@@ -404,7 +404,7 @@ pub(super) fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<
         return None;
     }
     let defs = registry.all();
-    tracing::debug!(
+    tracing::info!(
         "build_tools_for_provider: {} intents for {:?}",
         defs.len(),
         provider

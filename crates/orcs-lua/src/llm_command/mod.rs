@@ -541,7 +541,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     let session_id = resolve_session_id(lua, &llm_opts.session_id);
 
     // Build tools JSON from IntentRegistry (when opts.tools is true)
-    tracing::debug!(
+    tracing::info!(
         "llm tools_enabled={}, resolve={}, provider={:?}",
         llm_opts.tools,
         llm_opts.resolve,
@@ -591,7 +591,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
 
     // ── Tool loop ──
     // Each iteration: build body → send → parse → if tool_use && resolve → dispatch → append results → repeat
-    tracing::debug!(
+    tracing::info!(
         max_tool_turns = llm_opts.max_tool_turns,
         turn_offset = turn_offset,
         remaining_budget = remaining_budget,
@@ -651,6 +651,7 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
             body_str.len(),
             tool_count
         );
+        tracing::debug!(turn = global_turn, "llm request body:\n{}", body_str);
 
         // Send with retry
         let resp = match send_with_retry(&client, &url, &llm_opts, &body_str) {
