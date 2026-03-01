@@ -112,7 +112,19 @@ local function handle_process(payload)
 
             -- Dynamic budget escalation: if tool_loop_limit hit, resume same
             -- session with additional turns (+10, single extension only).
-            if resp and resp.error_kind == "tool_loop_limit" and resp.session_id then
+            -- overall_timeout: unrecoverable — task exceeded wall-clock deadline.
+            if resp and resp.error_kind == "overall_timeout" then
+                err = (resp.error) or "overall timeout exceeded"
+                orcs.log("error", string.format(
+                    "delegate-worker: task %s overall timeout exceeded (%s)",
+                    request_id, tostring(err)
+                ))
+                orcs.output_with_level(
+                    "[Delegate:" .. request_id .. "] Error: overall timeout exceeded.",
+                    "error"
+                )
+            -- tool_loop_limit: recoverable — extend budget once.
+            elseif resp and resp.error_kind == "tool_loop_limit" and resp.session_id then
                 local initial_turns = opts.max_tool_turns or 10
                 local extension = math.min(initial_turns, 10)
                 orcs.log("warn", string.format(
@@ -250,6 +262,7 @@ return {
 
     on_signal = function(signal)
         if signal.kind == "Veto" then
+            orcs.log("warn", "delegate-worker: aborted by Veto signal (busy=" .. tostring(busy) .. ")")
             return "Abort"
         end
         return "Handled"

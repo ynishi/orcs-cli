@@ -778,7 +778,7 @@ impl ChannelRunner {
             (fqn, snapshot)
         };
 
-        info!("ChannelRunner stopped");
+        info!(exit_reason = %exit_reason, "ChannelRunner stopped");
 
         RunnerResult {
             channel_id: self.id,

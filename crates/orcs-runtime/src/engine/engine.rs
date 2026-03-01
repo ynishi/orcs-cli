@@ -742,7 +742,7 @@ impl OrcsEngine {
                             delivered += 1;
                         }
                     }
-                    debug!(
+                    info!(
                         channel = %notice.channel_id,
                         component = %notice.component_fqn,
                         exit_reason = reason_str,
