@@ -1286,7 +1286,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orcs-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "mlua",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitflags",
  "orcs-types",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-component"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-event"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "orcs-types",
  "serde",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-hook"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "orcs-types",
  "serde",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-lint"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "glob",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-lua"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "glob",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "orcs-types",
  "rmcp",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "orcs-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "serde",

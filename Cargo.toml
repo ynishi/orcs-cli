@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80.0"
 license = "MIT OR Apache-2.0"
@@ -33,19 +33,19 @@ authors = ["Yutaka Nishimura"]
 
 [workspace.dependencies]
 # Plugin SDK Layer
-orcs-types = { path = "crates/orcs-types", version = "0.1.0" }
-orcs-event = { path = "crates/orcs-event", version = "0.1.0" }
-orcs-auth = { path = "crates/orcs-auth", version = "0.1.0" }
-orcs-component = { path = "crates/orcs-component", version = "0.1.0" }
+orcs-types = { path = "crates/orcs-types", version = "0.1.1" }
+orcs-event = { path = "crates/orcs-event", version = "0.1.1" }
+orcs-auth = { path = "crates/orcs-auth", version = "0.1.1" }
+orcs-component = { path = "crates/orcs-component", version = "0.1.1" }
 # Hook Layer
-orcs-hook = { path = "crates/orcs-hook", version = "0.1.0" }
+orcs-hook = { path = "crates/orcs-hook", version = "0.1.1" }
 # Runtime Layer
-orcs-runtime = { path = "crates/orcs-runtime", version = "0.1.0" }
+orcs-runtime = { path = "crates/orcs-runtime", version = "0.1.1" }
 # Plugin Layer
-orcs-mcp = { path = "crates/orcs-mcp", version = "0.1.0" }
-orcs-lua = { path = "crates/orcs-lua", version = "0.1.0" }
+orcs-mcp = { path = "crates/orcs-mcp", version = "0.1.1" }
+orcs-lua = { path = "crates/orcs-lua", version = "0.1.1" }
 # Application Layer
-orcs-app = { path = "crates/orcs-app", version = "0.1.0" }
+orcs-app = { path = "crates/orcs-app", version = "0.1.1" }
 
 # External dependencies
 bitflags = { version = "2", features = ["serde"] }
