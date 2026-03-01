@@ -119,10 +119,6 @@ local function handle_process(payload)
                     "delegate-worker: task %s overall timeout exceeded (%s)",
                     request_id, tostring(err)
                 ))
-                orcs.output_with_level(
-                    "[Delegate:" .. request_id .. "] Error: overall timeout exceeded.",
-                    "error"
-                )
             -- tool_loop_limit: recoverable — extend budget once.
             elseif resp and resp.error_kind == "tool_loop_limit" and resp.session_id then
                 local initial_turns = opts.max_tool_turns or 10
