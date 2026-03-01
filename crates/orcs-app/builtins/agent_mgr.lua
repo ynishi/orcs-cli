@@ -1099,15 +1099,20 @@ local function dispatch_llm(message)
     -- Liveness check: non-blocking channel probe via orcs.is_alive().
     -- Zero-cost (no RPC roundtrip) — checks if the runner's event channel is open.
     -- Guard: orcs.is_alive may not exist on older runtimes without supervision support.
+    --
+    -- NOTE: Do NOT clear concierge_fqn here. The runner_exited Lifecycle
+    -- handler relies on concierge_fqn matching the dead runner's FQN to
+    -- trigger automatic restart. If we nil it out here (before runner_exited
+    -- arrives), the restart handler cannot identify the concierge and
+    -- the concierge is never restarted (race condition).
     if orcs.is_alive and not orcs.is_alive(concierge_fqn) then
         orcs.log("error", "concierge '" .. concierge_fqn .. "' channel is closed (runner stopped)")
         orcs.output_with_level(
             "[AgentMgr] concierge '" .. concierge_fqn
-            .. "' is no longer running. LLM dispatch disabled.",
-            "error"
+            .. "' is no longer running. Waiting for automatic restart...",
+            "warn"
         )
-        concierge_fqn = nil
-        return { success = false, error = "concierge became unreachable" }
+        return { success = false, error = "concierge became unreachable (restart pending)" }
     end
 
     -- Gather history in parent context (board_recent unavailable to child workers)
@@ -1246,19 +1251,30 @@ return {
                 "AgentMgr: runner exited: %s (reason=%s)", fqn, reason
             ))
 
-            -- Concierge died → attempt restart, clear fqn if restart fails.
+            -- Concierge died → attempt restart only if it was a builtin.
+            -- External concierge (configured via concierge="custom::fqn") is
+            -- managed externally; replacing it with a builtin would be wrong.
             if fqn == concierge_fqn then
                 local old_fqn = concierge_fqn
                 concierge_fqn = nil
-                orcs.output_with_level(
-                    "[AgentMgr] Concierge exited (" .. reason .. "). Attempting restart...",
-                    "warn"
-                )
-                if attempt_restart_concierge(old_fqn) then
-                    orcs.output("[AgentMgr] Concierge restarted successfully.")
+
+                if old_fqn:match("^builtin::") then
+                    orcs.output_with_level(
+                        "[AgentMgr] Concierge exited (" .. reason .. "). Attempting restart...",
+                        "warn"
+                    )
+                    if attempt_restart_concierge(old_fqn) then
+                        orcs.output("[AgentMgr] Concierge restarted successfully.")
+                    else
+                        orcs.output_with_level(
+                            "[AgentMgr] Concierge restart failed. LLM processing unavailable.",
+                            "error"
+                        )
+                    end
                 else
                     orcs.output_with_level(
-                        "[AgentMgr] Concierge restart failed. LLM processing unavailable.",
+                        "[AgentMgr] External concierge '" .. old_fqn
+                        .. "' exited (" .. reason .. "). LLM processing unavailable.",
                         "error"
                     )
                 end
