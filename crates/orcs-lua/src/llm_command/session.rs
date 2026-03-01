@@ -140,6 +140,11 @@ pub(super) fn session_message_count(lua: &Lua, session_id: &str) -> usize {
 /// occurs during the resolve loop.  Removes all messages appended
 /// since the checkpoint so the conversation replays cleanly after
 /// ChannelRunner re-dispatches `on_request` following user approval.
+///
+/// Note: the default HIL path now uses session-resume (keeping history
+/// intact) rather than rollback.  This function is retained for tests
+/// and potential future use (e.g. explicit rollback opt-in).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn truncate_session(lua: &Lua, session_id: &str, len: usize) {
     if let Some(mut store) = lua.remove_app_data::<SessionStore>() {
         if let Some(history) = store.0.get_mut(session_id) {
