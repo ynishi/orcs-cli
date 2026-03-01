@@ -133,8 +133,8 @@ pub use components::{
 };
 pub use config::{
     default_config_dir, default_config_path, save_global_config, ComponentsConfig, ConfigError,
-    ConfigLoader, ConfigResolver, EnvOverrides, HilConfig, ModelConfig, NoOpResolver, OrcsConfig,
-    PathsConfig, ProfileDef, ProfileEntry, ProfileStore, UiConfig,
+    ConfigLoader, ConfigResolver, EnvOverrides, HilConfig, LoggingConfig, ModelConfig,
+    NoOpResolver, OrcsConfig, PathsConfig, ProfileDef, ProfileEntry, ProfileStore, UiConfig,
 };
 pub use engine::{ComponentHandle, EngineError, EventBus, OrcsEngine};
 pub use io::{

@@ -58,6 +58,10 @@ pub struct EnvOverrides {
     pub builtins_dir: Option<PathBuf>,
     /// `ORCS_PROFILE`
     pub profile: Option<String>,
+    /// `ORCS_LOG_FILE` - log file directory path
+    pub log_file: Option<PathBuf>,
+    /// `ORCS_LOG_LEVEL` - file log level
+    pub log_level: Option<String>,
 }
 
 impl EnvOverrides {
@@ -81,6 +85,8 @@ impl EnvOverrides {
             session_path: read_env_string("ORCS_SESSION_PATH").map(PathBuf::from),
             builtins_dir: read_env_string("ORCS_BUILTINS_DIR").map(PathBuf::from),
             profile: read_env_string("ORCS_PROFILE"),
+            log_file: read_env_string("ORCS_LOG_FILE").map(PathBuf::from),
+            log_level: read_env_string("ORCS_LOG_LEVEL"),
         })
     }
 }
@@ -358,6 +364,12 @@ impl ConfigLoader {
         if let Some(true) = ov.experimental {
             config.components.activate_experimental();
         }
+        if let Some(ref v) = ov.log_file {
+            config.logging.file_path = Some(v.clone());
+        }
+        if let Some(ref v) = ov.log_level {
+            config.logging.file_level.clone_from(v);
+        }
     }
 }
 
@@ -603,6 +615,8 @@ default = "profile-model"
             session_path: Some(PathBuf::from("/custom/sessions")),
             builtins_dir: None,
             profile: None,
+            log_file: Some(PathBuf::from("/custom/logs")),
+            log_level: Some("trace".into()),
         };
 
         let config = ConfigLoader::new()
@@ -622,6 +636,11 @@ default = "profile-model"
             config.paths.session_dir,
             Some(PathBuf::from("/custom/sessions"))
         );
+        assert_eq!(
+            config.logging.file_path,
+            Some(PathBuf::from("/custom/logs"))
+        );
+        assert_eq!(config.logging.file_level, "trace");
     }
 
     #[test]
@@ -735,6 +754,8 @@ default = "explicit-model"
         assert!(ov.model.is_none());
         assert!(ov.session_path.is_none());
         assert!(ov.profile.is_none());
+        assert!(ov.log_file.is_none());
+        assert!(ov.log_level.is_none());
     }
 
     #[test]
@@ -789,5 +810,44 @@ default = "explicit-model"
     fn env_overrides_default_experimental_is_none() {
         let ov = EnvOverrides::default();
         assert!(ov.experimental.is_none());
+    }
+
+    // === Logging env overrides ===
+
+    #[test]
+    fn env_overrides_log_file_applied() {
+        let overrides = EnvOverrides {
+            log_file: Some(PathBuf::from("/custom/logs")),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .load()
+            .expect("should apply log_file override");
+
+        assert_eq!(
+            config.logging.file_path,
+            Some(PathBuf::from("/custom/logs"))
+        );
+    }
+
+    #[test]
+    fn env_overrides_log_level_applied() {
+        let overrides = EnvOverrides {
+            log_level: Some("trace".into()),
+            ..Default::default()
+        };
+
+        let config = ConfigLoader::new()
+            .skip_global_config()
+            .skip_project_config()
+            .with_env_overrides(overrides)
+            .load()
+            .expect("should apply log_level override");
+
+        assert_eq!(config.logging.file_level, "trace");
     }
 }

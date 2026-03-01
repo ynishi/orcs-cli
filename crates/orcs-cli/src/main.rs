@@ -31,7 +31,7 @@ use orcs_app::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// ORCS CLI - Hackable Agentic Shell
 #[derive(Parser, Debug)]
@@ -85,6 +85,14 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     sandbox: Option<Option<PathBuf>>,
 
+    /// Override log file directory path (also: ORCS_LOG_FILE)
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
+    /// Override file log level (also: ORCS_LOG_LEVEL, default: debug)
+    #[arg(long, value_name = "LEVEL")]
+    log_level: Option<String>,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -102,6 +110,8 @@ struct CliConfigResolver {
     session_path: Option<PathBuf>,
     builtins_dir: Option<PathBuf>,
     profile: Option<String>,
+    log_file: Option<PathBuf>,
+    log_level: Option<String>,
     /// Sandbox root directory. When set, all `~/.orcs/` paths are redirected
     /// here and global config is skipped (clean-install simulation).
     pub(crate) sandbox_dir: Option<PathBuf>,
@@ -127,6 +137,8 @@ impl CliConfigResolver {
             session_path: args.session_path.clone(),
             builtins_dir: args.builtins_dir.clone(),
             profile: args.profile.clone(),
+            log_file: args.log_file.clone(),
+            log_level: args.log_level.clone(),
             sandbox_dir,
         }
     }
@@ -154,6 +166,7 @@ impl ConfigResolver for CliConfigResolver {
             config.components.builtins_dir = sandbox.join("builtins");
             config.components.paths = vec![sandbox.join("components")];
             config.scripts.dirs = vec![sandbox.join("scripts")];
+            config.logging.file_path = Some(sandbox.join("logs"));
         }
 
         // CLI args override (highest priority)
@@ -172,6 +185,12 @@ impl ConfigResolver for CliConfigResolver {
         if self.experimental {
             config.components.activate_experimental();
         }
+        if let Some(ref p) = self.log_file {
+            config.logging.file_path = Some(p.clone());
+        }
+        if let Some(ref level) = self.log_level {
+            config.logging.file_level.clone_from(level);
+        }
 
         Ok(config)
     }
@@ -183,21 +202,6 @@ async fn main() -> Result<()> {
 
     // Shared printer slot: links tracing output to rustyline's ExternalPrinter
     let printer_slot = SharedPrinterSlot::new();
-
-    // Setup logging: --debug > --verbose > RUST_LOG env > default "warn"
-    //
-    // --debug enables DEBUG for orcs crates only. External crates (hyper, h2,
-    // reqwest, tokio, rustls) stay at WARN to avoid flooding the terminal
-    // with HTTP frame/TLS debug output which causes the ExternalPrinter to hang.
-    let filter = if args.debug {
-        EnvFilter::new(
-            "debug,hyper=warn,h2=warn,reqwest=warn,rustls=warn,tokio=warn,tungstenite=warn,rustyline=warn",
-        )
-    } else if args.verbose {
-        EnvFilter::new("info")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
-    };
 
     // Create WorkDir for sandbox lifecycle management.
     // WorkDir is owned by main() — Temporary variant auto-cleans on process exit.
@@ -224,19 +228,57 @@ async fn main() -> Result<()> {
         println!("Sandbox: {}", wd.path().display());
     }
 
-    // Open persistent log file (sandbox overrides to <sandbox>/logs/)
-    let log_file = open_log_file(resolver.sandbox_dir.as_deref());
+    // Resolve config early to access logging settings for tracing initialization.
+    // The resolved config is also used later to build the app.
+    let resolved_config = resolver
+        .resolve()
+        .map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
 
-    // Single writer that tees to both:
-    //   1. ExternalPrinter (interactive) or stderr (fallback) — terminal display
-    //   2. Log file — persistent record (no information loss)
-    let writer = tracing_writer::TracingMakeWriter::new(&printer_slot, log_file);
+    // --- Tracing setup: independent terminal and file filters ---
+    //
+    // Terminal filter: --debug > --verbose > RUST_LOG env > default "warn"
+    // File filter:     config.logging.file_level (default "debug") — always independent
+    //
+    // External crates (hyper, h2, reqwest, tokio, rustls) are suppressed at WARN
+    // on both layers to avoid flooding output with HTTP/TLS debug noise.
+    let terminal_filter = if args.debug {
+        EnvFilter::new(
+            "debug,hyper=warn,h2=warn,reqwest=warn,rustls=warn,tokio=warn,tungstenite=warn,rustyline=warn",
+        )
+    } else if args.verbose {
+        EnvFilter::new("info")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
 
-    fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_writer(writer)
-        .init();
+    let terminal_writer = tracing_writer::TerminalMakeWriter::new(&printer_slot);
+    let terminal_layer = fmt::layer().with_target(false).with_writer(terminal_writer);
+
+    // File layer: independent filter, ANSI disabled (clean log)
+    let log_file = if resolved_config.logging.file {
+        open_log_file(&resolved_config.logging.resolved_file_path())
+    } else {
+        None
+    };
+
+    if let Some(file) = log_file {
+        let file_filter = EnvFilter::new(resolved_config.logging.file_filter_directive());
+        let file_writer = tracing_writer::FileMakeWriter::new(file);
+        let file_layer = fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(file_writer);
+
+        tracing_subscriber::registry()
+            .with(terminal_layer.with_filter(terminal_filter))
+            .with(file_layer.with_filter(file_filter))
+            .init();
+    } else {
+        // No file logging — terminal only
+        tracing_subscriber::registry()
+            .with(terminal_layer.with_filter(terminal_filter))
+            .init();
+    };
 
     println!("ORCS CLI v{}", env!("CARGO_PKG_VERSION"));
 
@@ -245,12 +287,17 @@ async fn main() -> Result<()> {
         "Project root"
     );
 
+    if resolved_config.logging.file {
+        info!(
+            path = %resolved_config.logging.resolved_file_path().join("orcs.log").display(),
+            level = %resolved_config.logging.file_level,
+            "File logging enabled"
+        );
+    }
+
     // Handle --install-builtins before full app startup
     if args.install_builtins {
-        let config = resolver
-            .resolve()
-            .map_err(|e| anyhow::anyhow!("Config error: {e}"))?;
-        let builtins_base = config.components.resolved_builtins_dir();
+        let builtins_base = resolved_config.components.resolved_builtins_dir();
         let target = orcs_app::builtins::versioned_dir(&builtins_base);
 
         if args.force {
@@ -314,23 +361,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Opens the persistent log file.
+/// Opens the persistent log file in the given directory.
 ///
-/// When `override_dir` is `Some`, logs are written to `<dir>/logs/orcs.log`.
-/// Otherwise defaults to `~/.orcs/logs/orcs.log`.
-///
+/// Creates `<log_dir>/orcs.log` in append mode.
 /// Returns `None` if the directory/file cannot be created (non-fatal).
-fn open_log_file(
-    override_dir: Option<&std::path::Path>,
-) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
-    let log_dir = override_dir.map(|d| d.join("logs")).unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".orcs")
-            .join("logs")
-    });
-
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+fn open_log_file(log_dir: &std::path::Path) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
+    if let Err(e) = std::fs::create_dir_all(log_dir) {
         eprintln!(
             "Warning: cannot create log directory {}: {e}",
             log_dir.display()
@@ -372,6 +408,8 @@ mod tests {
             session_path,
             builtins_dir: None,
             profile: None,
+            log_file: None,
+            log_level: None,
             sandbox_dir: None,
         };
         (wd, resolver)
@@ -455,6 +493,8 @@ mod tests {
             profile: None,
             experimental: false,
             sandbox: None,
+            log_file: None,
+            log_level: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -483,6 +523,8 @@ mod tests {
             profile: Some("rust-dev".into()),
             experimental: true,
             sandbox: None,
+            log_file: Some(PathBuf::from("/custom/logs")),
+            log_level: Some("trace".into()),
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -496,6 +538,8 @@ mod tests {
             resolver.builtins_dir,
             Some(PathBuf::from("/custom/builtins"))
         );
+        assert_eq!(resolver.log_file, Some(PathBuf::from("/custom/logs")));
+        assert_eq!(resolver.log_level, Some("trace".into()));
     }
 
     #[test]
@@ -550,6 +594,8 @@ mod tests {
             session_path: None,
             builtins_dir: None,
             profile: None,
+            log_file: None,
+            log_level: None,
             sandbox_dir: Some(sandbox_dir),
         };
         (wd, resolver)
@@ -601,6 +647,15 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_redirects_log_path() {
+        let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
+        let (_wd, resolver) = resolver_with_sandbox(sandbox.clone());
+        let config = resolver.resolve().expect("resolve should succeed");
+
+        assert_eq!(config.logging.file_path, Some(sandbox.join("logs")));
+    }
+
+    #[test]
     fn sandbox_cli_overrides_take_precedence() {
         let sandbox = PathBuf::from("/tmp/orcs-sandbox-test");
         let (_wd, mut resolver) = resolver_with_sandbox(sandbox);
@@ -630,6 +685,8 @@ mod tests {
             profile: None,
             experimental: false,
             sandbox: None,
+            log_file: None,
+            log_level: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -652,6 +709,8 @@ mod tests {
             profile: None,
             experimental: false,
             sandbox: Some(None), // --sandbox without DIR
+            log_file: None,
+            log_level: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -676,6 +735,8 @@ mod tests {
             profile: None,
             experimental: false,
             sandbox: Some(Some(explicit.clone())),
+            log_file: None,
+            log_level: None,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);

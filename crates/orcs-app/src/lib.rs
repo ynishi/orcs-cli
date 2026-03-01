@@ -89,7 +89,7 @@ pub use orcs_runtime::{
 // Re-export configuration types
 pub use orcs_runtime::{
     ComponentsConfig, ConfigError, ConfigLoader, ConfigResolver, EnvOverrides, HilConfig,
-    ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
+    LoggingConfig, ModelConfig, NoOpResolver, OrcsConfig, PathsConfig, UiConfig,
 };
 
 // Re-export sandbox types
