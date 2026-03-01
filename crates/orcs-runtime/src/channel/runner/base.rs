@@ -193,7 +193,7 @@ impl OutputReceiver {
 /// Carried in [`RunnerResult`] and forwarded to the engine monitor
 /// via [`RunnerExitNotice`](super::super::engine::RunnerExitNotice)
 /// so that Lua components can react to unexpected terminations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
     /// Signal-initiated stop (Veto, Cancel, etc.).
     Signal,

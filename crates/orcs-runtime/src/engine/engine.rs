@@ -284,7 +284,7 @@ impl OrcsEngine {
             let _ = exit_tx.send(RunnerExitNotice {
                 channel_id,
                 component_fqn: fqn,
-                exit_reason: result.exit_reason.clone(),
+                exit_reason: result.exit_reason,
             });
             result
         });

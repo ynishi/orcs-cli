@@ -1312,6 +1312,13 @@ return {
             return { success = true }
         end
 
+        -- Ignore unhandled Lifecycle operations (future-proofing).
+        -- Without this guard, unknown Lifecycle events would fall through
+        -- to the UserInput handler and return "empty message" error.
+        if request.category == "Lifecycle" then
+            return { success = true }
+        end
+
         -- Handle list_active: return agent summary for console_metrics.
         -- Returns locally cached info only (no cross-agent RPC).
         --
