@@ -60,6 +60,9 @@ pub struct OrcsConfig {
 
     /// Logging configuration.
     pub logging: LoggingConfig,
+
+    /// Sandbox configuration.
+    pub sandbox: SandboxConfig,
 }
 
 impl OrcsConfig {
@@ -157,6 +160,7 @@ impl OrcsConfig {
         self.mcp.merge(&other.mcp);
         self.timeouts.merge(&other.timeouts);
         self.logging.merge(&other.logging);
+        self.sandbox.merge(&other.sandbox);
     }
 }
 
@@ -468,6 +472,103 @@ impl LoggingConfig {
         }
         if other.file_level != default.file_level {
             self.file_level = other.file_level.clone();
+        }
+    }
+}
+
+/// Sandbox configuration.
+///
+/// Controls additional paths that the sandbox allows outside the project root.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [sandbox]
+/// allowed_read_paths = ["~/shared-docs", "/opt/data"]
+/// allowed_write_paths = ["/tmp/orcs-output"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Additional directories allowed for read access.
+    ///
+    /// Paths listed here bypass the sandbox boundary check for reads.
+    /// Supports `~` expansion and absolute paths.
+    /// Relative paths are resolved against the project root.
+    pub allowed_read_paths: Vec<PathBuf>,
+
+    /// Additional directories allowed for write access.
+    ///
+    /// Paths listed here bypass the sandbox boundary check for writes.
+    /// Supports `~` expansion and absolute paths.
+    /// Relative paths are resolved against the project root.
+    pub allowed_write_paths: Vec<PathBuf>,
+
+    /// Automatically allow access to the main Git repository root when
+    /// running inside a worktree.
+    ///
+    /// When `true` and the sandbox detects a git worktree, the main
+    /// repository root is added to `allowed_extra_paths` at startup.
+    /// This enables symlinks (e.g., `workspace/`) that resolve to
+    /// the parent repository to work without HIL approval.
+    ///
+    /// Default: `false` (requires explicit HIL approval or config).
+    pub auto_allow_git_root: bool,
+}
+
+impl SandboxConfig {
+    /// Resolves `allowed_read_paths` with tilde expansion.
+    ///
+    /// Non-absolute paths after expansion are resolved against `project_root`.
+    #[must_use]
+    pub fn resolved_read_paths(&self, project_root: Option<&std::path::Path>) -> Vec<PathBuf> {
+        self.allowed_read_paths
+            .iter()
+            .map(|p| {
+                let expanded = expand_tilde(p);
+                if expanded.is_absolute() {
+                    expanded
+                } else if let Some(root) = project_root {
+                    root.join(&expanded)
+                } else {
+                    expanded
+                }
+            })
+            .collect()
+    }
+
+    /// Resolves `allowed_write_paths` with tilde expansion.
+    ///
+    /// Non-absolute paths after expansion are resolved against `project_root`.
+    #[must_use]
+    pub fn resolved_write_paths(&self, project_root: Option<&std::path::Path>) -> Vec<PathBuf> {
+        self.allowed_write_paths
+            .iter()
+            .map(|p| {
+                let expanded = expand_tilde(p);
+                if expanded.is_absolute() {
+                    expanded
+                } else if let Some(root) = project_root {
+                    root.join(&expanded)
+                } else {
+                    expanded
+                }
+            })
+            .collect()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        if !other.allowed_read_paths.is_empty() {
+            self.allowed_read_paths
+                .extend(other.allowed_read_paths.iter().cloned());
+        }
+        if !other.allowed_write_paths.is_empty() {
+            self.allowed_write_paths
+                .extend(other.allowed_write_paths.iter().cloned());
+        }
+        let default = Self::default();
+        if other.auto_allow_git_root != default.auto_allow_git_root {
+            self.auto_allow_git_root = other.auto_allow_git_root;
         }
     }
 }
@@ -1458,5 +1559,169 @@ file_level = "trace"
         };
         base.merge(&overlay);
         assert!(!base.logging.file);
+    }
+
+    // === SandboxConfig tests ===
+
+    #[test]
+    fn sandbox_config_default_empty() {
+        let config = SandboxConfig::default();
+        assert!(config.allowed_read_paths.is_empty());
+        assert!(config.allowed_write_paths.is_empty());
+    }
+
+    #[test]
+    fn sandbox_config_toml_parse() {
+        let toml = r#"
+[sandbox]
+allowed_read_paths = ["~/shared-docs", "/opt/data"]
+allowed_write_paths = ["/tmp/orcs-output"]
+"#;
+        let config = OrcsConfig::from_toml(toml).expect("should parse sandbox config from TOML");
+        assert_eq!(config.sandbox.allowed_read_paths.len(), 2);
+        assert_eq!(config.sandbox.allowed_write_paths.len(), 1);
+        assert_eq!(
+            config.sandbox.allowed_write_paths[0],
+            PathBuf::from("/tmp/orcs-output")
+        );
+    }
+
+    #[test]
+    fn sandbox_config_toml_roundtrip() {
+        let mut config = OrcsConfig::default();
+        config.sandbox.allowed_read_paths = vec![PathBuf::from("/opt/data")];
+        config.sandbox.allowed_write_paths = vec![PathBuf::from("/tmp/out")];
+        let toml = config
+            .to_toml()
+            .expect("should serialize sandbox config to TOML");
+        let restored =
+            OrcsConfig::from_toml(&toml).expect("should deserialize sandbox config from TOML");
+        assert_eq!(config.sandbox, restored.sandbox);
+    }
+
+    #[test]
+    fn sandbox_config_merge_accumulates() {
+        let mut base = SandboxConfig {
+            allowed_read_paths: vec![PathBuf::from("/base/read")],
+            allowed_write_paths: vec![],
+            ..Default::default()
+        };
+        let overlay = SandboxConfig {
+            allowed_read_paths: vec![PathBuf::from("/overlay/read")],
+            allowed_write_paths: vec![PathBuf::from("/overlay/write")],
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert_eq!(base.allowed_read_paths.len(), 2);
+        assert!(base
+            .allowed_read_paths
+            .contains(&PathBuf::from("/base/read")));
+        assert!(base
+            .allowed_read_paths
+            .contains(&PathBuf::from("/overlay/read")));
+        assert_eq!(base.allowed_write_paths.len(), 1);
+    }
+
+    #[test]
+    fn sandbox_config_merge_preserves_base_when_overlay_empty() {
+        let mut base = SandboxConfig {
+            allowed_read_paths: vec![PathBuf::from("/keep")],
+            allowed_write_paths: vec![],
+            ..Default::default()
+        };
+        let overlay = SandboxConfig::default();
+        base.merge(&overlay);
+        assert_eq!(base.allowed_read_paths.len(), 1);
+        assert_eq!(base.allowed_read_paths[0], PathBuf::from("/keep"));
+    }
+
+    #[test]
+    fn sandbox_config_resolved_read_paths_expands_tilde() {
+        let config = SandboxConfig {
+            allowed_read_paths: vec![PathBuf::from("~/.orcs/shared")],
+            allowed_write_paths: vec![],
+            ..Default::default()
+        };
+        let resolved = config.resolved_read_paths(None);
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            !resolved[0].starts_with("~"),
+            "tilde should be expanded: {:?}",
+            resolved[0]
+        );
+    }
+
+    #[test]
+    fn sandbox_config_resolved_read_paths_resolves_relative() {
+        let config = SandboxConfig {
+            allowed_read_paths: vec![PathBuf::from("docs/shared")],
+            allowed_write_paths: vec![],
+            ..Default::default()
+        };
+        let root = PathBuf::from("/project");
+        let resolved = config.resolved_read_paths(Some(&root));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], PathBuf::from("/project/docs/shared"));
+    }
+
+    #[test]
+    fn sandbox_config_orcs_merge() {
+        let mut base = OrcsConfig::default();
+        let overlay = OrcsConfig {
+            sandbox: SandboxConfig {
+                allowed_read_paths: vec![PathBuf::from("/extra/read")],
+                allowed_write_paths: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert_eq!(base.sandbox.allowed_read_paths.len(), 1);
+        assert_eq!(
+            base.sandbox.allowed_read_paths[0],
+            PathBuf::from("/extra/read")
+        );
+    }
+
+    #[test]
+    fn sandbox_config_auto_allow_git_root_default_false() {
+        let config = SandboxConfig::default();
+        assert!(!config.auto_allow_git_root);
+    }
+
+    #[test]
+    fn sandbox_config_auto_allow_git_root_toml_parse() {
+        let toml = r#"
+[sandbox]
+auto_allow_git_root = true
+"#;
+        let config =
+            OrcsConfig::from_toml(toml).expect("should parse auto_allow_git_root from TOML");
+        assert!(config.sandbox.auto_allow_git_root);
+    }
+
+    #[test]
+    fn sandbox_config_auto_allow_git_root_merge() {
+        let mut base = SandboxConfig::default();
+        let overlay = SandboxConfig {
+            auto_allow_git_root: true,
+            ..Default::default()
+        };
+        base.merge(&overlay);
+        assert!(base.auto_allow_git_root);
+    }
+
+    #[test]
+    fn sandbox_config_auto_allow_git_root_merge_preserves_base() {
+        let mut base = SandboxConfig {
+            auto_allow_git_root: true,
+            ..Default::default()
+        };
+        let overlay = SandboxConfig::default();
+        base.merge(&overlay);
+        assert!(
+            base.auto_allow_git_root,
+            "base value should be preserved when overlay is default"
+        );
     }
 }

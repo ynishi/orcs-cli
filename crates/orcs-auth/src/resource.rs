@@ -90,6 +90,15 @@ pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
     fn allow_path(&self, _path: &Path) -> Result<(), SandboxError> {
         Ok(())
     }
+
+    /// Returns the main Git repository root if running inside a worktree.
+    ///
+    /// When the sandbox root is a git worktree (`.git` is a file containing
+    /// `gitdir: <path>`), this returns the canonicalized path to the main
+    /// repository root. Returns `None` for regular repos or non-git directories.
+    fn git_root(&self) -> Option<&Path> {
+        None
+    }
 }
 
 #[cfg(test)]
