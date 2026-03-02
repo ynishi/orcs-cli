@@ -65,27 +65,69 @@ use thiserror::Error;
 
 // ─── ToolError ──────────────────────────────────────────────────────
 
+/// Classifies tool errors for dispatcher-level handling.
+///
+/// `General` errors are converted to `{ok: false, error: "..."}` tables.
+/// `SandboxBoundary` errors may trigger HIL approval flow if the
+/// dispatcher is running in a HIL-enabled context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Generic error (I/O, argument, etc.).
+    General,
+    /// Path resolves outside sandbox boundary.
+    ///
+    /// The dispatcher can use these fields to build an `ApprovalRequest`
+    /// and trigger the Suspended flow.
+    SandboxBoundary {
+        /// The requested path (user-facing).
+        path: String,
+        /// The sandbox root that was violated.
+        root: String,
+    },
+}
+
 /// Error from tool execution.
 ///
-/// Kept intentionally simple. The dispatcher translates this
-/// into Lua error tables or `IntentResult.error`.
+/// Carries a human-readable message plus an optional [`ToolErrorKind`]
+/// for structured dispatcher handling. The `Display` impl shows only
+/// the message — kind is inspected programmatically.
 #[derive(Debug, Clone, Error)]
 #[error("{message}")]
 pub struct ToolError {
     message: String,
+    kind: ToolErrorKind,
 }
 
 impl ToolError {
-    /// Create a new tool error.
+    /// Create a new general tool error.
     pub fn new(msg: impl Into<String>) -> Self {
         Self {
             message: msg.into(),
+            kind: ToolErrorKind::General,
+        }
+    }
+
+    /// Create a sandbox boundary violation error.
+    pub fn sandbox_boundary(msg: impl Into<String>, path: String, root: String) -> Self {
+        Self {
+            message: msg.into(),
+            kind: ToolErrorKind::SandboxBoundary { path, root },
         }
     }
 
     /// Error message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Error kind for structured handling.
+    pub fn kind(&self) -> &ToolErrorKind {
+        &self.kind
+    }
+
+    /// Returns `true` if this is a sandbox boundary violation.
+    pub fn is_sandbox_boundary(&self) -> bool {
+        matches!(self.kind, ToolErrorKind::SandboxBoundary { .. })
     }
 }
 
@@ -103,7 +145,12 @@ impl From<std::io::Error> for ToolError {
 
 impl From<orcs_auth::SandboxError> for ToolError {
     fn from(e: orcs_auth::SandboxError) -> Self {
-        Self::new(e.to_string())
+        match &e {
+            orcs_auth::SandboxError::OutsideBoundary { path, root } => {
+                Self::sandbox_boundary(e.to_string(), path.clone(), root.clone())
+            }
+            _ => Self::new(e.to_string()),
+        }
     }
 }
 

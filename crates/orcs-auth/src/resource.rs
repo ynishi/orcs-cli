@@ -78,6 +78,18 @@ pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
     /// For paths that don't exist yet, walks up to the deepest
     /// existing ancestor and validates that.
     fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError>;
+
+    /// Dynamically allows an additional path outside the sandbox root.
+    ///
+    /// After calling this, `validate_read` / `validate_write` will accept
+    /// paths that resolve under `path`. The path is canonicalized at
+    /// insertion time.
+    ///
+    /// Default implementation is a no-op (returns `Ok(())`). Override in
+    /// implementations that support dynamic path grants (e.g., `ProjectSandbox`).
+    fn allow_path(&self, _path: &Path) -> Result<(), SandboxError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

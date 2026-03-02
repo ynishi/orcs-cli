@@ -378,6 +378,43 @@ pub(crate) fn dispatch_rust_tool(
                 }
             }
         }
+        Err(e) if e.is_sandbox_boundary() => {
+            // Sandbox boundary violation → trigger HIL approval flow.
+            // Extract path/root from the error kind to build the grant pattern.
+            let (path, _root) = match e.kind() {
+                orcs_component::tool::ToolErrorKind::SandboxBoundary { path, root } => {
+                    (path.clone(), root.clone())
+                }
+                _ => (String::new(), String::new()),
+            };
+
+            let op = if tool.is_read_only() { "read" } else { "write" };
+            let grant_pattern = format!("sandbox:{op}:{path}");
+            let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+            let description = format!(
+                "Access outside sandbox: {} ({})",
+                path,
+                if tool.is_read_only() { "read" } else { "write" }
+            );
+
+            tracing::info!(
+                approval_id = %approval_id,
+                grant_pattern = %grant_pattern,
+                tool = %tool.name(),
+                "sandbox boundary violation, suspending for HIL approval"
+            );
+
+            return Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                orcs_component::ComponentError::Suspended {
+                    approval_id,
+                    grant_pattern,
+                    pending_request: serde_json::json!({
+                        "command": format!("sandbox:{op}:{path}"),
+                        "description": description,
+                    }),
+                },
+            )));
+        }
         Err(e) => {
             result_table.set("ok", false)?;
             result_table.set("error", e.message().to_string())?;

@@ -160,6 +160,9 @@ impl OrcsAppBuilder {
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
 
+        // Inject sandbox for dynamic path grants after HIL approval
+        engine.set_sandbox(Arc::clone(&sandbox));
+
         // Initialize hook registry and load hooks from config
         if !config.hooks.hooks.is_empty() {
             let registry = orcs_runtime::shared_hook_registry();

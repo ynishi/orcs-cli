@@ -24,15 +24,45 @@
 
 use crate::error::LuaError;
 use mlua::{Function, Lua, LuaSerdeExt, Table};
-use orcs_runtime::sandbox::SandboxPolicy;
-use std::path::Path;
+use orcs_runtime::sandbox::{SandboxError, SandboxPolicy};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// ─── Sandbox Validation Helper ──────────────────────────────────────────
+
+/// Wraps a sandbox validation result, emitting a structured warning
+/// when the requested path resolves outside the sandbox boundary.
+///
+/// This makes boundary violations visible in logs instead of being
+/// silently converted to opaque error strings.
+fn sandbox_check(
+    result: Result<PathBuf, SandboxError>,
+    path: &str,
+    operation: &str,
+) -> Result<PathBuf, String> {
+    result.map_err(|e| {
+        if let SandboxError::OutsideBoundary {
+            path: ref denied_path,
+            root: ref boundary,
+        } = e
+        {
+            tracing::warn!(
+                requested_path = %path,
+                resolved_path = %denied_path,
+                sandbox_root = %boundary,
+                operation = %operation,
+                "[sandbox] boundary violation: '{path}' resolves outside sandbox root"
+            );
+        }
+        e.to_string()
+    })
+}
 
 // ─── Rust Tool Implementations ──────────────────────────────────────────
 
 /// Reads a file and returns its contents.
 pub(crate) fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), String> {
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "read")?;
 
     let metadata =
         std::fs::metadata(&canonical).map_err(|e| format!("cannot read metadata: {path} ({e})"))?;
@@ -58,7 +88,7 @@ pub(crate) fn tool_write(
     content: &str,
     sandbox: &dyn SandboxPolicy,
 ) -> Result<usize, String> {
-    let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    let target = sandbox_check(sandbox.validate_write(path), path, "write")?;
 
     // Ensure parent directory exists
     let parent = target
@@ -109,7 +139,7 @@ pub(crate) fn tool_grep(
 ) -> Result<Vec<GrepMatch>, String> {
     let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {pattern} ({e})"))?;
 
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "grep")?;
     let mut matches = Vec::new();
 
     let sandbox_root = sandbox.root();
@@ -229,7 +259,7 @@ pub(crate) fn tool_glob(
 
     let full_pattern = match dir {
         Some(d) => {
-            let base = sandbox.validate_read(d).map_err(|e| e.to_string())?;
+            let base = sandbox_check(sandbox.validate_read(d), d, "glob")?;
             if !base.is_dir() {
                 return Err(format!("not a directory: {d}"));
             }
@@ -262,7 +292,7 @@ pub(crate) fn tool_glob(
 ///
 /// The path is validated via `sandbox.validate_write()` before creation.
 pub(crate) fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
-    let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    let target = sandbox_check(sandbox.validate_write(path), path, "mkdir")?;
     std::fs::create_dir_all(&target).map_err(|e| format!("mkdir failed: {path} ({e})"))
 }
 
@@ -272,9 +302,9 @@ pub(crate) fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), 
 /// Validated via `validate_write()` (destructive) + `validate_read()` (symlink resolution).
 pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
     // Destructive operation: check write boundary
-    sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    sandbox_check(sandbox.validate_write(path), path, "remove")?;
     // Canonicalize + existence check via validate_read
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "remove")?;
 
     if canonical.is_file() {
         std::fs::remove_file(&canonical).map_err(|e| format!("remove failed: {path} ({e})"))
@@ -290,8 +320,8 @@ pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(),
 /// Both source and destination are validated through the sandbox.
 /// Creates destination parent directories if they don't exist.
 pub(crate) fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
-    let src_canonical = sandbox.validate_read(src).map_err(|e| e.to_string())?;
-    let dst_target = sandbox.validate_write(dst).map_err(|e| e.to_string())?;
+    let src_canonical = sandbox_check(sandbox.validate_read(src), src, "mv")?;
+    let dst_target = sandbox_check(sandbox.validate_write(dst), dst, "mv")?;
 
     // Ensure destination parent exists
     if let Some(parent) = dst_target.parent() {

@@ -153,6 +153,8 @@ pub struct OrcsEngine {
     runner_exit_rx: Option<mpsc::UnboundedReceiver<RunnerExitNotice>>,
     /// Background monitor task that detects unexpected runner terminations.
     monitor_task: Option<tokio::task::JoinHandle<()>>,
+    /// Sandbox policy for dynamic path grants (injected into all spawned runners).
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
 }
 
 impl OrcsEngine {
@@ -212,7 +214,17 @@ impl OrcsEngine {
             runner_exit_tx,
             runner_exit_rx: Some(runner_exit_rx),
             monitor_task: None,
+            sandbox: None,
         }
+    }
+
+    /// Sets the sandbox policy for all spawned runners.
+    ///
+    /// When set, each ChannelRunner can call `sandbox.allow_path()` after
+    /// a sandbox boundary approval, enabling re-dispatched requests to
+    /// access the approved path.
+    pub fn set_sandbox(&mut self, sandbox: Arc<dyn orcs_auth::SandboxPolicy>) {
+        self.sandbox = Some(sandbox);
     }
 
     /// Sets the shared MCP client manager for all spawned runners.
@@ -628,6 +640,11 @@ impl OrcsEngine {
         // Restore from initial snapshot if provided (session resume)
         if let Some(snapshot) = initial_snapshot {
             builder = builder.with_initial_snapshot(snapshot);
+        }
+
+        // Inject sandbox for dynamic path grants after HIL approval
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
         }
 
         let (runner, handle) = self

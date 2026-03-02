@@ -446,6 +446,8 @@ pub struct ChannelRunner {
     io_output_tx: Option<OutputSender>,
     /// Pending approval state: stored when Component returns Suspended.
     pending_approval: Option<PendingApproval>,
+    /// Sandbox policy for dynamic path grants after HIL approval.
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -936,6 +938,9 @@ impl ChannelRunner {
         );
 
         // 1. Grant the permission pattern.
+        //    For sandbox grants (prefix "sandbox:read:" / "sandbox:write:"), also
+        //    update the sandbox's allowed_extra_paths so that the re-dispatched
+        //    request passes validate_read/validate_write.
         if let Some(grants) = &self.grants {
             if let Err(e) =
                 grants.grant(orcs_auth::CommandGrant::persistent(&pending.grant_pattern))
@@ -948,6 +953,31 @@ impl ChannelRunner {
             }
         } else {
             warn!("no GrantPolicy configured, cannot grant pattern");
+        }
+
+        // Sandbox path grant: "sandbox:read:/path" or "sandbox:write:/path"
+        if let Some(path_str) = pending
+            .grant_pattern
+            .strip_prefix("sandbox:read:")
+            .or_else(|| pending.grant_pattern.strip_prefix("sandbox:write:"))
+        {
+            if let Some(sandbox) = &self.sandbox {
+                let path = std::path::Path::new(path_str);
+                if let Err(e) = sandbox.allow_path(path) {
+                    warn!(
+                        error = %e,
+                        path = %path_str,
+                        "failed to add sandbox allowed path after approval"
+                    );
+                } else {
+                    info!(
+                        path = %path_str,
+                        "sandbox path granted after approval"
+                    );
+                }
+            } else {
+                warn!("sandbox grant pattern but no sandbox configured on runner");
+            }
         }
 
         // 2. Notify user that the approval was accepted (before re-dispatch so
@@ -1421,6 +1451,8 @@ pub struct ChannelRunnerBuilder {
     mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
     /// Per-component configuration from config file.
     component_config: serde_json::Value,
+    /// Sandbox policy for dynamic path grants after HIL approval.
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -1455,6 +1487,7 @@ impl ChannelRunnerBuilder {
             hook_registry: None,
             mcp_manager: None,
             component_config: serde_json::Value::Object(serde_json::Map::new()),
+            sandbox: None,
         }
     }
 
@@ -1650,6 +1683,16 @@ impl ChannelRunnerBuilder {
     #[must_use]
     pub fn with_component_config(mut self, config: serde_json::Value) -> Self {
         self.component_config = config;
+        self
+    }
+
+    /// Sets the sandbox policy for dynamic path grants after HIL approval.
+    ///
+    /// When set, the runner can call `sandbox.allow_path()` after a sandbox
+    /// boundary approval, so that re-dispatched requests succeed.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn orcs_auth::SandboxPolicy>) -> Self {
+        self.sandbox = Some(sandbox);
         self
     }
 
@@ -1892,6 +1935,7 @@ impl ChannelRunnerBuilder {
             grants: self.grants.clone(),
             io_output_tx: io_output_tx.clone(),
             pending_approval: None,
+            sandbox: self.sandbox.clone(),
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

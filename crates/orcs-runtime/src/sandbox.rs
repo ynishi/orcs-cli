@@ -40,6 +40,7 @@
 pub use orcs_auth::{SandboxError, SandboxPolicy};
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 // ─── Concrete Implementation ────────────────────────────────────────
 
@@ -47,6 +48,16 @@ use std::path::{Path, PathBuf};
 ///
 /// - `project_root` — where `.git`/`.orcs` was detected (immutable after creation)
 /// - `permissive_root` — effective boundary (defaults to `project_root`, narrowed by `scoped()`)
+/// - `allowed_extra_paths` — additional roots allowed outside `permissive_root`
+///   (populated from config or HIL approval)
+///
+/// # Boundary Check Order
+///
+/// `validate_read` / `validate_write`:
+/// 1. Canonicalize the requested path
+/// 2. Check if under `permissive_root` → allow
+/// 3. Check if under any `allowed_extra_paths` → allow
+/// 4. Otherwise → `OutsideBoundary`
 ///
 /// # Example
 ///
@@ -61,6 +72,11 @@ use std::path::{Path, PathBuf};
 pub struct ProjectSandbox {
     project_root: PathBuf,
     permissive_root: PathBuf,
+    /// Additional paths allowed outside `permissive_root`.
+    ///
+    /// Shared via `Arc` so that cloned sandboxes (e.g., from `scoped()`)
+    /// share the same allowed set. Paths are canonicalized at insertion time.
+    allowed_extra_paths: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl ProjectSandbox {
@@ -82,6 +98,7 @@ impl ProjectSandbox {
         Ok(Self {
             project_root: root.clone(),
             permissive_root: root,
+            allowed_extra_paths: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -117,7 +134,59 @@ impl ProjectSandbox {
         Ok(Self {
             project_root: self.project_root.clone(),
             permissive_root: canonical,
+            allowed_extra_paths: Arc::clone(&self.allowed_extra_paths),
         })
+    }
+
+    /// Adds a path to the allowed extra paths.
+    ///
+    /// The path is canonicalized before insertion. After adding,
+    /// `validate_read` / `validate_write` will accept paths that
+    /// resolve under this directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the path cannot be canonicalized.
+    pub fn allow_path(&self, path: impl AsRef<Path>) -> Result<(), SandboxError> {
+        let canonical = path.as_ref().canonicalize().map_err(|e| {
+            SandboxError::Init(format!(
+                "cannot canonicalize allowed path '{}': {e}",
+                path.as_ref().display()
+            ))
+        })?;
+
+        let mut paths = self
+            .allowed_extra_paths
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if !paths.contains(&canonical) {
+            tracing::info!(
+                path = %canonical.display(),
+                "[sandbox] added allowed extra path"
+            );
+            paths.push(canonical);
+        }
+
+        Ok(())
+    }
+
+    /// Returns a snapshot of currently allowed extra paths.
+    #[must_use]
+    pub fn allowed_extra_paths(&self) -> Vec<PathBuf> {
+        self.allowed_extra_paths
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Checks whether a canonical path falls under any allowed extra path.
+    fn is_under_allowed_extra(&self, canonical: &Path) -> bool {
+        let paths = self
+            .allowed_extra_paths
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        paths.iter().any(|allowed| canonical.starts_with(allowed))
     }
 }
 
@@ -130,6 +199,12 @@ impl SandboxPolicy for ProjectSandbox {
         &self.permissive_root
     }
 
+    fn allow_path(&self, path: &Path) -> Result<(), SandboxError> {
+        // Delegate to the inherent method which handles canonicalization
+        // and deduplication via Arc<RwLock<Vec<PathBuf>>>.
+        ProjectSandbox::allow_path(self, path)
+    }
+
     fn validate_read(&self, path: &str) -> Result<PathBuf, SandboxError> {
         let absolute = resolve_absolute(path, &self.permissive_root);
         let canonical = absolute
@@ -139,14 +214,19 @@ impl SandboxPolicy for ProjectSandbox {
                 source: e,
             })?;
 
-        if !canonical.starts_with(&self.permissive_root) {
-            return Err(SandboxError::OutsideBoundary {
-                path: path.to_string(),
-                root: self.permissive_root.display().to_string(),
-            });
+        if canonical.starts_with(&self.permissive_root) {
+            return Ok(canonical);
         }
 
-        Ok(canonical)
+        // Fallback: check allowed extra paths
+        if self.is_under_allowed_extra(&canonical) {
+            return Ok(canonical);
+        }
+
+        Err(SandboxError::OutsideBoundary {
+            path: path.to_string(),
+            root: self.permissive_root.display().to_string(),
+        })
     }
 
     fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError> {
@@ -158,12 +238,17 @@ impl SandboxPolicy for ProjectSandbox {
                 let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
                     SandboxError::Init(format!("path resolution failed: {path} ({e})"))
                 })?;
-                if !canonical_ancestor.starts_with(&self.permissive_root) {
+
+                let in_root = canonical_ancestor.starts_with(&self.permissive_root);
+                let in_extra = self.is_under_allowed_extra(&canonical_ancestor);
+
+                if !in_root && !in_extra {
                     return Err(SandboxError::OutsideBoundary {
                         path: path.to_string(),
                         root: self.permissive_root.display().to_string(),
                     });
                 }
+
                 // Return canonicalized ancestor + remaining non-existent suffix.
                 // This prevents callers from following symlinks in the
                 // un-resolved portion of the path.
