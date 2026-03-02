@@ -69,7 +69,7 @@ impl RustTool for ReadTool {
     }
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let path = required_str(&args, "path")?;
-        let (content, size) = tool_read(path, ctx.sandbox()).map_err(ToolError::from)?;
+        let (content, size) = tool_read(path, ctx.sandbox())?;
         Ok(json!({"content": content, "size": size}))
     }
 }
@@ -100,7 +100,7 @@ impl RustTool for WriteTool {
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let path = required_str(&args, "path")?;
         let content = required_str(&args, "content")?;
-        let bytes = tool_write(path, content, ctx.sandbox()).map_err(ToolError::from)?;
+        let bytes = tool_write(path, content, ctx.sandbox())?;
         Ok(json!({"bytes_written": bytes}))
     }
 }
@@ -131,7 +131,7 @@ impl RustTool for GrepTool {
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let pattern = required_str(&args, "pattern")?;
         let path = required_str(&args, "path")?;
-        let matches = tool_grep(pattern, path, ctx.sandbox()).map_err(ToolError::from)?;
+        let matches = tool_grep(pattern, path, ctx.sandbox())?;
         let matches_json: Vec<Value> = matches
             .iter()
             .map(|m| json!({"line_number": m.line_number, "line": m.line}))
@@ -166,7 +166,7 @@ impl RustTool for GlobTool {
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let pattern = required_str(&args, "pattern")?;
         let dir = args.get("dir").and_then(|v| v.as_str());
-        let files = tool_glob(pattern, dir, ctx.sandbox()).map_err(ToolError::from)?;
+        let files = tool_glob(pattern, dir, ctx.sandbox())?;
         Ok(json!({"files": files, "count": files.len()}))
     }
 }
@@ -193,7 +193,7 @@ impl RustTool for MkdirTool {
     }
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let path = required_str(&args, "path")?;
-        tool_mkdir(path, ctx.sandbox()).map_err(ToolError::from)?;
+        tool_mkdir(path, ctx.sandbox())?;
         Ok(json!({}))
     }
 }
@@ -220,7 +220,7 @@ impl RustTool for RemoveTool {
     }
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let path = required_str(&args, "path")?;
-        tool_remove(path, ctx.sandbox()).map_err(ToolError::from)?;
+        tool_remove(path, ctx.sandbox())?;
         Ok(json!({}))
     }
 }
@@ -251,7 +251,7 @@ impl RustTool for MvTool {
     fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<Value, ToolError> {
         let src = required_str(&args, "src")?;
         let dst = required_str(&args, "dst")?;
-        tool_mv(src, dst, ctx.sandbox()).map_err(ToolError::from)?;
+        tool_mv(src, dst, ctx.sandbox())?;
         Ok(json!({}))
     }
 }
