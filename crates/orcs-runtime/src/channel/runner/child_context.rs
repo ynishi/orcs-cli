@@ -77,6 +77,17 @@ pub struct ChildContextImpl {
     /// Shared MCP client manager (propagated to child runners).
     mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
 
+    // -- Sandbox support --
+    /// Sandbox policy for dynamic path grants after HIL approval.
+    /// Propagated to child runners so they can grant paths on approval.
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
+
+    // -- Runner lifecycle support --
+    /// Exit notification sender for child-spawned runner lifecycle events.
+    /// When set, `spawn_runner()` sends a `RunnerExitNotice` after the
+    /// runner task completes, enabling the engine monitor to detect exits.
+    runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
+
     // -- Capability support --
     /// Effective capabilities for this context.
     /// Defaults to ALL; narrowed via `Capability::inherit` on spawn.
@@ -127,6 +138,8 @@ impl ChildContextImpl {
             channel_id: None,
             hook_registry: None,
             mcp_manager: None,
+            sandbox: None,
+            runner_exit_tx: None,
             capabilities: Capability::ALL,
         }
     }
@@ -388,6 +401,32 @@ impl ChildContextImpl {
         self
     }
 
+    /// Sets the sandbox policy for dynamic path grants after HIL approval.
+    ///
+    /// Propagated to child runners so they can call `sandbox.allow_path()`
+    /// when a sandbox boundary violation is approved by the user.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn orcs_auth::SandboxPolicy>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Sets the runner exit notification sender.
+    ///
+    /// When set, `spawn_runner()` sends a [`RunnerExitNotice`] to the engine
+    /// monitor after the child runner exits, enabling `Lifecycle::runner_exited`
+    /// events for child-spawned runners.
+    ///
+    /// [`RunnerExitNotice`]: crate::engine::RunnerExitNotice
+    #[must_use]
+    pub(crate) fn with_runner_exit_tx(
+        mut self,
+        tx: mpsc::UnboundedSender<crate::engine::RunnerExitNotice>,
+    ) -> Self {
+        self.runner_exit_tx = Some(tx);
+        self
+    }
+
     /// Sets the effective capabilities for this context.
     ///
     /// Defaults to [`Capability::ALL`]. Use this to restrict what
@@ -493,6 +532,8 @@ impl ChildContextImpl {
         let grants_clone = self.grants.clone();
         let hook_registry_clone = self.hook_registry.clone();
         let mcp_manager_clone = self.mcp_manager.clone();
+        let sandbox_clone = self.sandbox.clone();
+        let runner_exit_tx_clone = self.runner_exit_tx.clone();
 
         // Clone RPC resources so the spawned runner participates in the
         // event mesh and is reachable via FQN-based RPC.
@@ -597,6 +638,15 @@ impl ChildContextImpl {
             if let Some(manager) = mcp_manager_clone {
                 builder = builder.with_mcp_manager(manager);
             }
+            // Propagate sandbox to child runner for HIL path grants
+            if let Some(sandbox) = sandbox_clone {
+                builder = builder.with_sandbox(sandbox);
+            }
+            // Propagate runner exit notification sender so nested runners
+            // also report exits to the engine monitor.
+            if let Some(ref tx) = runner_exit_tx_clone {
+                builder = builder.with_runner_exit_tx(tx.clone());
+            }
 
             let (runner, handle) = builder.build();
 
@@ -623,9 +673,21 @@ impl ChildContextImpl {
             // reachable via orcs.request(fqn, ...).
             let _ = ready_tx.send(());
 
-            runner.run().await;
+            let result = runner.run().await;
 
-            // --- 5. Cleanup on runner exit ---
+            // --- 5. Notify engine monitor of runner exit ---
+            // Without this, child-spawned runners are invisible to the
+            // engine monitor, so `Lifecycle::runner_exited` events never
+            // fire — breaking delegation failure detection.
+            if let Some(exit_tx) = runner_exit_tx_clone {
+                let _ = exit_tx.send(crate::engine::RunnerExitNotice {
+                    channel_id,
+                    component_fqn: component_fqn.clone(),
+                    exit_reason: result.exit_reason,
+                });
+            }
+
+            // --- 6. Cleanup on runner exit ---
             if let Some(ref handles) = shared_handles_clone {
                 handles.write().remove(&channel_id);
             }
@@ -680,6 +742,9 @@ impl ChildContextImpl {
         }
         if let Some(reg) = &self.hook_registry {
             ctx = ctx.with_hook_registry(Arc::clone(reg));
+        }
+        if let Some(tx) = &self.runner_exit_tx {
+            ctx = ctx.with_runner_exit_tx(tx.clone());
         }
         Box::new(ctx)
     }

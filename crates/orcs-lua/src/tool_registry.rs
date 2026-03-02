@@ -378,6 +378,59 @@ pub(crate) fn dispatch_rust_tool(
                 }
             }
         }
+        Err(e) if e.is_sandbox_boundary() => {
+            // Sandbox boundary violation → trigger HIL approval flow.
+            // Extract path/root from the error kind to build the grant pattern.
+            let (path, _root) = match e.kind() {
+                orcs_component::tool::ToolErrorKind::SandboxBoundary { path, root } => {
+                    (path.clone(), root.clone())
+                }
+                _ => (String::new(), String::new()),
+            };
+
+            let op = if tool.is_read_only() { "read" } else { "write" };
+            let grant_pattern = format!("sandbox:{op}:{path}");
+            let approval_id = format!("ap-{}", uuid::Uuid::new_v4());
+
+            // Check if the target path resolves under the main git repo root
+            // (worktree scenario). Include this info in the approval request
+            // so the user can make an informed decision.
+            let is_within_git_root = sandbox.git_root().is_some_and(|gr| {
+                std::path::Path::new(&path)
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|canonical| canonical.starts_with(gr))
+            });
+
+            let description = if is_within_git_root {
+                format!(
+                    "Access outside sandbox (within git root): {} ({})",
+                    path, op,
+                )
+            } else {
+                format!("Access outside sandbox: {} ({})", path, op)
+            };
+
+            tracing::info!(
+                approval_id = %approval_id,
+                grant_pattern = %grant_pattern,
+                tool = %tool.name(),
+                within_git_root = is_within_git_root,
+                "sandbox boundary violation, suspending for HIL approval"
+            );
+
+            return Err(mlua::Error::ExternalError(std::sync::Arc::new(
+                orcs_component::ComponentError::Suspended {
+                    approval_id,
+                    grant_pattern,
+                    pending_request: serde_json::json!({
+                        "command": format!("sandbox:{op}:{path}"),
+                        "description": description,
+                        "within_git_root": is_within_git_root,
+                    }),
+                },
+            )));
+        }
         Err(e) => {
             result_table.set("ok", false)?;
             result_table.set("error", e.message().to_string())?;

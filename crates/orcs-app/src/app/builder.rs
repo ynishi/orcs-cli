@@ -132,6 +132,46 @@ impl OrcsAppBuilder {
             AppError::Config("sandbox policy not set (use .with_sandbox())".into())
         })?;
 
+        // Apply configured sandbox allowed paths
+        let sandbox_root = sandbox.root().to_path_buf();
+        for path in config.sandbox.resolved_read_paths(Some(&sandbox_root)) {
+            if let Err(e) = sandbox.allow_path(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to add configured allowed_read_path"
+                );
+            }
+        }
+        for path in config.sandbox.resolved_write_paths(Some(&sandbox_root)) {
+            if let Err(e) = sandbox.allow_path(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to add configured allowed_write_path"
+                );
+            }
+        }
+
+        // Auto-allow git root when running inside a worktree
+        if config.sandbox.auto_allow_git_root {
+            if let Some(git_root) = sandbox.git_root() {
+                let git_root_owned = git_root.to_path_buf();
+                if let Err(e) = sandbox.allow_path(&git_root_owned) {
+                    tracing::warn!(
+                        path = %git_root_owned.display(),
+                        error = %e,
+                        "Failed to auto-allow git root"
+                    );
+                } else {
+                    tracing::info!(
+                        git_root = %git_root_owned.display(),
+                        "Auto-allowed git root for worktree sandbox"
+                    );
+                }
+            }
+        }
+
         // Create session store
         let session_path = config.paths.session_dir_or_default();
         let store = LocalFileStore::new(session_path)
@@ -159,6 +199,9 @@ impl OrcsAppBuilder {
 
         // Create engine with IO channel (required)
         let mut engine = OrcsEngine::new(world, io);
+
+        // Inject sandbox for dynamic path grants after HIL approval
+        engine.set_sandbox(Arc::clone(&sandbox));
 
         // Initialize hook registry and load hooks from config
         if !config.hooks.hooks.is_empty() {

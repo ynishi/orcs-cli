@@ -78,6 +78,27 @@ pub trait SandboxPolicy: Send + Sync + std::fmt::Debug {
     /// For paths that don't exist yet, walks up to the deepest
     /// existing ancestor and validates that.
     fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError>;
+
+    /// Dynamically allows an additional path outside the sandbox root.
+    ///
+    /// After calling this, `validate_read` / `validate_write` will accept
+    /// paths that resolve under `path`. The path is canonicalized at
+    /// insertion time.
+    ///
+    /// Default implementation is a no-op (returns `Ok(())`). Override in
+    /// implementations that support dynamic path grants (e.g., `ProjectSandbox`).
+    fn allow_path(&self, _path: &Path) -> Result<(), SandboxError> {
+        Ok(())
+    }
+
+    /// Returns the main Git repository root if running inside a worktree.
+    ///
+    /// When the sandbox root is a git worktree (`.git` is a file containing
+    /// `gitdir: <path>`), this returns the canonicalized path to the main
+    /// repository root. Returns `None` for regular repos or non-git directories.
+    fn git_root(&self) -> Option<&Path> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -26,7 +26,6 @@ local concierge_timeout_ms = (_concierge_timeout_ms and type(_concierge_timeout_
     or 600000  -- 10 minutes default
 
 local busy = false
-local session_id = nil
 local turn_count = 0
 local last_cost = nil
 local last_provider = nil
@@ -51,15 +50,12 @@ local function build_llm_opts(input)
     if concierge_timeout_ms > 0 then
         opts.overall_timeout = math.floor(concierge_timeout_ms / 1000)
     end
+    opts.hil_intents = true  -- Propagate Suspended for HIL approval
     return opts
 end
 
 --- Update module tracking state after a successful LLM call.
---- Called explicitly (not as a side effect of build_llm_opts) to avoid
---- overwriting valid state with nil when input.llm_config is absent
---- (e.g., session resumption without config re-specification).
 local function update_tracking(input, llm_resp)
-    session_id = llm_resp.session_id
     last_cost = llm_resp.cost
     local llm_cfg = input.llm_config or {}
     if llm_cfg.provider then last_provider = llm_cfg.provider end
@@ -195,7 +191,10 @@ local function fetch_and_register_skills(message, history_context)
 end
 
 --- Register delegate_task intent for LLM-initiated sub-agent delegation.
+--- Idempotent: skips if already registered (concierge rebuilds full prompt every turn).
+local delegate_intent_registered = false
 local function register_delegate_intent()
+    if delegate_intent_registered then return end
     local delegate_reg = orcs.register_intent({
         name = "delegate_task",
         description = "Delegate a task to an independent sub-agent that runs its own LLM session with tool access. "
@@ -219,6 +218,7 @@ local function register_delegate_intent()
         },
     })
     if delegate_reg and delegate_reg.ok then
+        delegate_intent_registered = true
         orcs.log("info", "concierge: registered delegate_task intent")
     else
         orcs.log("warn", "concierge: delegate_task intent registration failed: "
@@ -344,7 +344,6 @@ local function handle_status()
         success = true,
         data = {
             busy = busy,
-            session_id = session_id,
             turn_count = turn_count,
             last_cost = last_cost,
             provider = last_provider,
@@ -366,11 +365,10 @@ end
 --- Handle process: main LLM processing from AgentTask event.
 --- Uses pcall to guarantee busy=false even if orcs.llm() throws a Lua error.
 ---
---- Session management:
----   The concierge stores session_id internally after the first successful LLM call.
----   On subsequent turns, session_id is automatically passed to orcs.llm() to resume
----   the conversation without full prompt reassembly. Callers may also provide
----   input.session_id to override (e.g. external concierge scenarios).
+--- Prompt strategy:
+---   Every call rebuilds the full prompt from ContextParts (foundation, metrics,
+---   skills, history, delegation results, user message). No session resume —
+---   the concierge is low-frequency and requires high-quality context on every turn.
 local function handle_process(input)
     local message = input.message or ""
     if message == "" then
@@ -389,44 +387,11 @@ local function handle_process(input)
     turn_count = turn_count + 1
 
     local ok, result = pcall(function()
-        -- Session resumption: use stored session_id or caller-provided override.
-        -- When session_id is available, skip full prompt assembly and append
-        -- the message directly to the existing LLM session.
-        local resume_sid = input.session_id or session_id
-        if resume_sid and resume_sid ~= "" then
-            orcs.log("info", "concierge: resuming session " .. resume_sid:sub(1, 20))
-            orcs.output("[Concierge] Thinking...")
-            local opts = build_llm_opts(input)
-            opts.session_id = resume_sid
-            opts.resolve = true
-            local llm_resp = orcs.llm(message, opts)
-            if llm_resp and llm_resp.ok then
-                update_tracking(input, llm_resp)
-                emit_success(message, llm_resp)
-                return {
-                    success = true,
-                    data = {
-                        response = llm_resp.content,
-                        session_id = llm_resp.session_id,
-                        num_turns = llm_resp.num_turns,
-                        cost = llm_resp.cost,
-                        source = "concierge",
-                    },
-                }
-            else
-                local err = (llm_resp and llm_resp.error) or "llm resume failed"
-                local kind = (llm_resp and llm_resp.error_kind) or "unknown"
-                if kind == "overall_timeout" then
-                    orcs.log("error", "concierge: overall timeout exceeded during resume (session=" .. tostring(resume_sid) .. ")")
-                else
-                    orcs.log("warn", "concierge: LLM resume failed (" .. kind .. "): " .. tostring(err))
-                end
-                orcs.output_with_level("[concierge] Error: " .. tostring(err), "error")
-                return { success = false, error = err }
-            end
-        end
-
-        -- First call: full prompt assembly
+        -- Full prompt assembly on every call (React-style, not session resume).
+        -- The concierge is low-frequency, high-quality: every turn rebuilds the
+        -- complete context from ContextParts (foundation, metrics, skills, history,
+        -- delegation results, user message). This ensures no stale state —
+        -- delegation results, new skills, updated metrics are always reflected.
         local history_context = input.history_context or ""
         local delegation_context = input.delegation_context or ""
         local placement = input.prompt_placement or "both"
@@ -441,21 +406,22 @@ local function handle_process(input)
         -- (built from IntentRegistry in build_tools_for_provider). Embedding tool
         -- descriptions in the prompt text would conflict with native tool_use.
         local concierge_role = table.concat({
-            "## Your Role: Concierge (Coordinator)",
-            "You are the concierge — a coordinating agent, NOT an implementer.",
-            "Your job is to understand the user's intent, plan the approach, and delegate work.",
+            "## Your Role: Concierge (Manager)",
+            "You are the concierge — a managing coordinator.",
+            "Your job is to understand the user's intent, plan the approach,",
+            "and delegate implementation work to sub-agents.",
             "",
             "### Capabilities",
-            "- Read files, search code (read, grep, glob) for analysis and planning",
-            "- Delegate implementation tasks to sub-agents via `delegate_task`",
+            "- Delegate tasks to sub-agents via `delegate_task`",
             "- Invoke skills for specialized workflows",
             "",
             "### Constraints",
-            "- You do NOT have write/edit capability. Do not attempt to write or edit files directly.",
-            "- For any task that requires creating or modifying files, use `delegate_task` to assign",
-            "  the work to a sub-agent that has full tool access (read, write, grep, glob, exec).",
-            "- Focus on: understanding requirements, reading relevant code, planning, and delegating.",
-            "- Provide concise status updates to the user about delegated work.",
+            "- You do NOT directly read, write, or edit files. Delegate file operations to sub-agents.",
+            "- For any task that requires file access, code search, or modifications,",
+            "  use `delegate_task` to assign the work to a sub-agent.",
+            "- Each turn, select ONE action (delegate or skill), observe the result, then respond.",
+            "- Do NOT chain multiple actions autonomously. Respond to the user after each action.",
+            "- Provide concise status updates about delegated work.",
         }, "\n")
 
         local system_parts = {}
@@ -494,7 +460,9 @@ local function handle_process(input)
             #f_system, #f_task, #f_guard, #console_block
         ))
 
-        -- Call LLM with tool-use auto-resolution
+        -- Call LLM with tool-use auto-resolution.
+        -- max_tool_turns is controlled via config (llm_max_tool_turns).
+        -- Concierge is a coordinator: typical flow is delegate → ack → respond (1-2 turns).
         orcs.output("[Concierge] Thinking...")
         local llm_opts = build_llm_opts(input)
         llm_opts.resolve = true
@@ -533,7 +501,13 @@ local function handle_process(input)
     busy = false
 
     if not ok then
+        -- Re-throw Suspended errors so the runner can handle HIL approval.
+        -- Must re-throw the original error object (not tostring'd) to preserve
+        -- the ExternalError(ComponentError::Suspended) type for extract_suspended().
         local err_msg = tostring(result)
+        if err_msg:find("suspended pending approval") then
+            error(result)
+        end
         orcs.output_with_level("[concierge] Error: " .. err_msg, "error")
         orcs.emit_event("Extension", "llm_response", {
             error = err_msg,

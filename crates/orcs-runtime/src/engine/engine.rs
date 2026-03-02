@@ -65,11 +65,11 @@ const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// The monitor task receives these to detect unexpected runner terminations
 /// during normal operation (before Veto/shutdown).
 #[derive(Debug)]
-struct RunnerExitNotice {
-    channel_id: ChannelId,
-    component_fqn: String,
+pub(crate) struct RunnerExitNotice {
+    pub(crate) channel_id: ChannelId,
+    pub(crate) component_fqn: String,
     /// Why the runner exited. Forwarded from [`RunnerResult::exit_reason`].
-    exit_reason: crate::channel::ExitReason,
+    pub(crate) exit_reason: crate::channel::ExitReason,
 }
 
 /// OrcsEngine - Main runtime for ORCS CLI.
@@ -153,6 +153,8 @@ pub struct OrcsEngine {
     runner_exit_rx: Option<mpsc::UnboundedReceiver<RunnerExitNotice>>,
     /// Background monitor task that detects unexpected runner terminations.
     monitor_task: Option<tokio::task::JoinHandle<()>>,
+    /// Sandbox policy for dynamic path grants (injected into all spawned runners).
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
 }
 
 impl OrcsEngine {
@@ -212,7 +214,17 @@ impl OrcsEngine {
             runner_exit_tx,
             runner_exit_rx: Some(runner_exit_rx),
             monitor_task: None,
+            sandbox: None,
         }
+    }
+
+    /// Sets the sandbox policy for all spawned runners.
+    ///
+    /// When set, each ChannelRunner can call `sandbox.allow_path()` after
+    /// a sandbox boundary approval, enabling re-dispatched requests to
+    /// access the approved path.
+    pub fn set_sandbox(&mut self, sandbox: Arc<dyn orcs_auth::SandboxPolicy>) {
+        self.sandbox = Some(sandbox);
     }
 
     /// Sets the shared MCP client manager for all spawned runners.
@@ -307,7 +319,7 @@ impl OrcsEngine {
     ) -> ChannelHandle {
         let component_id = component.id().clone();
         let signal_rx = self.signal_tx.subscribe();
-        let builder = ChannelRunner::builder(
+        let mut builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
@@ -315,6 +327,10 @@ impl OrcsEngine {
             component,
         )
         .with_request_channel();
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
+        }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))
             .build();
@@ -494,7 +510,7 @@ impl OrcsEngine {
         let component_id = component.id().clone();
 
         // Build runner with auth
-        let builder = ChannelRunner::builder(
+        let mut builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
@@ -508,6 +524,10 @@ impl OrcsEngine {
         .with_session_arc(session)
         .with_checker(checker)
         .with_request_channel();
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
+        }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))
             .build();
@@ -629,6 +649,12 @@ impl OrcsEngine {
         if let Some(snapshot) = initial_snapshot {
             builder = builder.with_initial_snapshot(snapshot);
         }
+
+        // Inject sandbox for dynamic path grants after HIL approval
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
+        }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
 
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))

@@ -446,6 +446,10 @@ pub struct ChannelRunner {
     io_output_tx: Option<OutputSender>,
     /// Pending approval state: stored when Component returns Suspended.
     pending_approval: Option<PendingApproval>,
+    /// Sandbox policy for dynamic path grants after HIL approval.
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
+    /// Runner exit notification sender for child-spawned runner lifecycle events.
+    runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -596,14 +600,21 @@ impl ChannelRunner {
         Some(Box::new(ctx))
     }
 
-    /// Injects RPC support (shared handles + channel map + channel ID)
-    /// into a ChildContextImpl if the runner was built with RPC resources.
-    fn inject_rpc(&self, ctx: ChildContextImpl) -> ChildContextImpl {
+    /// Injects RPC support and sandbox into a ChildContextImpl.
+    ///
+    /// Propagates shared handles, channel map, and sandbox policy so that
+    /// dynamically created child contexts participate in RPC and sandbox HIL.
+    fn inject_rpc(&self, mut ctx: ChildContextImpl) -> ChildContextImpl {
         if let (Some(handles), Some(map)) = (&self.shared_handles, &self.component_channel_map) {
-            ctx.with_rpc_support(handles.clone(), map.clone(), self.id)
-        } else {
-            ctx
+            ctx = ctx.with_rpc_support(handles.clone(), map.clone(), self.id);
         }
+        if let Some(sandbox) = &self.sandbox {
+            ctx = ctx.with_sandbox(Arc::clone(sandbox));
+        }
+        if let Some(tx) = &self.runner_exit_tx {
+            ctx = ctx.with_runner_exit_tx(tx.clone());
+        }
+        ctx
     }
 
     /// Returns a reference to the child spawner, if enabled.
@@ -936,6 +947,9 @@ impl ChannelRunner {
         );
 
         // 1. Grant the permission pattern.
+        //    For sandbox grants (prefix "sandbox:read:" / "sandbox:write:"), also
+        //    update the sandbox's allowed_extra_paths so that the re-dispatched
+        //    request passes validate_read/validate_write.
         if let Some(grants) = &self.grants {
             if let Err(e) =
                 grants.grant(orcs_auth::CommandGrant::persistent(&pending.grant_pattern))
@@ -948,6 +962,31 @@ impl ChannelRunner {
             }
         } else {
             warn!("no GrantPolicy configured, cannot grant pattern");
+        }
+
+        // Sandbox path grant: "sandbox:read:/path" or "sandbox:write:/path"
+        if let Some(path_str) = pending
+            .grant_pattern
+            .strip_prefix("sandbox:read:")
+            .or_else(|| pending.grant_pattern.strip_prefix("sandbox:write:"))
+        {
+            if let Some(sandbox) = &self.sandbox {
+                let path = std::path::Path::new(path_str);
+                if let Err(e) = sandbox.allow_path(path) {
+                    warn!(
+                        error = %e,
+                        path = %path_str,
+                        "failed to add sandbox allowed path after approval"
+                    );
+                } else {
+                    info!(
+                        path = %path_str,
+                        "sandbox path granted after approval"
+                    );
+                }
+            } else {
+                warn!("sandbox grant pattern but no sandbox configured on runner");
+            }
         }
 
         // 2. Notify user that the approval was accepted (before re-dispatch so
@@ -1421,6 +1460,10 @@ pub struct ChannelRunnerBuilder {
     mcp_manager: Option<Arc<orcs_mcp::McpClientManager>>,
     /// Per-component configuration from config file.
     component_config: serde_json::Value,
+    /// Sandbox policy for dynamic path grants after HIL approval.
+    sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
+    /// Runner exit notification sender (propagated to child contexts for lifecycle events).
+    runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -1455,6 +1498,8 @@ impl ChannelRunnerBuilder {
             hook_registry: None,
             mcp_manager: None,
             component_config: serde_json::Value::Object(serde_json::Map::new()),
+            sandbox: None,
+            runner_exit_tx: None,
         }
     }
 
@@ -1653,6 +1698,29 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the sandbox policy for dynamic path grants after HIL approval.
+    ///
+    /// When set, the runner can call `sandbox.allow_path()` after a sandbox
+    /// boundary approval, so that re-dispatched requests succeed.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn orcs_auth::SandboxPolicy>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Sets the runner exit notification sender.
+    ///
+    /// Propagated to child contexts so that child-spawned runners can notify
+    /// the engine monitor on exit, enabling `Lifecycle::runner_exited` events.
+    #[must_use]
+    pub(crate) fn with_runner_exit_tx(
+        mut self,
+        tx: mpsc::UnboundedSender<crate::engine::RunnerExitNotice>,
+    ) -> Self {
+        self.runner_exit_tx = Some(tx);
+        self
+    }
+
     /// Configures auth (session/checker/grants) and IO output routing on a [`ChildContextImpl`].
     ///
     /// Extracted from `build()` to eliminate duplication between the child-spawner
@@ -1699,6 +1767,12 @@ impl ChannelRunnerBuilder {
         }
         if let Some(mgr) = &self.mcp_manager {
             ctx = ctx.with_mcp_manager(Arc::clone(mgr));
+        }
+        if let Some(sandbox) = &self.sandbox {
+            ctx = ctx.with_sandbox(Arc::clone(sandbox));
+        }
+        if let Some(tx) = &self.runner_exit_tx {
+            ctx = ctx.with_runner_exit_tx(tx.clone());
         }
         ctx
     }
@@ -1892,6 +1966,8 @@ impl ChannelRunnerBuilder {
             grants: self.grants.clone(),
             io_output_tx: io_output_tx.clone(),
             pending_approval: None,
+            sandbox: self.sandbox.clone(),
+            runner_exit_tx: self.runner_exit_tx.clone(),
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);

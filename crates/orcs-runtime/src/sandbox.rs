@@ -40,6 +40,7 @@
 pub use orcs_auth::{SandboxError, SandboxPolicy};
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 // ─── Concrete Implementation ────────────────────────────────────────
 
@@ -47,6 +48,16 @@ use std::path::{Path, PathBuf};
 ///
 /// - `project_root` — where `.git`/`.orcs` was detected (immutable after creation)
 /// - `permissive_root` — effective boundary (defaults to `project_root`, narrowed by `scoped()`)
+/// - `allowed_extra_paths` — additional roots allowed outside `permissive_root`
+///   (populated from config or HIL approval)
+///
+/// # Boundary Check Order
+///
+/// `validate_read` / `validate_write`:
+/// 1. Canonicalize the requested path
+/// 2. Check if under `permissive_root` → allow
+/// 3. Check if under any `allowed_extra_paths` → allow
+/// 4. Otherwise → `OutsideBoundary`
 ///
 /// # Example
 ///
@@ -61,6 +72,16 @@ use std::path::{Path, PathBuf};
 pub struct ProjectSandbox {
     project_root: PathBuf,
     permissive_root: PathBuf,
+    /// Additional paths allowed outside `permissive_root`.
+    ///
+    /// Shared via `Arc` so that cloned sandboxes (e.g., from `scoped()`)
+    /// share the same allowed set. Paths are canonicalized at insertion time.
+    allowed_extra_paths: Arc<RwLock<Vec<PathBuf>>>,
+    /// Main Git repository root (if this sandbox is inside a worktree).
+    ///
+    /// `None` for regular repos or non-git directories.
+    /// Detected at construction time from `.git` file content.
+    git_root: Option<PathBuf>,
 }
 
 impl ProjectSandbox {
@@ -79,9 +100,20 @@ impl ProjectSandbox {
             ))
         })?;
 
+        let git_root = detect_git_root(&root);
+        if let Some(ref gr) = git_root {
+            tracing::info!(
+                worktree = %root.display(),
+                git_root = %gr.display(),
+                "[sandbox] worktree detected"
+            );
+        }
+
         Ok(Self {
             project_root: root.clone(),
             permissive_root: root,
+            allowed_extra_paths: Arc::new(RwLock::new(Vec::new())),
+            git_root,
         })
     }
 
@@ -117,7 +149,60 @@ impl ProjectSandbox {
         Ok(Self {
             project_root: self.project_root.clone(),
             permissive_root: canonical,
+            allowed_extra_paths: Arc::clone(&self.allowed_extra_paths),
+            git_root: self.git_root.clone(),
         })
+    }
+
+    /// Adds a path to the allowed extra paths.
+    ///
+    /// The path is canonicalized before insertion. After adding,
+    /// `validate_read` / `validate_write` will accept paths that
+    /// resolve under this directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the path cannot be canonicalized.
+    pub fn allow_path(&self, path: impl AsRef<Path>) -> Result<(), SandboxError> {
+        let canonical = path.as_ref().canonicalize().map_err(|e| {
+            SandboxError::Init(format!(
+                "cannot canonicalize allowed path '{}': {e}",
+                path.as_ref().display()
+            ))
+        })?;
+
+        let mut paths = self
+            .allowed_extra_paths
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if !paths.contains(&canonical) {
+            tracing::info!(
+                path = %canonical.display(),
+                "[sandbox] added allowed extra path"
+            );
+            paths.push(canonical);
+        }
+
+        Ok(())
+    }
+
+    /// Returns a snapshot of currently allowed extra paths.
+    #[must_use]
+    pub fn allowed_extra_paths(&self) -> Vec<PathBuf> {
+        self.allowed_extra_paths
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Checks whether a canonical path falls under any allowed extra path.
+    fn is_under_allowed_extra(&self, canonical: &Path) -> bool {
+        let paths = self
+            .allowed_extra_paths
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        paths.iter().any(|allowed| canonical.starts_with(allowed))
     }
 }
 
@@ -130,6 +215,16 @@ impl SandboxPolicy for ProjectSandbox {
         &self.permissive_root
     }
 
+    fn allow_path(&self, path: &Path) -> Result<(), SandboxError> {
+        // Delegate to the inherent method which handles canonicalization
+        // and deduplication via Arc<RwLock<Vec<PathBuf>>>.
+        ProjectSandbox::allow_path(self, path)
+    }
+
+    fn git_root(&self) -> Option<&Path> {
+        self.git_root.as_deref()
+    }
+
     fn validate_read(&self, path: &str) -> Result<PathBuf, SandboxError> {
         let absolute = resolve_absolute(path, &self.permissive_root);
         let canonical = absolute
@@ -139,14 +234,19 @@ impl SandboxPolicy for ProjectSandbox {
                 source: e,
             })?;
 
-        if !canonical.starts_with(&self.permissive_root) {
-            return Err(SandboxError::OutsideBoundary {
-                path: path.to_string(),
-                root: self.permissive_root.display().to_string(),
-            });
+        if canonical.starts_with(&self.permissive_root) {
+            return Ok(canonical);
         }
 
-        Ok(canonical)
+        // Fallback: check allowed extra paths
+        if self.is_under_allowed_extra(&canonical) {
+            return Ok(canonical);
+        }
+
+        Err(SandboxError::OutsideBoundary {
+            path: path.to_string(),
+            root: self.permissive_root.display().to_string(),
+        })
     }
 
     fn validate_write(&self, path: &str) -> Result<PathBuf, SandboxError> {
@@ -158,12 +258,17 @@ impl SandboxPolicy for ProjectSandbox {
                 let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
                     SandboxError::Init(format!("path resolution failed: {path} ({e})"))
                 })?;
-                if !canonical_ancestor.starts_with(&self.permissive_root) {
+
+                let in_root = canonical_ancestor.starts_with(&self.permissive_root);
+                let in_extra = self.is_under_allowed_extra(&canonical_ancestor);
+
+                if !in_root && !in_extra {
                     return Err(SandboxError::OutsideBoundary {
                         path: path.to_string(),
                         root: self.permissive_root.display().to_string(),
                     });
                 }
+
                 // Return canonicalized ancestor + remaining non-existent suffix.
                 // This prevents callers from following symlinks in the
                 // un-resolved portion of the path.
@@ -187,6 +292,64 @@ impl SandboxPolicy for ProjectSandbox {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
+
+/// Detects the main Git repository root if `project_root` is a worktree.
+///
+/// In a git worktree, `.git` is a **file** (not directory) containing:
+/// ```text
+/// gitdir: /path/to/main-repo/.git/worktrees/<worktree-name>
+/// ```
+///
+/// This function parses that path and navigates up to the main repo root:
+/// `gitdir` → parent (`worktrees/`) → parent (`.git/`) → parent (repo root).
+///
+/// Returns `None` if:
+/// - `.git` is a directory (regular repo)
+/// - `.git` does not exist
+/// - The `gitdir:` line cannot be parsed
+/// - The resolved path structure doesn't match the worktree convention
+fn detect_git_root(project_root: &Path) -> Option<PathBuf> {
+    let dot_git = project_root.join(".git");
+
+    // Regular repo: .git is a directory — not a worktree
+    if dot_git.is_dir() {
+        return None;
+    }
+
+    // Worktree: .git is a file with "gitdir: <path>"
+    if !dot_git.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir_str = content.trim().strip_prefix("gitdir: ")?;
+
+    // Resolve relative gitdir paths against project_root
+    let gitdir = Path::new(gitdir_str);
+    let gitdir_abs = if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        project_root.join(gitdir)
+    };
+
+    // Expected structure: <main-repo>/.git/worktrees/<name>
+    // Navigate: gitdir → parent (worktrees/) → parent (.git/) → parent (repo root)
+    let worktrees_dir = gitdir_abs.parent()?;
+    let dot_git_dir = worktrees_dir.parent()?;
+    let main_repo = dot_git_dir.parent()?;
+
+    // Validate: the intermediate directory should be named "worktrees"
+    if worktrees_dir.file_name()?.to_str()? != "worktrees" {
+        return None;
+    }
+
+    // Validate: the .git directory exists at the supposed main repo
+    if !dot_git_dir.is_dir() {
+        return None;
+    }
+
+    main_repo.canonicalize().ok()
+}
 
 /// Resolves a path to absolute, relative to the given root.
 fn resolve_absolute(path: &str, root: &Path) -> PathBuf {
@@ -556,6 +719,179 @@ mod tests {
             assert!(
                 result.is_err(),
                 "symlink escaping scoped sandbox should be rejected"
+            );
+        }
+    }
+
+    // ─── Worktree Detection Tests ────────────────────────────────────
+
+    mod worktree_tests {
+        use super::*;
+
+        /// Helper: creates a fake main repo + worktree structure.
+        ///
+        /// Returns `(main_repo_tmp, worktree_tmp)` where:
+        /// - `main_repo_tmp/.git/worktrees/<name>/` exists
+        /// - `worktree_tmp/.git` is a file with `gitdir: <abs path>`
+        fn setup_worktree(name: &str) -> (WorkDir, WorkDir) {
+            let main_repo = WorkDir::temporary().expect("should create temp dir for main repo");
+            let worktree = WorkDir::temporary().expect("should create temp dir for worktree");
+
+            // Create main repo .git directory with worktrees/<name>
+            let worktrees_dir = main_repo.path().join(".git").join("worktrees").join(name);
+            fs::create_dir_all(&worktrees_dir).expect("should create .git/worktrees/<name> dir");
+
+            // Create worktree .git file pointing to main repo
+            let gitdir_content = format!("gitdir: {}", worktrees_dir.display());
+            fs::write(worktree.path().join(".git"), gitdir_content)
+                .expect("should write .git file for worktree");
+
+            (main_repo, worktree)
+        }
+
+        #[test]
+        fn detect_git_root_returns_none_for_regular_repo() {
+            let tmp = WorkDir::temporary().expect("should create temp dir");
+            fs::create_dir_all(tmp.path().join(".git")).expect("should create .git dir");
+
+            let result = detect_git_root(tmp.path());
+            assert!(
+                result.is_none(),
+                "regular repo should return None, got: {:?}",
+                result
+            );
+        }
+
+        #[test]
+        fn detect_git_root_returns_none_for_no_git() {
+            let tmp = WorkDir::temporary().expect("should create temp dir");
+            let result = detect_git_root(tmp.path());
+            assert!(
+                result.is_none(),
+                "no .git should return None, got: {:?}",
+                result
+            );
+        }
+
+        #[test]
+        fn detect_git_root_returns_main_repo_for_worktree() {
+            let (main_repo, worktree) = setup_worktree("my-branch");
+
+            let result = detect_git_root(worktree.path());
+            assert!(result.is_some(), "worktree should detect git root");
+
+            let expected = main_repo
+                .path()
+                .canonicalize()
+                .expect("should canonicalize main repo path");
+            assert_eq!(
+                result.expect("should have git root"),
+                expected,
+                "git root should match main repo root"
+            );
+        }
+
+        #[test]
+        fn detect_git_root_handles_relative_gitdir() {
+            let tmp = WorkDir::temporary().expect("should create temp dir");
+
+            // Create main repo structure adjacent to worktree
+            let main_repo = tmp.path().join("main");
+            let worktree = tmp.path().join("worktree");
+            fs::create_dir_all(&main_repo).expect("should create main dir");
+            fs::create_dir_all(&worktree).expect("should create worktree dir");
+
+            let worktrees_dir = main_repo.join(".git").join("worktrees").join("wt");
+            fs::create_dir_all(&worktrees_dir).expect("should create .git/worktrees/wt");
+
+            // Relative gitdir path from worktree to main repo
+            let gitdir_content = format!("gitdir: ../main/.git/worktrees/wt");
+            fs::write(worktree.join(".git"), gitdir_content)
+                .expect("should write .git file with relative path");
+
+            let result = detect_git_root(&worktree);
+            assert!(result.is_some(), "relative gitdir should detect git root");
+
+            let expected = main_repo
+                .canonicalize()
+                .expect("should canonicalize main repo");
+            assert_eq!(result.expect("should have git root"), expected);
+        }
+
+        #[test]
+        fn detect_git_root_rejects_malformed_gitdir() {
+            let tmp = WorkDir::temporary().expect("should create temp dir");
+
+            // .git file without "gitdir: " prefix
+            fs::write(tmp.path().join(".git"), "not a gitdir line")
+                .expect("should write malformed .git file");
+
+            let result = detect_git_root(tmp.path());
+            assert!(result.is_none(), "malformed .git file should return None");
+        }
+
+        #[test]
+        fn detect_git_root_rejects_non_worktree_gitdir() {
+            let tmp = WorkDir::temporary().expect("should create temp dir");
+            let target = WorkDir::temporary().expect("should create target dir");
+
+            // Valid gitdir: but not pointing to a worktrees/ directory
+            let gitdir_content = format!("gitdir: {}", target.path().display());
+            fs::write(tmp.path().join(".git"), gitdir_content).expect("should write .git file");
+
+            let result = detect_git_root(tmp.path());
+            assert!(result.is_none(), "non-worktree gitdir should return None");
+        }
+
+        #[test]
+        fn sandbox_exposes_git_root_via_trait() {
+            let (main_repo, worktree) = setup_worktree("test-branch");
+
+            let sandbox =
+                ProjectSandbox::new(worktree.path()).expect("should create sandbox from worktree");
+
+            let expected = main_repo
+                .path()
+                .canonicalize()
+                .expect("should canonicalize");
+
+            // Check via inherent method
+            assert_eq!(sandbox.git_root.as_deref(), Some(expected.as_path()));
+
+            // Check via trait method
+            let policy: &dyn SandboxPolicy = &sandbox;
+            assert_eq!(policy.git_root(), Some(expected.as_path()));
+        }
+
+        #[test]
+        fn sandbox_git_root_is_none_for_regular_repo() {
+            let (tmp, sandbox) = test_sandbox();
+            // test_sandbox creates a regular temp dir (no .git)
+            let _ = tmp;
+            assert!(
+                sandbox.git_root.is_none(),
+                "regular sandbox should have no git_root"
+            );
+        }
+
+        #[test]
+        fn scoped_sandbox_inherits_git_root() {
+            let (main_repo, worktree) = setup_worktree("scoped-test");
+            let sub = worktree.path().join("sub");
+            fs::create_dir_all(&sub).expect("should create sub dir");
+
+            let sandbox = ProjectSandbox::new(worktree.path()).expect("should create sandbox");
+            let scoped = sandbox.scoped("sub").expect("should create scoped sandbox");
+
+            let expected = main_repo
+                .path()
+                .canonicalize()
+                .expect("should canonicalize");
+
+            assert_eq!(
+                scoped.git_root.as_deref(),
+                Some(expected.as_path()),
+                "scoped sandbox should inherit git_root"
             );
         }
     }

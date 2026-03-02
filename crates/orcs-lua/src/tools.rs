@@ -24,26 +24,60 @@
 
 use crate::error::LuaError;
 use mlua::{Function, Lua, LuaSerdeExt, Table};
-use orcs_runtime::sandbox::SandboxPolicy;
-use std::path::Path;
+use orcs_component::tool::ToolError;
+use orcs_runtime::sandbox::{SandboxError, SandboxPolicy};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// ─── Sandbox Validation Helper ──────────────────────────────────────────
+
+/// Wraps a sandbox validation result, emitting a structured warning
+/// when the requested path resolves outside the sandbox boundary.
+///
+/// Returns `ToolError` to preserve `SandboxBoundary` kind through
+/// the dispatch chain, enabling HIL approval flow in `dispatch_rust_tool`.
+fn sandbox_check(
+    result: Result<PathBuf, SandboxError>,
+    path: &str,
+    operation: &str,
+) -> Result<PathBuf, ToolError> {
+    result.map_err(|e| {
+        if let SandboxError::OutsideBoundary {
+            path: ref denied_path,
+            root: ref boundary,
+        } = e
+        {
+            tracing::warn!(
+                requested_path = %path,
+                resolved_path = %denied_path,
+                sandbox_root = %boundary,
+                operation = %operation,
+                "[sandbox] boundary violation: '{path}' resolves outside sandbox root"
+            );
+        }
+        ToolError::from(e)
+    })
+}
 
 // ─── Rust Tool Implementations ──────────────────────────────────────────
 
 /// Reads a file and returns its contents.
-pub(crate) fn tool_read(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(String, u64), String> {
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+pub(crate) fn tool_read(
+    path: &str,
+    sandbox: &dyn SandboxPolicy,
+) -> Result<(String, u64), ToolError> {
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "read")?;
 
-    let metadata =
-        std::fs::metadata(&canonical).map_err(|e| format!("cannot read metadata: {path} ({e})"))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| ToolError::new(format!("cannot read metadata: {path} ({e})")))?;
 
     if !metadata.is_file() {
-        return Err(format!("not a file: {path}"));
+        return Err(ToolError::new(format!("not a file: {path}")));
     }
 
     let size = metadata.len();
-    let content =
-        std::fs::read_to_string(&canonical).map_err(|e| format!("read failed: {path} ({e})"))?;
+    let content = std::fs::read_to_string(&canonical)
+        .map_err(|e| ToolError::new(format!("read failed: {path} ({e})")))?;
 
     Ok((content, size))
 }
@@ -57,28 +91,29 @@ pub(crate) fn tool_write(
     path: &str,
     content: &str,
     sandbox: &dyn SandboxPolicy,
-) -> Result<usize, String> {
-    let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
+) -> Result<usize, ToolError> {
+    let target = sandbox_check(sandbox.validate_write(path), path, "write")?;
 
     // Ensure parent directory exists
     let parent = target
         .parent()
-        .ok_or_else(|| format!("cannot determine parent directory: {path}"))?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("cannot create parent directory: {e}"))?;
+        .ok_or_else(|| ToolError::new(format!("cannot determine parent directory: {path}")))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| ToolError::new(format!("cannot create parent directory: {e}")))?;
 
     let bytes = content.len();
 
     // Atomic write: create temp file in the same (validated) directory, then persist.
     // parent is derived from validate_write() output, so it is within the sandbox.
     let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("temp file creation failed: {path} ({e})"))?;
+        .map_err(|e| ToolError::new(format!("temp file creation failed: {path} ({e})")))?;
 
     use std::io::Write;
     temp.write_all(content.as_bytes())
-        .map_err(|e| format!("write failed: {path} ({e})"))?;
+        .map_err(|e| ToolError::new(format!("write failed: {path} ({e})")))?;
 
     temp.persist(&target)
-        .map_err(|e| format!("rename failed: {path} ({e})"))?;
+        .map_err(|e| ToolError::new(format!("rename failed: {path} ({e})")))?;
 
     Ok(bytes)
 }
@@ -106,10 +141,11 @@ pub(crate) fn tool_grep(
     pattern: &str,
     path: &str,
     sandbox: &dyn SandboxPolicy,
-) -> Result<Vec<GrepMatch>, String> {
-    let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {pattern} ({e})"))?;
+) -> Result<Vec<GrepMatch>, ToolError> {
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| ToolError::new(format!("invalid regex: {pattern} ({e})")))?;
 
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "grep")?;
     let mut matches = Vec::new();
 
     let sandbox_root = sandbox.root();
@@ -118,15 +154,19 @@ pub(crate) fn tool_grep(
     } else if canonical.is_dir() {
         grep_dir(&re, &canonical, sandbox_root, &mut matches, 0)?;
     } else {
-        return Err(format!("not a file or directory: {path}"));
+        return Err(ToolError::new(format!("not a file or directory: {path}")));
     }
 
     Ok(matches)
 }
 
-fn grep_file(re: &regex::Regex, path: &Path, matches: &mut Vec<GrepMatch>) -> Result<(), String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read failed: {:?} ({e})", path))?;
+fn grep_file(
+    re: &regex::Regex,
+    path: &Path,
+    matches: &mut Vec<GrepMatch>,
+) -> Result<(), ToolError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| ToolError::new(format!("read failed: {:?} ({e})", path)))?;
 
     for (i, line) in content.lines().enumerate() {
         if matches.len() >= MAX_GREP_MATCHES {
@@ -157,7 +197,7 @@ fn grep_dir(
     sandbox_root: &Path,
     matches: &mut Vec<GrepMatch>,
     depth: usize,
-) -> Result<(), String> {
+) -> Result<(), ToolError> {
     if depth > MAX_GREP_DEPTH {
         tracing::debug!("grep: max depth ({MAX_GREP_DEPTH}) reached at {:?}", dir);
         return Ok(());
@@ -166,8 +206,8 @@ fn grep_dir(
         return Ok(());
     }
 
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read directory: {:?} ({e})", dir))?;
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| ToolError::new(format!("cannot read directory: {:?} ({e})", dir)))?;
 
     for entry in entries.flatten() {
         if matches.len() >= MAX_GREP_MATCHES {
@@ -221,17 +261,17 @@ pub(crate) fn tool_glob(
     pattern: &str,
     dir: Option<&str>,
     sandbox: &dyn SandboxPolicy,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ToolError> {
     // Reject path traversal in glob patterns
     if pattern.contains("..") {
-        return Err("glob pattern must not contain '..'".to_string());
+        return Err(ToolError::new("glob pattern must not contain '..'"));
     }
 
     let full_pattern = match dir {
         Some(d) => {
-            let base = sandbox.validate_read(d).map_err(|e| e.to_string())?;
+            let base = sandbox_check(sandbox.validate_read(d), d, "glob")?;
             if !base.is_dir() {
-                return Err(format!("not a directory: {d}"));
+                return Err(ToolError::new(format!("not a directory: {d}")));
             }
             format!("{}/{pattern}", base.display())
         }
@@ -240,8 +280,8 @@ pub(crate) fn tool_glob(
         }
     };
 
-    let paths =
-        glob::glob(&full_pattern).map_err(|e| format!("invalid glob pattern: {pattern} ({e})"))?;
+    let paths = glob::glob(&full_pattern)
+        .map_err(|e| ToolError::new(format!("invalid glob pattern: {pattern} ({e})")))?;
 
     let sandbox_root = sandbox.root();
     let mut results = Vec::new();
@@ -261,27 +301,30 @@ pub(crate) fn tool_glob(
 /// Creates a directory (and all parents) under the sandbox.
 ///
 /// The path is validated via `sandbox.validate_write()` before creation.
-pub(crate) fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
-    let target = sandbox.validate_write(path).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&target).map_err(|e| format!("mkdir failed: {path} ({e})"))
+pub(crate) fn tool_mkdir(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), ToolError> {
+    let target = sandbox_check(sandbox.validate_write(path), path, "mkdir")?;
+    std::fs::create_dir_all(&target)
+        .map_err(|e| ToolError::new(format!("mkdir failed: {path} ({e})")))
 }
 
 /// Removes a file or directory under the sandbox.
 ///
 /// Uses `remove_file` for files and `remove_dir_all` for directories.
 /// Validated via `validate_write()` (destructive) + `validate_read()` (symlink resolution).
-pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
+pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(), ToolError> {
     // Destructive operation: check write boundary
-    sandbox.validate_write(path).map_err(|e| e.to_string())?;
+    sandbox_check(sandbox.validate_write(path), path, "remove")?;
     // Canonicalize + existence check via validate_read
-    let canonical = sandbox.validate_read(path).map_err(|e| e.to_string())?;
+    let canonical = sandbox_check(sandbox.validate_read(path), path, "remove")?;
 
     if canonical.is_file() {
-        std::fs::remove_file(&canonical).map_err(|e| format!("remove failed: {path} ({e})"))
+        std::fs::remove_file(&canonical)
+            .map_err(|e| ToolError::new(format!("remove failed: {path} ({e})")))
     } else if canonical.is_dir() {
-        std::fs::remove_dir_all(&canonical).map_err(|e| format!("remove failed: {path} ({e})"))
+        std::fs::remove_dir_all(&canonical)
+            .map_err(|e| ToolError::new(format!("remove failed: {path} ({e})")))
     } else {
-        Err(format!("not found: {path}"))
+        Err(ToolError::new(format!("not found: {path}")))
     }
 }
 
@@ -289,18 +332,19 @@ pub(crate) fn tool_remove(path: &str, sandbox: &dyn SandboxPolicy) -> Result<(),
 ///
 /// Both source and destination are validated through the sandbox.
 /// Creates destination parent directories if they don't exist.
-pub(crate) fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), String> {
-    let src_canonical = sandbox.validate_read(src).map_err(|e| e.to_string())?;
-    let dst_target = sandbox.validate_write(dst).map_err(|e| e.to_string())?;
+pub(crate) fn tool_mv(src: &str, dst: &str, sandbox: &dyn SandboxPolicy) -> Result<(), ToolError> {
+    let src_canonical = sandbox_check(sandbox.validate_read(src), src, "mv")?;
+    let dst_target = sandbox_check(sandbox.validate_write(dst), dst, "mv")?;
 
     // Ensure destination parent exists
     if let Some(parent) = dst_target.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create parent directory: {e}"))?;
+            .map_err(|e| ToolError::new(format!("cannot create parent directory: {e}")))?;
     }
 
     std::fs::rename(&src_canonical, &dst_target)
-        .map_err(|e| format!("mv failed: {src} -> {dst} ({e})"))
+        .map_err(|e| ToolError::new(format!("mv failed: {src} -> {dst} ({e})")))?;
+    Ok(())
 }
 
 // ─── Lua Registration ───────────────────────────────────────────────────
@@ -1129,6 +1173,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should fail for directory")
+            .message()
             .contains("not a file"));
     }
 
@@ -1139,6 +1184,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should deny access outside root")
+            .message()
             .contains("access denied"));
     }
 
@@ -1221,6 +1267,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should deny write outside root")
+            .message()
             .contains("access denied"));
     }
 
@@ -1287,6 +1334,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should fail for invalid regex")
+            .message()
             .contains("invalid regex"));
     }
 
@@ -1315,6 +1363,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should deny grep outside root")
+            .message()
             .contains("access denied"));
     }
 
@@ -1383,6 +1432,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .expect_err("should deny glob outside root")
+            .message()
             .contains("access denied"));
     }
 
@@ -1394,6 +1444,7 @@ mod tests {
         assert!(
             result
                 .expect_err("should reject dotdot pattern")
+                .message()
                 .contains("'..'"),
             "expected dotdot rejection"
         );
@@ -1577,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_read_outside_sandbox_returns_error() {
+    fn lua_read_outside_sandbox_triggers_suspended() {
         let (_td, _root, sandbox) = test_sandbox();
         let lua = Lua::new();
         let orcs = lua.create_table().expect("should create orcs table");
@@ -1586,17 +1637,21 @@ mod tests {
             .expect("should set orcs global");
         register_tool_functions(&lua, sandbox).expect("should register tool functions");
 
-        let result: Table = lua
+        // Sandbox boundary violation should trigger HIL Suspended flow,
+        // not return {ok: false, error: "..."}
+        let err = lua
             .load(r#"return orcs.read("/etc/hosts")"#)
-            .eval()
-            .expect("should eval lua read for outside sandbox");
-        assert!(!result.get::<bool>("ok").expect("should have ok field"));
-        let error = result
-            .get::<String>("error")
-            .expect("should have error field");
+            .eval::<Table>()
+            .expect_err("should return Lua error for sandbox boundary violation");
+
+        let err_str = format!("{err:?}");
         assert!(
-            error.contains("access denied"),
-            "expected 'access denied', got: {error}"
+            err_str.contains("Suspended"),
+            "expected Suspended error, got: {err_str}"
+        );
+        assert!(
+            err_str.contains("sandbox:read:"),
+            "expected sandbox grant pattern, got: {err_str}"
         );
     }
 
