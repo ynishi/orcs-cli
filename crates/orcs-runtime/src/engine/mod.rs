@@ -78,5 +78,6 @@ mod error;
 mod eventbus;
 
 pub use engine::OrcsEngine;
+pub(crate) use engine::RunnerExitNotice;
 pub use error::EngineError;
 pub use eventbus::{ComponentHandle, EventBus, SharedChannelHandles, SharedComponentChannelMap};

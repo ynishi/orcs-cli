@@ -65,11 +65,11 @@ const RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// The monitor task receives these to detect unexpected runner terminations
 /// during normal operation (before Veto/shutdown).
 #[derive(Debug)]
-struct RunnerExitNotice {
-    channel_id: ChannelId,
-    component_fqn: String,
+pub(crate) struct RunnerExitNotice {
+    pub(crate) channel_id: ChannelId,
+    pub(crate) component_fqn: String,
     /// Why the runner exited. Forwarded from [`RunnerResult::exit_reason`].
-    exit_reason: crate::channel::ExitReason,
+    pub(crate) exit_reason: crate::channel::ExitReason,
 }
 
 /// OrcsEngine - Main runtime for ORCS CLI.
@@ -319,7 +319,7 @@ impl OrcsEngine {
     ) -> ChannelHandle {
         let component_id = component.id().clone();
         let signal_rx = self.signal_tx.subscribe();
-        let builder = ChannelRunner::builder(
+        let mut builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
@@ -327,6 +327,10 @@ impl OrcsEngine {
             component,
         )
         .with_request_channel();
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
+        }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))
             .build();
@@ -506,7 +510,7 @@ impl OrcsEngine {
         let component_id = component.id().clone();
 
         // Build runner with auth
-        let builder = ChannelRunner::builder(
+        let mut builder = ChannelRunner::builder(
             channel_id,
             self.world_tx.clone(),
             Arc::clone(&self.world_read),
@@ -520,6 +524,10 @@ impl OrcsEngine {
         .with_session_arc(session)
         .with_checker(checker)
         .with_request_channel();
+        if let Some(sandbox) = &self.sandbox {
+            builder = builder.with_sandbox(Arc::clone(sandbox));
+        }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))
             .build();
@@ -646,6 +654,7 @@ impl OrcsEngine {
         if let Some(sandbox) = &self.sandbox {
             builder = builder.with_sandbox(Arc::clone(sandbox));
         }
+        builder = builder.with_runner_exit_tx(self.runner_exit_tx.clone());
 
         let (runner, handle) = self
             .apply_mcp_manager(self.apply_hook_registry(builder))

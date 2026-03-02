@@ -448,6 +448,8 @@ pub struct ChannelRunner {
     pending_approval: Option<PendingApproval>,
     /// Sandbox policy for dynamic path grants after HIL approval.
     sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
+    /// Runner exit notification sender for child-spawned runner lifecycle events.
+    runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -598,14 +600,21 @@ impl ChannelRunner {
         Some(Box::new(ctx))
     }
 
-    /// Injects RPC support (shared handles + channel map + channel ID)
-    /// into a ChildContextImpl if the runner was built with RPC resources.
-    fn inject_rpc(&self, ctx: ChildContextImpl) -> ChildContextImpl {
+    /// Injects RPC support and sandbox into a ChildContextImpl.
+    ///
+    /// Propagates shared handles, channel map, and sandbox policy so that
+    /// dynamically created child contexts participate in RPC and sandbox HIL.
+    fn inject_rpc(&self, mut ctx: ChildContextImpl) -> ChildContextImpl {
         if let (Some(handles), Some(map)) = (&self.shared_handles, &self.component_channel_map) {
-            ctx.with_rpc_support(handles.clone(), map.clone(), self.id)
-        } else {
-            ctx
+            ctx = ctx.with_rpc_support(handles.clone(), map.clone(), self.id);
         }
+        if let Some(sandbox) = &self.sandbox {
+            ctx = ctx.with_sandbox(Arc::clone(sandbox));
+        }
+        if let Some(tx) = &self.runner_exit_tx {
+            ctx = ctx.with_runner_exit_tx(tx.clone());
+        }
+        ctx
     }
 
     /// Returns a reference to the child spawner, if enabled.
@@ -1453,6 +1462,8 @@ pub struct ChannelRunnerBuilder {
     component_config: serde_json::Value,
     /// Sandbox policy for dynamic path grants after HIL approval.
     sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
+    /// Runner exit notification sender (propagated to child contexts for lifecycle events).
+    runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
 }
 
 impl ChannelRunnerBuilder {
@@ -1488,6 +1499,7 @@ impl ChannelRunnerBuilder {
             mcp_manager: None,
             component_config: serde_json::Value::Object(serde_json::Map::new()),
             sandbox: None,
+            runner_exit_tx: None,
         }
     }
 
@@ -1696,6 +1708,19 @@ impl ChannelRunnerBuilder {
         self
     }
 
+    /// Sets the runner exit notification sender.
+    ///
+    /// Propagated to child contexts so that child-spawned runners can notify
+    /// the engine monitor on exit, enabling `Lifecycle::runner_exited` events.
+    #[must_use]
+    pub(crate) fn with_runner_exit_tx(
+        mut self,
+        tx: mpsc::UnboundedSender<crate::engine::RunnerExitNotice>,
+    ) -> Self {
+        self.runner_exit_tx = Some(tx);
+        self
+    }
+
     /// Configures auth (session/checker/grants) and IO output routing on a [`ChildContextImpl`].
     ///
     /// Extracted from `build()` to eliminate duplication between the child-spawner
@@ -1742,6 +1767,12 @@ impl ChannelRunnerBuilder {
         }
         if let Some(mgr) = &self.mcp_manager {
             ctx = ctx.with_mcp_manager(Arc::clone(mgr));
+        }
+        if let Some(sandbox) = &self.sandbox {
+            ctx = ctx.with_sandbox(Arc::clone(sandbox));
+        }
+        if let Some(tx) = &self.runner_exit_tx {
+            ctx = ctx.with_runner_exit_tx(tx.clone());
         }
         ctx
     }
@@ -1936,6 +1967,7 @@ impl ChannelRunnerBuilder {
             io_output_tx: io_output_tx.clone(),
             pending_approval: None,
             sandbox: self.sandbox.clone(),
+            runner_exit_tx: self.runner_exit_tx.clone(),
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);
