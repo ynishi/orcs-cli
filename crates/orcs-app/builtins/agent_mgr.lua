@@ -95,6 +95,8 @@
 -- | llm_temperature   | number                            | (none)           | Sampling temperature               |
 -- | llm_max_tokens    | number                            | (none)           | Max completion tokens              |
 -- | llm_timeout       | number                            | 120              | Request timeout (seconds)          |
+-- | llm_max_tool_turns| number                            | 10               | Max tool turns for concierge       |
+-- | delegate_max_tool_turns | number                      | llm_max_tool_turns | Max tool turns for delegate workers|
 -- | agents            | table { [name] = agent_config }   | {}               | Config-based agent definitions     |
 --
 -- ### agents.<name> sub-table
@@ -1230,12 +1232,14 @@ return {
                     )
                 end
 
-                -- Auto-dispatch to concierge so it can report the delegation result.
-                -- dispatch_llm() calls fetch_delegation_context() which picks up
-                -- the just-stored result, then emits AgentTask (fire-and-forget).
+                -- Auto-dispatch to concierge with the delegation result inline.
+                -- The concierge uses session resume (message-only, no full prompt rebuild),
+                -- so the delegate's summary must be embedded in the message itself.
                 local status = payload.success and "completed" or "failed"
-                dispatch_llm("[Delegate " .. request_id .. " " .. status
-                    .. "] Review the delegation result and briefly report to the user.")
+                local summary = payload.summary or payload.error or "(no details)"
+                dispatch_llm("[Delegate " .. request_id .. " " .. status .. "]\n"
+                    .. summary .. "\n\n"
+                    .. "Briefly report this result to the user.")
             end
             return { success = true }
         end
@@ -1389,8 +1393,14 @@ return {
             delegation_counter = delegation_counter + 1
             local request_id = string.format("d%03d", delegation_counter)
 
-            -- Extract LLM config for the delegate
+            -- Extract LLM config for the delegate.
+            -- delegate_max_tool_turns overrides llm_max_tool_turns for delegate workers,
+            -- allowing concierge (coordinator, few turns) and delegates (implementer, more turns)
+            -- to have independent tool-turn budgets.
             local llm_config = extract_llm_config()
+            if component_settings.delegate_max_tool_turns ~= nil then
+                llm_config.max_tool_turns = component_settings.delegate_max_tool_turns
+            end
 
             -- Resolve delegate_backend FQN (independent from concierge)
             local delegate_backend = component_settings.delegate_backend

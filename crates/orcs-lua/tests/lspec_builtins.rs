@@ -257,7 +257,7 @@ fn concierge_component() {
                 c.on_request({{ operation = "process", payload = {{ message = "hi" }} }})
                 local r = c.on_request({{ operation = "status", payload = {{}} }})
                 expect(r.data.turn_count).to.equal(1)
-                expect(r.data.session_id).to.equal("sess-1")
+                -- session_id is returned in process response, not in status
                 expect(r.data.busy).to.equal(false)
             end)
         end)
@@ -376,15 +376,17 @@ fn concierge_component() {
             end)
         end)
 
-        describe('concierge process (session resume)', function()
-            it('skips prompt assembly on second call', function()
+        describe('concierge process (full rebuild per turn)', function()
+            it('rebuilds full prompt on every call (no session resume)', function()
                 local c, m = fresh_concierge()
                 c.on_request({{ operation = "process", payload = {{ message = "first" }} }})
                 local first_request_count = #m.request_calls
                 c.on_request({{ operation = "process", payload = {{ message = "second" }} }})
-                -- No new RPC calls (session resume path)
-                expect(#m.request_calls).to.equal(first_request_count)
-                expect(m.last_llm_opts.session_id).to.equal("sess-1")
+                -- Every turn rebuilds context: foundation + metrics + skills RPCs fire again
+                expect(#m.request_calls > first_request_count).to.equal(true)
+                -- Concierge does NOT use session resume (full prompt per turn),
+                -- so session_id is NOT set in llm opts
+                expect(m.last_llm_opts.session_id).to.equal(nil)
             end)
         end)
 
