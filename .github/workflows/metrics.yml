@@ -1,0 +1,133 @@
+name: Metrics
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Reports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ── Install tools ──
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install codedash
+        run: cargo install codedash --locked
+
+      # ── Coverage (JSON + HTML) ──
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --workspace --json --output-path coverage.json
+          cargo llvm-cov --workspace --html --output-dir coverage-html
+
+      # ── Codedash reports ──
+      - name: Generate codedash view
+        run: codedash view . --cov-file coverage.json -o codedash-view.html
+
+      - name: Generate codedash JSON
+        run: codedash analyze . --cov-file coverage.json -o json > codedash-metrics.json
+
+      # ── Benchmarks ──
+      - name: Run benchmarks
+        run: cargo bench --workspace
+
+      # ── Assemble site ──
+      - name: Assemble GitHub Pages site
+        run: |
+          mkdir -p _site/coverage _site/benchmarks
+
+          # Codedash module map
+          cp codedash-view.html _site/
+
+          # Coverage HTML
+          cp -r coverage-html/html/* _site/coverage/
+
+          # Criterion HTML reports
+          if [ -d target/criterion/report ]; then
+            cp -r target/criterion/report/* _site/benchmarks/
+          fi
+
+          # Metrics JSON (for programmatic access)
+          cp codedash-metrics.json _site/
+          cp coverage.json _site/
+
+          # TODO: Replace with `codedash badge` when ynishi/codedash#1 lands
+          # codedash badge . --cov-file coverage.json -o _site/badges/
+
+          # Index page
+          cat > _site/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>orcs-cli — Metrics Dashboard</title>
+            <style>
+              :root{--bg:#0d1117;--bg2:#161b22;--fg:#c9d1d9;--fg2:#8b949e;--border:#30363d;--accent:#58a6ff}
+              body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,sans-serif;max-width:720px;margin:40px auto;padding:0 20px}
+              h1{font-size:24px;margin-bottom:8px}
+              .sub{color:var(--fg2);margin-bottom:32px;font-size:14px}
+              a{color:var(--accent);text-decoration:none}
+              a:hover{text-decoration:underline}
+              .card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:20px;margin:12px 0;display:flex;justify-content:space-between;align-items:center}
+              .card h2{font-size:16px;margin:0}
+              .card p{color:var(--fg2);font-size:13px;margin:4px 0 0}
+              .arrow{color:var(--fg2);font-size:20px}
+              .ts{color:var(--fg2);font-size:12px;margin-top:32px}
+            </style>
+          </head>
+          <body>
+            <h1>orcs-cli</h1>
+            <div class="sub">Metrics Dashboard</div>
+            <a href="codedash-view.html">
+              <div class="card"><div><h2>Module Map</h2><p>Interactive dependency graph with coverage overlay</p></div><span class="arrow">→</span></div>
+            </a>
+            <a href="coverage/index.html">
+              <div class="card"><div><h2>Coverage Report</h2><p>Line-level coverage from cargo-llvm-cov</p></div><span class="arrow">→</span></div>
+            </a>
+            <a href="benchmarks/index.html">
+              <div class="card"><div><h2>Benchmarks</h2><p>Criterion performance reports</p></div><span class="arrow">→</span></div>
+            </a>
+            <a href="codedash-metrics.json">
+              <div class="card"><div><h2>Metrics JSON</h2><p>Raw codedash analysis data</p></div><span class="arrow">→</span></div>
+            </a>
+            <div class="ts">Updated on each push to main</div>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+

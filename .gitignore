@@ -6,7 +6,7 @@ target/
 .env
 
 # Tools / artifacts
-.codedash.lua
+codedash-view.html
 .ryo
 .DS_Store
 tmp/

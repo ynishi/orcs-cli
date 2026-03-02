@@ -1,0 +1,92 @@
+name: PR Metrics
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Metrics Comment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install codedash
+        run: cargo install codedash --locked
+
+      - name: Generate metrics
+        run: |
+          cargo llvm-cov --workspace --json --output-path coverage.json
+          codedash analyze . --cov-file coverage.json -o json > metrics.json
+
+      - name: Build comment body
+        id: body
+        run: |
+          BODY=$(python3 <<'PYEOF'
+          import json
+
+          cov = json.load(open("coverage.json"))
+          met = json.load(open("metrics.json"))
+
+          totals = cov["data"][0]["totals"]
+          line_pct = totals["lines"]["percent"]
+          fn_pct = totals["functions"]["percent"]
+          region_pct = totals["regions"]["percent"]
+
+          entries = met["entries"]
+          total = met["total"]
+          groups = met["groups"]
+
+          # High complexity
+          high_cyclo = [e for e in entries if e.get("cyclomatic", 0) >= 15]
+          # Large functions
+          large_fn = [e for e in entries if e.get("lines", 0) >= 100]
+
+          lines = []
+          lines.append("## Code Metrics")
+          lines.append("")
+          lines.append("| Metric | Value |")
+          lines.append("|---|---|")
+          lines.append(f"| Code units | {total} |")
+          lines.append(f"| Line coverage | {line_pct:.1f}% |")
+          lines.append(f"| Function coverage | {fn_pct:.1f}% |")
+          lines.append(f"| Region coverage | {region_pct:.1f}% |")
+          lines.append(f"| High complexity (cyclo>=15) | {len(high_cyclo)} |")
+          lines.append(f"| Large functions (>=100 lines) | {len(large_fn)} |")
+          lines.append("")
+
+          # Domain breakdown
+          lines.append("<details><summary>Domain breakdown</summary>")
+          lines.append("")
+          lines.append("| Domain | Nodes | % |")
+          lines.append("|---|---|---|")
+          for g in sorted(groups, key=lambda x: x.get("count", 0), reverse=True):
+              pct = g["count"] / total * 100 if total else 0
+              lines.append(f"| {g['name']} | {g['count']} | {pct:.1f}% |")
+          lines.append("")
+          lines.append("</details>")
+
+          print("\n".join(lines))
+          PYEOF
+          )
+
+          # Write to file to avoid shell escaping issues
+          echo "$BODY" > /tmp/pr-comment.md
+
+      - name: Post comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: codedash-metrics
+          path: /tmp/pr-comment.md
