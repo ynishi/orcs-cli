@@ -51,7 +51,7 @@ fn ext_cat() -> EventCategory {
 }
 
 /// Helper: register a sample skill and return the harness
-fn register_sample(harness: &mut LuaTestHarness) -> serde_json::Value {
+async fn register_sample(harness: &mut LuaTestHarness) -> serde_json::Value {
     harness
         .request(
             ext_cat(),
@@ -67,6 +67,7 @@ fn register_sample(harness: &mut LuaTestHarness) -> serde_json::Value {
                 }
             }),
         )
+        .await
         .expect("register sample skill should succeed")
 }
 
@@ -77,14 +78,14 @@ fn register_sample(harness: &mut LuaTestHarness) -> serde_json::Value {
 mod lifecycle {
     use super::*;
 
-    #[test]
-    fn load_skill_manager_component() {
+    #[tokio::test]
+    async fn load_skill_manager_component() {
         let (_td, harness) = skill_harness();
         assert_eq!(harness.id().name, "skill_manager");
     }
 
-    #[test]
-    fn init_and_shutdown() {
+    #[tokio::test]
+    async fn init_and_shutdown() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         // After a request completes, status returns to Idle
@@ -92,12 +93,12 @@ mod lifecycle {
         harness.shutdown();
     }
 
-    #[test]
-    fn veto_aborts() {
+    #[tokio::test]
+    async fn veto_soft_cancel() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
         let response = harness.veto();
-        assert_eq!(response, SignalResponse::Abort);
+        assert_eq!(response, SignalResponse::Handled);
     }
 }
 
@@ -108,8 +109,8 @@ mod lifecycle {
 mod status {
     use super::*;
 
-    #[test]
-    fn status_returns_initial_state() {
+    #[tokio::test]
+    async fn status_returns_initial_state() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -117,6 +118,7 @@ mod status {
         // The harness extracts `data` on success.
         let result = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status request should succeed");
 
         assert_eq!(result["total"], 0);
@@ -132,18 +134,19 @@ mod status {
 mod registry {
     use super::*;
 
-    #[test]
-    fn register_and_list() {
+    #[tokio::test]
+    async fn register_and_list() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         // Register returns { success = true, data = { count = 1 } }
-        let result = register_sample(&mut harness);
+        let result = register_sample(&mut harness).await;
         assert_eq!(result["count"], 1);
 
         // List returns { success = true, data = entries, count = #entries }
         let result = harness
             .request(ext_cat(), "list", json!({}))
+            .await
             .expect("list request should succeed");
         // data is the entries array
         assert!(result.is_array());
@@ -157,12 +160,12 @@ mod registry {
         assert_eq!(result[0]["name"], "test-skill");
     }
 
-    #[test]
-    fn register_duplicate_fails() {
+    #[tokio::test]
+    async fn register_duplicate_fails() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
-        register_sample(&mut harness);
+        register_sample(&mut harness).await;
 
         // Second register should return Err
         let err = harness
@@ -180,54 +183,59 @@ mod registry {
                     }
                 }),
             )
+            .await
             .expect_err("duplicate register should return error");
         assert!(err.to_string().contains("already registered"));
     }
 
-    #[test]
-    fn get_skill() {
+    #[tokio::test]
+    async fn get_skill() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_sample(&mut harness);
+        register_sample(&mut harness).await;
 
         let result = harness
             .request(ext_cat(), "get", json!({ "name": "test-skill" }))
+            .await
             .expect("get request for existing skill should succeed");
         assert_eq!(result["name"], "test-skill");
         assert_eq!(result["description"], "A test skill");
     }
 
-    #[test]
-    fn get_nonexistent_returns_error() {
+    #[tokio::test]
+    async fn get_nonexistent_returns_error() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
             .request(ext_cat(), "get", json!({ "name": "nonexistent" }))
+            .await
             .expect_err("get nonexistent skill should return error");
         assert!(err.to_string().contains("not found"));
     }
 
-    #[test]
-    fn unregister_skill() {
+    #[tokio::test]
+    async fn unregister_skill() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_sample(&mut harness);
+        register_sample(&mut harness).await;
 
         // Unregister
         let _ = harness
             .request(ext_cat(), "unregister", json!({ "name": "test-skill" }))
+            .await
             .expect("unregister request should succeed");
 
         // Verify it's gone via status
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status request should succeed after unregister");
         assert_eq!(status["total"], 0);
     }
 
-    #[test]
-    fn search_by_name() {
+    #[tokio::test]
+    async fn search_by_name() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -246,6 +254,7 @@ mod registry {
                     }
                 }),
             )
+            .await
             .expect("register deploy-prod should succeed");
 
         harness
@@ -263,11 +272,13 @@ mod registry {
                     }
                 }),
             )
+            .await
             .expect("register code-review should succeed");
 
         // Search by name
         let result = harness
             .request(ext_cat(), "search", json!({ "query": "deploy" }))
+            .await
             .expect("search request should succeed");
         assert!(result.is_array());
         assert_eq!(
@@ -280,8 +291,8 @@ mod registry {
         assert_eq!(result[0]["name"], "deploy-prod");
     }
 
-    #[test]
-    fn select_relevant_skills() {
+    #[tokio::test]
+    async fn select_relevant_skills() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -314,6 +325,7 @@ mod registry {
                         }
                     }),
                 )
+                .await
                 .expect("register topic skill should succeed");
         }
 
@@ -324,6 +336,7 @@ mod registry {
                 "select",
                 json!({ "query": "deploy", "limit": 5 }),
             )
+            .await
             .expect("select request for 'deploy' should succeed");
         assert!(result.is_array());
         let arr = result.as_array().expect("select result should be an array");
@@ -337,8 +350,8 @@ mod registry {
         assert!(names.contains(&"deploy-staging"));
     }
 
-    #[test]
-    fn select_respects_limit() {
+    #[tokio::test]
+    async fn select_respects_limit() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -359,12 +372,14 @@ mod registry {
                         }
                     }),
                 )
+                .await
                 .expect("register tool skill should succeed");
         }
 
         // Select with limit=2
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "tool", "limit": 2 }))
+            .await
             .expect("select request with limit should succeed");
         assert!(result.is_array());
         assert_eq!(
@@ -376,8 +391,8 @@ mod registry {
         );
     }
 
-    #[test]
-    fn select_empty_query_returns_first_n() {
+    #[tokio::test]
+    async fn select_empty_query_returns_first_n() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -397,12 +412,14 @@ mod registry {
                         }
                     }),
                 )
+                .await
                 .expect("register skill for empty query test should succeed");
         }
 
         // Empty query returns first N
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "", "limit": 2 }))
+            .await
             .expect("select with empty query should succeed");
         assert!(result.is_array());
         assert_eq!(
@@ -414,14 +431,15 @@ mod registry {
         );
     }
 
-    #[test]
-    fn select_no_match_returns_empty() {
+    #[tokio::test]
+    async fn select_no_match_returns_empty() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_sample(&mut harness);
+        register_sample(&mut harness).await;
 
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "zzz_nomatch_zzz" }))
+            .await
             .expect("select with no-match query should succeed with empty result");
         // Empty Lua table {} → JSON object {} (not array [])
         let is_empty = match &result {
@@ -440,7 +458,7 @@ mod registry {
 mod catalog {
     use super::*;
 
-    fn register_n_skills(harness: &mut LuaTestHarness, n: usize) {
+    async fn register_n_skills(harness: &mut LuaTestHarness, n: usize) {
         for i in 0..n {
             harness
                 .request(
@@ -457,31 +475,34 @@ mod catalog {
                         }
                     }),
                 )
+                .await
                 .expect("register skill for catalog test should succeed");
         }
     }
 
-    #[test]
-    fn render_catalog_empty() {
+    #[tokio::test]
+    async fn render_catalog_empty() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let result = harness
             .request(ext_cat(), "catalog", json!({}))
+            .await
             .expect("catalog request on empty registry should succeed");
         // catalog returns { success = true, data = { catalog = text, stats = {...} } }
         assert!(result["catalog"].is_string());
         assert!(result["stats"].is_object());
     }
 
-    #[test]
-    fn render_catalog_with_skills() {
+    #[tokio::test]
+    async fn render_catalog_with_skills() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_n_skills(&mut harness, 3);
+        register_n_skills(&mut harness, 3).await;
 
         let result = harness
             .request(ext_cat(), "catalog", json!({}))
+            .await
             .expect("catalog request with skills should succeed");
         assert!(result["catalog"].is_string());
         let catalog_text = result["catalog"]
@@ -499,24 +520,26 @@ mod catalog {
 mod errors {
     use super::*;
 
-    #[test]
-    fn unknown_operation_returns_error() {
+    #[tokio::test]
+    async fn unknown_operation_returns_error() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
             .request(ext_cat(), "nonexistent_op", json!({}))
+            .await
             .expect_err("unknown operation should return error");
         assert!(err.to_string().contains("unknown operation"));
     }
 
-    #[test]
-    fn missing_required_name() {
+    #[tokio::test]
+    async fn missing_required_name() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
             .request(ext_cat(), "get", json!({}))
+            .await
             .expect_err("get without required name should return error");
         assert!(err.to_string().contains("required"));
     }
@@ -531,7 +554,7 @@ mod recommend {
 
     /// Register multiple topic-specific skills for recommend tests.
     /// Skills include body so activate() skips file I/O.
-    fn register_topic_skills(harness: &mut LuaTestHarness) {
+    async fn register_topic_skills(harness: &mut LuaTestHarness) {
         for (name, desc, tags) in [
             (
                 "requirements-analysis",
@@ -575,22 +598,25 @@ mod recommend {
                         }
                     }),
                 )
+                .await
                 .expect("register should succeed");
 
             // Activate (L2) — body is pre-set so no file I/O
             harness
                 .request(ext_cat(), "activate", json!({ "name": name }))
+                .await
                 .expect("activate should succeed");
         }
     }
 
-    #[test]
-    fn recommend_missing_intent_returns_error() {
+    #[tokio::test]
+    async fn recommend_missing_intent_returns_error() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         let err = harness
             .request(ext_cat(), "recommend", json!({}))
+            .await
             .expect_err("recommend without intent should return error");
         assert!(
             err.to_string().contains("intent"),
@@ -598,8 +624,8 @@ mod recommend {
         );
     }
 
-    #[test]
-    fn recommend_empty_registry_returns_empty() {
+    #[tokio::test]
+    async fn recommend_empty_registry_returns_empty() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
@@ -609,6 +635,7 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "build a feature" }),
             )
+            .await
             .expect("recommend should succeed with empty registry");
 
         // Empty active skills → immediate empty return (no LLM call)
@@ -626,11 +653,11 @@ mod recommend {
     /// In test harness, orcs.llm() returns deny-by-default error.
     /// handle_recommend falls back to keyword-based select.
     /// This verifies the fallback path returns relevant skills.
-    #[test]
-    fn recommend_fallback_returns_relevant_skills() {
+    #[tokio::test]
+    async fn recommend_fallback_returns_relevant_skills() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // Intent about "deploy" → fallback select should find deploy-prod
         let result = harness
@@ -639,6 +666,7 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "deploy to production", "limit": 3 }),
             )
+            .await
             .expect("recommend should succeed via fallback");
 
         assert!(result.is_array(), "expected array, got: {result}");
@@ -656,11 +684,11 @@ mod recommend {
     }
 
     /// Verify fallback flag is set when LLM is unavailable.
-    #[test]
-    fn recommend_fallback_flag_is_set() {
+    #[tokio::test]
+    async fn recommend_fallback_flag_is_set() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // We need the raw response (including `fallback` field).
         // The harness extracts `data` on success, so `fallback` is at the
@@ -673,6 +701,7 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "rust testing", "limit": 5 }),
             )
+            .await
             .expect("recommend should succeed via fallback");
 
         assert!(result.is_array(), "expected array, got: {result}");
@@ -684,11 +713,11 @@ mod recommend {
         );
     }
 
-    #[test]
-    fn recommend_respects_limit() {
+    #[tokio::test]
+    async fn recommend_respects_limit() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // Empty intent → fallback select returns first N
         let result = harness
@@ -697,6 +726,7 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "dev", "limit": 2 }),
             )
+            .await
             .expect("recommend should succeed");
 
         assert!(result.is_array(), "expected array, got: {result}");
@@ -708,11 +738,11 @@ mod recommend {
         );
     }
 
-    #[test]
-    fn recommend_with_context() {
+    #[tokio::test]
+    async fn recommend_with_context() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // Include context — should still work via fallback
         let result = harness
@@ -725,6 +755,7 @@ mod recommend {
                     "limit": 5,
                 }),
             )
+            .await
             .expect("recommend with context should succeed");
 
         assert!(result.is_array(), "expected array, got: {result}");
@@ -737,14 +768,14 @@ mod recommend {
         );
     }
 
-    #[test]
-    fn recommend_disabled_by_config_falls_back_to_select() {
+    #[tokio::test]
+    async fn recommend_disabled_by_config_falls_back_to_select() {
         let (_td, mut harness) = skill_harness();
         // Init with recommend_skill = false
         harness
             .init_with_config(&json!({ "recommend_skill": false }))
             .expect("init with config should succeed");
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // recommend should still succeed via keyword fallback
         let result = harness
@@ -753,6 +784,7 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "deploy to production", "limit": 3 }),
             )
+            .await
             .expect("recommend should succeed via fallback");
 
         assert!(result.is_array(), "expected array, got: {result}");
@@ -763,14 +795,14 @@ mod recommend {
         );
     }
 
-    #[test]
-    fn recommend_enabled_by_default_without_config() {
+    #[tokio::test]
+    async fn recommend_enabled_by_default_without_config() {
         let (_td, mut harness) = skill_harness();
         // Init with empty config (default behavior)
         harness
             .init_with_config(&json!({}))
             .expect("init with empty config should succeed");
-        register_topic_skills(&mut harness);
+        register_topic_skills(&mut harness).await;
 
         // recommend should work (LLM fails in test → falls back to keyword)
         let result = harness
@@ -779,13 +811,14 @@ mod recommend {
                 "recommend",
                 json!({ "intent": "deploy", "limit": 3 }),
             )
+            .await
             .expect("recommend should succeed");
 
         assert!(result.is_array(), "expected array, got: {result}");
     }
 
-    #[test]
-    fn init_with_nil_config_works() {
+    #[tokio::test]
+    async fn init_with_nil_config_works() {
         let (_td, mut harness) = skill_harness();
         // Init without config (nil → same as no config)
         harness.init().expect("init without config should succeed");
@@ -820,8 +853,8 @@ mod file_io {
         fs::write(skill_dir.join("skill.lua"), content).expect("should write skill.lua");
     }
 
-    #[test]
-    fn discover_agent_skills_from_directory() {
+    #[tokio::test]
+    async fn discover_agent_skills_from_directory() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -837,6 +870,7 @@ mod file_io {
                 "discover",
                 json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover agent skills should succeed");
 
         assert_eq!(result["discovered"], 2);
@@ -845,6 +879,7 @@ mod file_io {
         // Verify via list
         let list = harness
             .request(ext_cat(), "list", json!({}))
+            .await
             .expect("list request should succeed after discover");
         assert!(list.is_array());
         assert_eq!(
@@ -855,8 +890,8 @@ mod file_io {
         );
     }
 
-    #[test]
-    fn discover_lua_dsl_skill() {
+    #[tokio::test]
+    async fn discover_lua_dsl_skill() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -869,6 +904,7 @@ mod file_io {
                 "discover",
                 json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover lua dsl skill should succeed");
 
         assert_eq!(result["discovered"], 1);
@@ -877,14 +913,15 @@ mod file_io {
         // Verify via get
         let skill = harness
             .request(ext_cat(), "get", json!({ "name": "my-tool" }))
+            .await
             .expect("get my-tool should succeed after discover");
         assert_eq!(skill["name"], "my-tool");
         assert_eq!(skill["description"], "A custom Lua tool");
         assert_eq!(skill["source"]["format"], "lua-dsl");
     }
 
-    #[test]
-    fn discover_mixed_formats() {
+    #[tokio::test]
+    async fn discover_mixed_formats() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -898,6 +935,7 @@ mod file_io {
                 "discover",
                 json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover mixed formats should succeed");
 
         assert_eq!(result["discovered"], 2);
@@ -906,12 +944,13 @@ mod file_io {
         // Verify both exist
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status request should succeed after mixed discover");
         assert_eq!(status["total"], 2);
     }
 
-    #[test]
-    fn discover_empty_directory() {
+    #[tokio::test]
+    async fn discover_empty_directory() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -924,14 +963,15 @@ mod file_io {
                 "discover",
                 json!({ "path": empty_dir.to_str().expect("empty_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover on empty directory should succeed");
 
         assert_eq!(result["discovered"], 0);
         assert_eq!(result["registered"], 0);
     }
 
-    #[test]
-    fn discover_then_catalog() {
+    #[tokio::test]
+    async fn discover_then_catalog() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -947,11 +987,13 @@ mod file_io {
                 "discover",
                 json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover for catalog test should succeed");
 
         // Catalog should include all discovered skills
         let catalog = harness
             .request(ext_cat(), "catalog", json!({}))
+            .await
             .expect("catalog request after discover should succeed");
         let text = catalog["catalog"]
             .as_str()
@@ -966,8 +1008,8 @@ mod file_io {
         assert_eq!(stats["shown"], 3);
     }
 
-    #[test]
-    fn detect_format_agent_skills() {
+    #[tokio::test]
+    async fn detect_format_agent_skills() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -980,12 +1022,13 @@ mod file_io {
                 "detect_format",
                 json!({ "path": skill_dir.to_str().expect("skill_dir should be valid UTF-8") }),
             )
+            .await
             .expect("detect_format for agent-skills should succeed");
         assert_eq!(result["format"], "agent-skills");
     }
 
-    #[test]
-    fn detect_format_lua_dsl() {
+    #[tokio::test]
+    async fn detect_format_lua_dsl() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -998,14 +1041,15 @@ mod file_io {
                 "detect_format",
                 json!({ "path": skill_dir.to_str().expect("skill_dir should be valid UTF-8") }),
             )
+            .await
             .expect("detect_format for lua-dsl should succeed");
         assert_eq!(result["format"], "lua-dsl");
     }
 
     /// End-to-end: discover multiple topic skills, then select by query.
     /// Verifies "rust" query returns rust-dev as top result.
-    #[test]
-    fn discover_then_select_by_topic() {
+    #[tokio::test]
+    async fn discover_then_select_by_topic() {
         let (_td, mut harness, root) = skill_harness_with_root();
         let _ = harness.init();
 
@@ -1051,6 +1095,7 @@ mod file_io {
                 "discover",
                 json!({ "path": skills_dir.to_str().expect("skills_dir should be valid UTF-8") }),
             )
+            .await
             .expect("discover topic skills should succeed");
         assert_eq!(disc["discovered"], 4);
         assert_eq!(disc["registered"], 4);
@@ -1058,6 +1103,7 @@ mod file_io {
         // Select with "rust" → rust-dev should be top
         let result = harness
             .request(ext_cat(), "select", json!({ "query": "rust", "limit": 3 }))
+            .await
             .expect("select for 'rust' should succeed");
         assert!(result.is_array(), "expected array, got: {result}");
         let arr = result.as_array().expect("select result should be an array");
@@ -1071,6 +1117,7 @@ mod file_io {
                 "select",
                 json!({ "query": "python", "limit": 3 }),
             )
+            .await
             .expect("select for 'python' should succeed");
         let arr = result.as_array().expect("select result should be an array");
         assert_eq!(
@@ -1085,6 +1132,7 @@ mod file_io {
                 "select",
                 json!({ "query": "deploy docker", "limit": 3 }),
             )
+            .await
             .expect("select for 'deploy docker' should succeed");
         let arr = result.as_array().expect("select result should be an array");
         assert_eq!(
@@ -1102,13 +1150,13 @@ mod snapshot_restore {
     use super::*;
     use orcs_component::Component;
 
-    #[test]
-    fn snapshot_returns_valid_data() {
+    #[tokio::test]
+    async fn snapshot_returns_valid_data() {
         let (_td, mut harness) = skill_harness();
         let _ = harness.init();
 
         // Register skills
-        register_sample(&mut harness);
+        register_sample(&mut harness).await;
         harness
             .request(
                 ext_cat(),
@@ -1124,6 +1172,7 @@ mod snapshot_restore {
                     }
                 }),
             )
+            .await
             .expect("register second-skill should succeed");
 
         // Take snapshot via Component trait
@@ -1152,8 +1201,8 @@ mod snapshot_restore {
         assert_eq!(skills.len(), 2, "should have 2 skills in snapshot");
     }
 
-    #[test]
-    fn snapshot_restore_roundtrip() {
+    #[tokio::test]
+    async fn snapshot_restore_roundtrip() {
         // Phase 1: Create and populate
         let (_td1, mut harness1) = skill_harness();
         let _ = harness1.init();
@@ -1179,12 +1228,14 @@ mod snapshot_restore {
                         }
                     }),
                 )
+                .await
                 .expect("register should succeed");
         }
 
         // Verify 3 skills registered
         let status1 = harness1
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(status1["total"], 3);
 
@@ -1209,6 +1260,7 @@ mod snapshot_restore {
         // Verify restored state
         let status2 = harness2
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(
             status2["total"], 3,
@@ -1219,6 +1271,7 @@ mod snapshot_restore {
         for name in ["alpha", "beta", "gamma"] {
             let result = harness2
                 .request(ext_cat(), "get", json!({ "name": name }))
+                .await
                 .unwrap_or_else(|_| panic!("get '{name}' should succeed"));
             assert_eq!(result["name"], name);
         }
@@ -1226,14 +1279,15 @@ mod snapshot_restore {
         // Verify search still works
         let result = harness2
             .request(ext_cat(), "search", json!({ "query": "beta" }))
+            .await
             .expect("search should succeed");
         assert!(result.is_array());
         assert_eq!(result.as_array().expect("should be array").len(), 1);
         assert_eq!(result[0]["name"], "beta");
     }
 
-    #[test]
-    fn snapshot_preserves_skill_descriptions() {
+    #[tokio::test]
+    async fn snapshot_preserves_skill_descriptions() {
         let (_td1, mut harness1) = skill_harness();
         let _ = harness1.init();
 
@@ -1252,6 +1306,7 @@ mod snapshot_restore {
                     }
                 }),
             )
+            .await
             .expect("register should succeed");
 
         let snapshot = harness1
@@ -1268,6 +1323,7 @@ mod snapshot_restore {
 
         let skill = harness2
             .request(ext_cat(), "get", json!({ "name": "detailed-skill" }))
+            .await
             .expect("get should succeed");
         assert_eq!(skill["name"], "detailed-skill");
         assert_eq!(
@@ -1276,8 +1332,8 @@ mod snapshot_restore {
         );
     }
 
-    #[test]
-    fn snapshot_empty_registry() {
+    #[tokio::test]
+    async fn snapshot_empty_registry() {
         let (_td1, mut harness1) = skill_harness();
         let _ = harness1.init();
 
@@ -1296,16 +1352,17 @@ mod snapshot_restore {
 
         let status = harness2
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(status["total"], 0);
     }
 
-    #[test]
-    fn operations_work_after_restore() {
+    #[tokio::test]
+    async fn operations_work_after_restore() {
         let (_td1, mut harness1) = skill_harness();
         let _ = harness1.init();
 
-        register_sample(&mut harness1);
+        register_sample(&mut harness1).await;
 
         let snapshot = harness1
             .component()
@@ -1335,20 +1392,24 @@ mod snapshot_restore {
                     }
                 }),
             )
+            .await
             .expect("register after restore should succeed");
 
         let status = harness2
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(status["total"], 2, "should have original + new skill");
 
         // Unregister should work
         harness2
             .request(ext_cat(), "unregister", json!({ "name": "test-skill" }))
+            .await
             .expect("unregister should succeed");
 
         let status = harness2
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(status["total"], 1);
     }

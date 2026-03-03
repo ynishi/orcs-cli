@@ -402,8 +402,25 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
     result.set("provider", provider.as_str())?;
     result.set("base_url", base_url.as_str())?;
 
-    match tokio::task::block_in_place(|| handle.block_on(req.send())) {
-        Ok(resp) => {
+    let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+    let send_result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            if let Some(mut rx) = cancel_rx {
+                tokio::select! {
+                    biased;
+                    _ = rx.changed() => None,
+                    result = req.send() => Some(result),
+                }
+            } else {
+                Some(req.send().await)
+            }
+        })
+    });
+    match send_result {
+        None => {
+            return Err(mlua::Error::RuntimeError("killed by veto".into()));
+        }
+        Some(Ok(resp)) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
             // ok=true means "server responded" (reachable). The caller should
@@ -412,7 +429,7 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
             result.set("status", status)?;
             result.set("latency_ms", latency.as_millis() as u64)?;
         }
-        Err(e) => {
+        Some(Err(e)) => {
             let latency = start.elapsed();
             result.set("latency_ms", latency.as_millis() as u64)?;
 
@@ -646,6 +663,16 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
     for tool_turn in 0..=remaining_budget {
         let global_turn = turn_offset + tool_turn;
 
+        // Check kill flag before each API call (Veto may have arrived
+        // after the previous in-flight response was already received).
+        if crate::kill_flag::is_killed(lua) {
+            tracing::info!(
+                tool_turn = global_turn,
+                "resolve loop: killed by veto before API call"
+            );
+            return Err(mlua::Error::RuntimeError("killed by veto".into()));
+        }
+
         // Check wall-clock deadline before each API call
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
@@ -696,8 +723,9 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         );
         tracing::debug!(turn = global_turn, "llm request body:\n{}", body_str);
 
-        // Send with retry
-        let resp = match send_with_retry(&client, &url, &llm_opts, &body_str) {
+        // Send with retry (cancel receiver enables cooperative Veto cancellation)
+        let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+        let resp = match send_with_retry(&client, &url, &llm_opts, &body_str, cancel_rx) {
             Ok(resp) => resp,
             Err(SendError::Transport(e)) => return build_error_result(lua, e, &session_id),
             Err(SendError::Classified { kind, message }) => {
@@ -737,6 +765,17 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
                 orcs_types::intent::Role::Assistant,
                 assistant_blocks,
             );
+
+            // Check kill flag before dispatching intents (Veto may have
+            // arrived while the LLM response was in-flight).
+            if crate::kill_flag::is_killed(lua) {
+                tracing::info!(
+                    tool_turn = global_turn,
+                    intents = parsed_resp.intents.len(),
+                    "resolve loop: killed by veto before intent dispatch"
+                );
+                return Err(mlua::Error::RuntimeError("killed by veto".into()));
+            }
 
             // Dispatch each intent and collect tool results.
             //

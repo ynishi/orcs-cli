@@ -70,14 +70,14 @@ fn sample_tools() -> Vec<serde_json::Value> {
 mod lifecycle {
     use super::*;
 
-    #[test]
-    fn load_mcp_manager_component() {
+    #[tokio::test]
+    async fn load_mcp_manager_component() {
         let (_td, harness) = mcp_harness();
         assert_eq!(harness.id().name, "mcp_manager");
     }
 
-    #[test]
-    fn init_with_mcp_mocks() {
+    #[tokio::test]
+    async fn init_with_mcp_mocks() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
         harness
@@ -85,21 +85,21 @@ mod lifecycle {
             .expect("init should succeed with MCP mocks injected");
     }
 
-    #[test]
-    fn init_and_shutdown() {
+    #[tokio::test]
+    async fn init_and_shutdown() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
         harness.init().expect("init should succeed");
         harness.shutdown();
     }
 
-    #[test]
-    fn veto_aborts() {
+    #[tokio::test]
+    async fn veto_soft_cancel() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
         harness.init().expect("init should succeed");
         let response = harness.veto();
-        assert_eq!(response, SignalResponse::Abort);
+        assert_eq!(response, SignalResponse::Handled);
     }
 }
 
@@ -110,8 +110,8 @@ mod lifecycle {
 mod status {
     use super::*;
 
-    #[test]
-    fn status_returns_server_and_tool_counts() {
+    #[tokio::test]
+    async fn status_returns_server_and_tool_counts() {
         let (_td, mut harness) = mcp_harness_with_mocks(
             vec!["outline".into(), "debugger".into()],
             sample_tools(),
@@ -121,6 +121,7 @@ mod status {
 
         let data = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(data["servers"], 2);
@@ -128,13 +129,14 @@ mod status {
         assert_eq!(data["initialized"], true);
     }
 
-    #[test]
-    fn status_with_no_servers() {
+    #[tokio::test]
+    async fn status_with_no_servers() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
         harness.init().expect("init should succeed");
 
         let data = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(data["servers"], 0);
@@ -149,8 +151,8 @@ mod status {
 mod list {
     use super::*;
 
-    #[test]
-    fn list_returns_connected_servers() {
+    #[tokio::test]
+    async fn list_returns_connected_servers() {
         let (_td, mut harness) = mcp_harness_with_mocks(
             vec!["outline".into(), "debugger".into()],
             sample_tools(),
@@ -159,6 +161,7 @@ mod list {
 
         let data = harness
             .request(ext_cat(), "list", json!({}))
+            .await
             .expect("list should succeed");
 
         // data is the servers array itself (handle_list returns {data = resp.servers, count = #})
@@ -176,13 +179,14 @@ mod list {
 mod get {
     use super::*;
 
-    #[test]
-    fn get_returns_tools_for_server() {
+    #[tokio::test]
+    async fn get_returns_tools_for_server() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "get", json!({"name": "outline"}))
+            .await
             .expect("get should succeed");
 
         assert_eq!(data["server"], "outline");
@@ -190,11 +194,11 @@ mod get {
         assert_eq!(data["tool_count"], 2);
     }
 
-    #[test]
-    fn get_missing_name_returns_error() {
+    #[tokio::test]
+    async fn get_missing_name_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "get", json!({}));
+        let result = harness.request(ext_cat(), "get", json!({})).await;
 
         assert!(result.is_err(), "get without name should fail");
     }
@@ -207,26 +211,28 @@ mod get {
 mod tools {
     use super::*;
 
-    #[test]
-    fn tools_returns_all_tools() {
+    #[tokio::test]
+    async fn tools_returns_all_tools() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "tools", json!({}))
+            .await
             .expect("tools should succeed");
 
         assert!(data.is_array(), "data should be array of tools");
         assert_eq!(data.as_array().expect("array").len(), 3);
     }
 
-    #[test]
-    fn tools_filters_by_server() {
+    #[tokio::test]
+    async fn tools_filters_by_server() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "tools", json!({"server": "debugger"}))
+            .await
             .expect("tools with filter should succeed");
 
         assert!(data.is_array(), "data should be array of tools");
@@ -241,39 +247,42 @@ mod tools {
 mod search {
     use super::*;
 
-    #[test]
-    fn search_by_name() {
+    #[tokio::test]
+    async fn search_by_name() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "search", json!({"query": "toc"}))
+            .await
             .expect("search should succeed");
 
         assert!(data.is_array(), "data should be array of matches");
         assert_eq!(data.as_array().expect("array").len(), 1);
     }
 
-    #[test]
-    fn search_by_description() {
+    #[tokio::test]
+    async fn search_by_description() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "search", json!({"query": "debug"}))
+            .await
             .expect("search should succeed");
 
         assert!(data.is_array(), "data should be array of matches");
         assert_eq!(data.as_array().expect("array").len(), 1);
     }
 
-    #[test]
-    fn search_no_match() {
+    #[tokio::test]
+    async fn search_no_match() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "search", json!({"query": "nonexistent_xyz"}))
+            .await
             .expect("search should succeed");
 
         // Empty Lua table `{}` may serialize as JSON object `{}` or array `[]`
@@ -285,11 +294,11 @@ mod search {
         assert_eq!(count, 0, "search should return no matches");
     }
 
-    #[test]
-    fn search_missing_query_returns_error() {
+    #[tokio::test]
+    async fn search_missing_query_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "search", json!({}));
+        let result = harness.request(ext_cat(), "search", json!({})).await;
 
         assert!(result.is_err(), "search without query should fail");
     }
@@ -302,8 +311,8 @@ mod search {
 mod run {
     use super::*;
 
-    #[test]
-    fn run_with_server_and_tool() {
+    #[tokio::test]
+    async fn run_with_server_and_tool() {
         let (_td, mut harness) = mcp_harness();
 
         let captured = harness.inject_mcp_mocks(
@@ -318,6 +327,7 @@ mod run {
                 "run",
                 json!({"server": "outline", "tool": "toc", "args": {}}),
             )
+            .await
             .expect("run should succeed");
 
         // data = {content = [{type="text", text="toc result"}]}
@@ -332,8 +342,8 @@ mod run {
         assert_eq!(calls[0]["tool"], "toc");
     }
 
-    #[test]
-    fn run_with_name_format_server_tool() {
+    #[tokio::test]
+    async fn run_with_name_format_server_tool() {
         let (_td, mut harness) = mcp_harness();
 
         let captured = harness.inject_mcp_mocks(
@@ -348,6 +358,7 @@ mod run {
                 "run",
                 json!({"name": "outline:toc", "args": {"key": "val"}}),
             )
+            .await
             .expect("run with server:tool format should succeed");
 
         let calls = captured.lock().expect("captured mutex");
@@ -355,8 +366,8 @@ mod run {
         assert_eq!(calls[0]["tool"], "toc");
     }
 
-    #[test]
-    fn run_with_name_format_mcp_server_tool() {
+    #[tokio::test]
+    async fn run_with_name_format_mcp_server_tool() {
         let (_td, mut harness) = mcp_harness();
 
         let captured = harness.inject_mcp_mocks(
@@ -367,6 +378,7 @@ mod run {
 
         let _data = harness
             .request(ext_cat(), "run", json!({"name": "mcp:outline:toc"}))
+            .await
             .expect("run with mcp:server:tool format should succeed");
 
         let calls = captured.lock().expect("captured mutex");
@@ -374,26 +386,30 @@ mod run {
         assert_eq!(calls[0]["tool"], "toc");
     }
 
-    #[test]
-    fn run_invalid_name_format_returns_error() {
+    #[tokio::test]
+    async fn run_invalid_name_format_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "run", json!({"name": "invalid"}));
+        let result = harness
+            .request(ext_cat(), "run", json!({"name": "invalid"}))
+            .await;
 
         assert!(result.is_err(), "run with invalid name should fail");
     }
 
-    #[test]
-    fn run_missing_server_and_tool_returns_error() {
+    #[tokio::test]
+    async fn run_missing_server_and_tool_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "run", json!({"server": "x"}));
+        let result = harness
+            .request(ext_cat(), "run", json!({"server": "x"}))
+            .await;
 
         assert!(result.is_err(), "run with missing tool should fail");
     }
 
-    #[test]
-    fn call_tool_alias_works() {
+    #[tokio::test]
+    async fn call_tool_alias_works() {
         let (_td, mut harness) = mcp_harness();
 
         let captured = harness.inject_mcp_mocks(
@@ -408,6 +424,7 @@ mod run {
                 "call_tool",
                 json!({"server": "outline", "tool": "toc", "args": {}}),
             )
+            .await
             .expect("call_tool alias should succeed");
 
         let calls = captured.lock().expect("captured mutex");
@@ -422,13 +439,14 @@ mod run {
 mod tool_descriptions {
     use super::*;
 
-    #[test]
-    fn tool_descriptions_returns_formatted_text() {
+    #[tokio::test]
+    async fn tool_descriptions_returns_formatted_text() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
         let data = harness
             .request(ext_cat(), "tool_descriptions", json!({}))
+            .await
             .expect("tool_descriptions should succeed");
 
         let text = data["text"].as_str().expect("text should be string");
@@ -443,8 +461,8 @@ mod tool_descriptions {
         assert_eq!(data["count"], 3);
     }
 
-    #[test]
-    fn tool_descriptions_filtered_by_server() {
+    #[tokio::test]
+    async fn tool_descriptions_filtered_by_server() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["debugger".into()], sample_tools(), vec![]);
 
@@ -454,6 +472,7 @@ mod tool_descriptions {
                 "tool_descriptions",
                 json!({"server": "debugger"}),
             )
+            .await
             .expect("tool_descriptions with filter should succeed");
 
         assert_eq!(data["count"], 1);
@@ -467,21 +486,22 @@ mod tool_descriptions {
 mod recommend {
     use super::*;
 
-    #[test]
-    fn recommend_missing_intent_returns_error() {
+    #[tokio::test]
+    async fn recommend_missing_intent_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "recommend", json!({}));
+        let result = harness.request(ext_cat(), "recommend", json!({})).await;
 
         assert!(result.is_err(), "recommend without intent should fail");
     }
 
-    #[test]
-    fn recommend_with_no_tools_returns_empty() {
+    #[tokio::test]
+    async fn recommend_with_no_tools_returns_empty() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
         let data = harness
             .request(ext_cat(), "recommend", json!({"intent": "test"}))
+            .await
             .expect("recommend should succeed");
 
         // Empty Lua table `{}` may serialize as JSON object `{}` or array `[]`
@@ -493,8 +513,8 @@ mod recommend {
         assert_eq!(count, 0, "recommend with no tools should return empty");
     }
 
-    #[test]
-    fn recommend_with_llm_returns_parsed_tools() {
+    #[tokio::test]
+    async fn recommend_with_llm_returns_parsed_tools() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
 
@@ -503,6 +523,7 @@ mod recommend {
 
         let data = harness
             .request(ext_cat(), "recommend", json!({"intent": "show contents"}))
+            .await
             .expect("recommend should succeed with LLM");
 
         assert!(data.is_array(), "data should be array");
@@ -520,14 +541,15 @@ mod recommend {
 mod snapshot_restore {
     use super::*;
 
-    #[test]
-    fn snapshot_captures_initialized_state() {
+    #[tokio::test]
+    async fn snapshot_captures_initialized_state() {
         let (_td, mut harness) =
             mcp_harness_with_mocks(vec!["outline".into()], sample_tools(), vec![]);
         harness.init().expect("init should succeed");
 
         let data = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(data["initialized"], true);
@@ -541,20 +563,22 @@ mod snapshot_restore {
 mod errors {
     use super::*;
 
-    #[test]
-    fn unknown_operation_returns_error() {
+    #[tokio::test]
+    async fn unknown_operation_returns_error() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "nonexistent_op", json!({}));
+        let result = harness
+            .request(ext_cat(), "nonexistent_op", json!({}))
+            .await;
 
         assert!(result.is_err(), "unknown operation should fail");
     }
 
-    #[test]
-    fn missing_required_name() {
+    #[tokio::test]
+    async fn missing_required_name() {
         let (_td, mut harness) = mcp_harness_with_mocks(vec![], vec![], vec![]);
 
-        let result = harness.request(ext_cat(), "get", json!({}));
+        let result = harness.request(ext_cat(), "get", json!({})).await;
 
         assert!(result.is_err(), "get without name should fail");
     }

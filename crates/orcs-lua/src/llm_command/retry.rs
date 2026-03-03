@@ -23,11 +23,16 @@ pub(super) enum SendError {
 /// Send an HTTP POST with retry logic. Returns the raw response on success.
 ///
 /// Bridges async reqwest into the sync Lua call context via `tokio::runtime::Handle`.
+///
+/// When `cancel_rx` is provided, each send attempt races against the cancel
+/// signal via `tokio::select!`. If the cancel fires, returns
+/// `SendError::Classified { kind: "cancelled", .. }` immediately.
 pub(super) fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
     opts: &LlmOpts,
     body_str: &str,
+    cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<reqwest::Response, SendError> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| SendError::Classified {
         kind: "runtime",
@@ -38,6 +43,16 @@ pub(super) fn send_with_retry(
     let body_bytes = bytes::Bytes::from(body_str.to_string());
 
     for attempt in 0..=opts.max_retries {
+        // Check cancel before each attempt (catches cancel during retry sleep).
+        if let Some(ref rx) = cancel_rx {
+            if *rx.borrow() {
+                return Err(SendError::Classified {
+                    kind: "cancelled",
+                    message: "killed by veto".to_string(),
+                });
+            }
+        }
+
         let mut req = client
             .post(url)
             .timeout(Duration::from_secs(opts.timeout))
@@ -60,11 +75,29 @@ pub(super) fn send_with_retry(
             }
         }
 
-        let result =
-            tokio::task::block_in_place(|| handle.block_on(req.body(body_bytes.clone()).send()));
+        let send_result = tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                let send_future = req.body(body_bytes.clone()).send();
+                if let Some(mut rx) = cancel_rx.clone() {
+                    tokio::select! {
+                        biased;
+                        _ = rx.changed() => None,
+                        result = send_future => Some(result),
+                    }
+                } else {
+                    Some(send_future.await)
+                }
+            })
+        });
 
-        match result {
-            Ok(resp) => {
+        match send_result {
+            None => {
+                return Err(SendError::Classified {
+                    kind: "cancelled",
+                    message: "killed by veto".to_string(),
+                });
+            }
+            Some(Ok(resp)) => {
                 let status = resp.status().as_u16();
                 if attempt < opts.max_retries && should_retry_status(status) {
                     let delay = compute_retry_delay_from_headers(&resp, attempt);
@@ -79,7 +112,7 @@ pub(super) fn send_with_retry(
                 }
                 return Ok(resp);
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 if attempt < opts.max_retries && is_retryable_transport(&e) {
                     let delay = exponential_backoff(attempt);
                     tracing::debug!(
@@ -200,10 +233,16 @@ pub(crate) fn truncate_for_error(s: &str, max: usize) -> &str {
 /// then streams chunks into a `BytesMut` with a running size check.
 /// The buffer is frozen and converted to `String` via `to_vec()`.
 ///
+/// When `cancel_rx` is provided, each chunk read races against the
+/// cancel signal via `tokio::select!`. If cancelled, returns
+/// `ReadBodyError::Cancelled` immediately, preventing a slow/stalled
+/// response from blocking the Lua thread indefinitely after a Veto.
+///
 /// Bridges async reqwest into the sync context via `block_in_place`.
 pub(crate) fn read_body_limited(
     resp: reqwest::Response,
     max_bytes: u64,
+    cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<String, ReadBodyError> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| ReadBodyError::NoRuntime)?;
 
@@ -221,11 +260,23 @@ pub(crate) fn read_body_limited(
             let capacity = resp.content_length().map(|l| l as usize).unwrap_or(0);
             let mut buf = bytes::BytesMut::with_capacity(capacity);
 
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|e| ReadBodyError::Network(e.to_string()))?
-            {
+            loop {
+                let chunk_opt = if let Some(ref mut rx) = cancel_rx.clone() {
+                    tokio::select! {
+                        biased;
+                        _ = rx.changed() => return Err(ReadBodyError::Cancelled),
+                        result = resp.chunk() => {
+                            result.map_err(|e| ReadBodyError::Network(e.to_string()))?
+                        }
+                    }
+                } else {
+                    resp.chunk()
+                        .await
+                        .map_err(|e| ReadBodyError::Network(e.to_string()))?
+                };
+
+                let Some(chunk) = chunk_opt else { break };
+
                 if (buf.len() + chunk.len()) as u64 > max_bytes {
                     return Err(ReadBodyError::TooLarge);
                 }
@@ -252,6 +303,8 @@ pub(crate) enum ReadBodyError {
     InvalidUtf8,
     /// Network/transport error while reading.
     Network(String),
+    /// Cancelled by veto signal.
+    Cancelled,
 }
 
 // ── Retry Helpers ─────────────────────────────────────────────────────

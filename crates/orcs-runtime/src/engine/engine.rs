@@ -807,7 +807,7 @@ impl OrcsEngine {
     /// completion and collect snapshots.
     pub fn stop(&self) {
         info!("Engine stop requested");
-        let _ = self.signal_tx.send(Signal::veto(Principal::System));
+        let _ = self.signal_tx.send(Signal::shutdown(Principal::System));
     }
 
     /// Awaits all runners, collects snapshots, and cleans up.
@@ -864,8 +864,8 @@ impl OrcsEngine {
             tokio::select! {
                 result = signal_rx.recv() => {
                     match result {
-                        Ok(signal) if signal.is_veto() => {
-                            info!("Veto signal received, stopping engine");
+                        Ok(signal) if signal.is_shutdown() => {
+                            info!("Shutdown signal received, stopping engine");
                             break;
                         }
                         Ok(_) => {
@@ -991,6 +991,7 @@ mod tests {
     use super::*;
     use crate::channel::{ChannelCore, WorldCommand};
     use crate::Principal;
+    use async_trait::async_trait;
     use orcs_component::ComponentError;
     use orcs_event::{Request, SignalResponse};
     use orcs_types::ComponentId;
@@ -1017,6 +1018,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Component for EchoComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -1026,12 +1028,12 @@ mod tests {
             orcs_component::Status::Idle
         }
 
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+        async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
             Ok(request.payload.clone())
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
+            if signal.is_shutdown() {
                 SignalResponse::Abort
             } else {
                 SignalResponse::Handled
@@ -1088,12 +1090,12 @@ mod tests {
         // Subscribe before stop
         let mut rx = engine.signal_tx.subscribe();
 
-        // stop() should send Veto signal
+        // stop() should send Shutdown signal
         engine.stop();
 
-        // Verify Veto was sent
+        // Verify Shutdown was sent
         let received = rx.recv().await.expect("receive signal");
-        assert!(received.is_veto());
+        assert!(received.is_shutdown());
 
         // Cleanup
         let _ = engine.world_tx().send(WorldCommand::Shutdown).await;
@@ -1178,6 +1180,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Component for SnapshottableComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -1187,13 +1190,13 @@ mod tests {
             orcs_component::Status::Idle
         }
 
-        fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+        async fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
             self.counter += 1;
             Ok(Value::Number(self.counter.into()))
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
+            if signal.is_shutdown() {
                 SignalResponse::Abort
             } else {
                 SignalResponse::Handled
@@ -1226,11 +1229,11 @@ mod tests {
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
         let _handle = engine.spawn_runner(io, comp);
 
-        // Run engine briefly then stop via Veto
+        // Run engine briefly then stop via Shutdown
         let engine_signal_tx = engine.signal_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let _ = engine_signal_tx.send(Signal::veto(Principal::System));
+            let _ = engine_signal_tx.send(Signal::shutdown(Principal::System));
         });
 
         engine.run().await;
@@ -1256,11 +1259,11 @@ mod tests {
         let comp = Box::new(SnapshottableComponent::new("snap", 42));
         let _handle = engine.spawn_runner(io, comp);
 
-        // Run engine briefly then stop via Veto
+        // Run engine briefly then stop via Shutdown
         let engine_signal_tx = engine.signal_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let _ = engine_signal_tx.send(Signal::veto(Principal::System));
+            let _ = engine_signal_tx.send(Signal::shutdown(Principal::System));
         });
 
         engine.run().await;

@@ -143,7 +143,7 @@ fn mock_skills() -> serde_json::Value {
     ])
 }
 
-fn setup_harness(placement: &str) -> (LuaTestHarness, Arc<std::sync::Mutex<Vec<String>>>) {
+async fn setup_harness(placement: &str) -> (LuaTestHarness, Arc<std::sync::Mutex<Vec<String>>>) {
     let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
         .expect("should load prompt-assembler script");
     harness.init().expect("init should succeed");
@@ -166,6 +166,7 @@ fn setup_harness(placement: &str) -> (LuaTestHarness, Arc<std::sync::Mutex<Vec<S
                 "prompt_placement": placement,
             }),
         )
+        .await
         .expect("prompt assembly should succeed");
 
     (harness, captured)
@@ -178,9 +179,9 @@ fn setup_harness(placement: &str) -> (LuaTestHarness, Arc<std::sync::Mutex<Vec<S
 mod placement {
     use super::*;
 
-    #[test]
-    fn top_system_before_history_before_user() {
-        let (_harness, captured) = setup_harness("top");
+    #[tokio::test]
+    async fn top_system_before_history_before_user() {
+        let (_harness, captured) = setup_harness("top").await;
         let prompts = captured.lock().expect("captured mutex");
 
         assert_eq!(prompts.len(), 1, "should have captured exactly one prompt");
@@ -221,9 +222,9 @@ mod placement {
         );
     }
 
-    #[test]
-    fn both_system_at_top_and_bottom() {
-        let (_harness, captured) = setup_harness("both");
+    #[tokio::test]
+    async fn both_system_at_top_and_bottom() {
+        let (_harness, captured) = setup_harness("both").await;
         let prompts = captured.lock().expect("captured mutex");
 
         assert_eq!(prompts.len(), 1);
@@ -265,9 +266,9 @@ mod placement {
         );
     }
 
-    #[test]
-    fn bottom_history_then_user_then_system() {
-        let (_harness, captured) = setup_harness("bottom");
+    #[tokio::test]
+    async fn bottom_history_then_user_then_system() {
+        let (_harness, captured) = setup_harness("bottom").await;
         let prompts = captured.lock().expect("captured mutex");
 
         assert_eq!(prompts.len(), 1);
@@ -300,8 +301,8 @@ mod placement {
         );
     }
 
-    #[test]
-    fn default_is_both() {
+    #[tokio::test]
+    async fn default_is_both() {
         // Omit prompt_placement entirely → defaults to "both"
         let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
@@ -320,6 +321,7 @@ mod placement {
                     "history_context": "- [user] Hi",
                 }),
             )
+            .await
             .expect("should succeed");
 
         let prompts = captured.lock().expect("mutex");
@@ -341,8 +343,8 @@ mod placement {
 mod edge_cases {
     use super::*;
 
-    #[test]
-    fn no_skills_no_tools_message_only() {
+    #[tokio::test]
+    async fn no_skills_no_tools_message_only() {
         let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
@@ -361,6 +363,7 @@ mod edge_cases {
                     "prompt_placement": "both",
                 }),
             )
+            .await
             .expect("should succeed even without skills/tools");
 
         let prompts = captured.lock().expect("mutex");
@@ -377,8 +380,8 @@ mod edge_cases {
         );
     }
 
-    #[test]
-    fn empty_history_omits_history_section() {
+    #[tokio::test]
+    async fn empty_history_omits_history_section() {
         let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
@@ -396,6 +399,7 @@ mod edge_cases {
                     "prompt_placement": "top",
                 }),
             )
+            .await
             .expect("should succeed");
 
         let prompts = captured.lock().expect("mutex");
@@ -406,8 +410,8 @@ mod edge_cases {
         );
     }
 
-    #[test]
-    fn llm_mock_returns_configured_response() {
+    #[tokio::test]
+    async fn llm_mock_returns_configured_response() {
         let mut harness = LuaTestHarness::from_script(PROMPT_ASSEMBLER_SCRIPT, test_policy())
             .expect("should load script");
         harness.init().expect("init");
@@ -424,6 +428,7 @@ mod edge_cases {
                     "prompt_placement": "top",
                 }),
             )
+            .await
             .expect("should succeed");
 
         assert_eq!(

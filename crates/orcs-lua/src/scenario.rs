@@ -46,6 +46,21 @@ use orcs_runtime::sandbox::SandboxPolicy;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Blocks on a future from a synchronous context.
+///
+/// Used to bridge synchronous Lua callbacks with async `on_request`.
+/// Scenario tests always run inside a tokio runtime, so `Handle::current()`
+/// is available. `block_in_place` allows blocking from within a tokio task.
+fn block_on_request<T>(fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => {
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime for scenario");
+            rt.block_on(fut)
+        }
+    }
+}
+
 // =============================================================================
 // Test Assertions (orcs.test.*)
 // =============================================================================
@@ -254,7 +269,7 @@ impl UserData for ScenarioHarness {
                     .lock()
                     .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
 
-                match harness.request(category, &op, json_payload) {
+                match block_on_request(harness.request(category, &op, json_payload)) {
                     Ok(val) => serde_json_to_lua(&val, lua),
                     Err(e) => Err(mlua::Error::external(format!("request failed: {e}"))),
                 }
@@ -980,10 +995,10 @@ mod tests {
                     }
                 ]],
                 scenarios = {
-                    { name = "veto aborts", run = function(h)
+                    { name = "veto is soft cancel", run = function(h)
                         local response = h:veto()
-                        orcs.test.eq(response, "Abort")
-                        orcs.test.eq(h:status(), "Aborted")
+                        orcs.test.eq(response, "Handled")
+                        orcs.test.eq(h:status(), "Idle")
                     end },
                 },
             }
@@ -1038,10 +1053,11 @@ mod tests {
                 scenarios = {
                     { name = "first: veto", run = function(h)
                         h:veto()
-                        orcs.test.eq(h:status(), "Aborted")
+                        -- Veto is soft cancel — status stays Idle
+                        orcs.test.eq(h:status(), "Idle")
                     end },
                     { name = "second: fresh state", run = function(h)
-                        -- Should NOT be aborted because harness is fresh
+                        -- Should still be Idle because harness is fresh
                         orcs.test.eq(h:status(), "Idle")
                     end },
                 },

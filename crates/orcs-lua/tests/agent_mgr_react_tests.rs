@@ -124,8 +124,8 @@ fn setup_harness() -> LuaTestHarness {
 mod extract_commands {
     use super::*;
 
-    #[test]
-    fn single_command_with_body() {
+    #[tokio::test]
+    async fn single_command_with_body() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -133,6 +133,7 @@ mod extract_commands {
                 "extract_commands",
                 json!({ "text": "@shell ls -la /tmp" }),
             )
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -141,11 +142,12 @@ mod extract_commands {
         assert_eq!(cmds[0]["body"], "ls -la /tmp");
     }
 
-    #[test]
-    fn bare_prefix_without_body() {
+    #[tokio::test]
+    async fn bare_prefix_without_body() {
         let mut h = setup_harness();
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": "@skill" }))
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -154,12 +156,13 @@ mod extract_commands {
         assert_eq!(cmds[0]["body"], "");
     }
 
-    #[test]
-    fn multiple_commands() {
+    #[tokio::test]
+    async fn multiple_commands() {
         let mut h = setup_harness();
         let text = "@shell echo hello\nSome text in between\n@tool list all\n@profile show";
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": text }))
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -169,8 +172,8 @@ mod extract_commands {
         assert_eq!(cmds[2]["prefix"], "profile");
     }
 
-    #[test]
-    fn ignores_unknown_prefix() {
+    #[tokio::test]
+    async fn ignores_unknown_prefix() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -178,6 +181,7 @@ mod extract_commands {
                 "extract_commands",
                 json!({ "text": "@unknown do something\n@shell ls" }),
             )
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -185,8 +189,8 @@ mod extract_commands {
         assert_eq!(cmds[0]["prefix"], "shell");
     }
 
-    #[test]
-    fn case_insensitive_prefix() {
+    #[tokio::test]
+    async fn case_insensitive_prefix() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -194,6 +198,7 @@ mod extract_commands {
                 "extract_commands",
                 json!({ "text": "@Shell ls\n@TOOL status\n@Skill" }),
             )
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -203,12 +208,13 @@ mod extract_commands {
         assert_eq!(cmds[2]["prefix"], "skill");
     }
 
-    #[test]
-    fn skips_commands_inside_code_block() {
+    #[tokio::test]
+    async fn skips_commands_inside_code_block() {
         let mut h = setup_harness();
         let text = "Here is an example:\n```\n@shell rm -rf /\n@tool dangerous\n```\n@shell ls";
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": text }))
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -221,12 +227,13 @@ mod extract_commands {
         assert_eq!(cmds[0]["body"], "ls");
     }
 
-    #[test]
-    fn skips_code_block_with_language_tag() {
+    #[tokio::test]
+    async fn skips_code_block_with_language_tag() {
         let mut h = setup_harness();
         let text = "```bash\n@shell echo danger\n```\n@shell echo safe";
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": text }))
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -234,12 +241,13 @@ mod extract_commands {
         assert_eq!(cmds[0]["body"], "echo safe");
     }
 
-    #[test]
-    fn multiple_code_blocks() {
+    #[tokio::test]
+    async fn multiple_code_blocks() {
         let mut h = setup_harness();
         let text = "@shell first\n```\n@shell inside1\n```\n@shell middle\n```\n@shell inside2\n```\n@shell last";
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": text }))
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -253,8 +261,8 @@ mod extract_commands {
         assert_eq!(cmds[2]["body"], "last");
     }
 
-    #[test]
-    fn no_commands_returns_empty() {
+    #[tokio::test]
+    async fn no_commands_returns_empty() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -262,6 +270,7 @@ mod extract_commands {
                 "extract_commands",
                 json!({ "text": "Just a normal response with no commands." }),
             )
+            .await
             .expect("extract should succeed");
 
         // Empty Lua table may serialize as {} (object) or [] (array)
@@ -270,11 +279,12 @@ mod extract_commands {
         assert_eq!(len, 0, "should have no commands");
     }
 
-    #[test]
-    fn empty_text_returns_empty() {
+    #[tokio::test]
+    async fn empty_text_returns_empty() {
         let mut h = setup_harness();
         let result = h
             .request(ext_cat(), "extract_commands", json!({ "text": "" }))
+            .await
             .expect("extract should succeed");
 
         let cmds = &result["commands"];
@@ -282,8 +292,8 @@ mod extract_commands {
         assert_eq!(len, 0, "should have no commands");
     }
 
-    #[test]
-    fn leading_whitespace_trimmed() {
+    #[tokio::test]
+    async fn leading_whitespace_trimmed() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -291,6 +301,7 @@ mod extract_commands {
                 "extract_commands",
                 json!({ "text": "   @shell echo trimmed" }),
             )
+            .await
             .expect("extract should succeed");
 
         let cmds = result["commands"].as_array().expect("commands array");
@@ -306,8 +317,8 @@ mod extract_commands {
 mod format_results {
     use super::*;
 
-    #[test]
-    fn single_success() {
+    #[tokio::test]
+    async fn single_success() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -319,6 +330,7 @@ mod format_results {
                     ]
                 }),
             )
+            .await
             .expect("format should succeed");
 
         let formatted = result["formatted"].as_str().expect("formatted string");
@@ -332,8 +344,8 @@ mod format_results {
         );
     }
 
-    #[test]
-    fn single_error() {
+    #[tokio::test]
+    async fn single_error() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -345,6 +357,7 @@ mod format_results {
                     ]
                 }),
             )
+            .await
             .expect("format should succeed");
 
         let formatted = result["formatted"].as_str().expect("formatted string");
@@ -358,8 +371,8 @@ mod format_results {
         );
     }
 
-    #[test]
-    fn multiple_results_separated() {
+    #[tokio::test]
+    async fn multiple_results_separated() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -372,6 +385,7 @@ mod format_results {
                     ]
                 }),
             )
+            .await
             .expect("format should succeed");
 
         let formatted = result["formatted"].as_str().expect("formatted string");
@@ -383,8 +397,8 @@ mod format_results {
         );
     }
 
-    #[test]
-    fn missing_response_and_error_shows_no_output() {
+    #[tokio::test]
+    async fn missing_response_and_error_shows_no_output() {
         let mut h = setup_harness();
         let result = h
             .request(
@@ -396,6 +410,7 @@ mod format_results {
                     ]
                 }),
             )
+            .await
             .expect("format should succeed");
 
         let formatted = result["formatted"].as_str().expect("formatted string");

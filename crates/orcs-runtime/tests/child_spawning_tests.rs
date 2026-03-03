@@ -6,6 +6,7 @@
 //! - Signal propagation to children
 //! - Child lifecycle management
 
+use async_trait::async_trait;
 use orcs_component::{
     Child, ChildConfig, ChildContext, ChildResult, Component, ComponentError, Identifiable,
     RunnableChild, SignalReceiver, SpawnError, Status, Statusable,
@@ -58,7 +59,7 @@ impl Identifiable for TestWorker {
 
 impl SignalReceiver for TestWorker {
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        if signal.is_veto() {
+        if signal.is_shutdown() {
             self.status = Status::Aborted;
             SignalResponse::Abort
         } else {
@@ -103,6 +104,7 @@ impl SpawnerComponent {
     }
 }
 
+#[async_trait]
 impl Component for SpawnerComponent {
     fn id(&self) -> &ComponentId {
         &self.id
@@ -112,12 +114,12 @@ impl Component for SpawnerComponent {
         self.status
     }
 
-    fn on_request(&mut self, request: &orcs_event::Request) -> Result<Value, ComponentError> {
+    async fn on_request(&mut self, request: &orcs_event::Request) -> Result<Value, ComponentError> {
         Ok(request.payload.clone())
     }
 
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        if signal.is_veto() {
+        if signal.is_shutdown() {
             self.status = Status::Aborted;
             SignalResponse::Abort
         } else {
@@ -209,7 +211,7 @@ mod child_spawner_integration {
         assert_eq!(spawner.child_count(), 3);
 
         // Send a veto signal
-        let veto = Signal::veto(Principal::System);
+        let veto = Signal::shutdown(Principal::System);
         spawner.propagate_signal(&veto);
 
         // All children should be aborted (status updates via propagate_signal)
@@ -535,7 +537,7 @@ mod runner_integration {
 
         // Send veto signal
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("should send veto signal to runner");
 
         // Wait for runner to stop
@@ -796,7 +798,7 @@ mod spawn_runner_registration {
 
         // Cleanup: send veto to stop the spawned runner
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("send veto signal");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -846,7 +848,7 @@ mod spawn_runner_registration {
 
         // Send veto to stop the runner → triggers cleanup
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("send veto signal");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -1066,7 +1068,7 @@ mod spawn_runner_rpc {
 
         // Cleanup
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("send veto");
         tokio::time::sleep(Duration::from_millis(100)).await;
         teardown(manager_task, world_tx).await;
@@ -1147,7 +1149,7 @@ mod spawn_runner_rpc {
 
         // Cleanup
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("send veto");
         tokio::time::sleep(Duration::from_millis(100)).await;
         teardown(manager_task, world_tx).await;
@@ -1229,7 +1231,7 @@ mod spawn_runner_rpc {
 
         // Send veto to stop the runner → triggers cleanup
         signal_tx
-            .send(Signal::veto(Principal::System))
+            .send(Signal::shutdown(Principal::System))
             .expect("send veto");
         tokio::time::sleep(Duration::from_millis(200)).await;
 

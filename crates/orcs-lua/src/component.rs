@@ -18,10 +18,12 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 }
 
 use crate::error::LuaError;
+use crate::kill_flag::{self, CancelToken, KillFlag};
 use crate::lua_env::LuaEnv;
 use crate::types::{
     parse_event_category, parse_signal_response, LuaRequest, LuaResponse, LuaSignal,
 };
+use async_trait::async_trait;
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value as LuaValue};
 use orcs_component::{
     ChildContext, Component, ComponentError, ComponentLoader, ComponentSnapshot, Emitter,
@@ -121,6 +123,22 @@ pub struct LuaComponent {
     sandbox: Arc<dyn SandboxPolicy>,
     /// Runtime hints declared by the Lua script.
     hints: RuntimeHints,
+    /// Kill flag for cooperative Lua execution cancellation.
+    ///
+    /// Set by Veto signal handler. Checked by the instruction hook
+    /// every ~128 instructions to terminate runaway Lua code.
+    kill_flag: KillFlag,
+    /// Cancel token for cooperative cancellation of blocking FFI calls.
+    ///
+    /// Fires on Veto signal. FFI functions (`exec`, `llm`, `http`)
+    /// clone the receiver to `select!` against their blocking operations.
+    cancel_token: CancelToken,
+    /// Interrupt receiver for out-of-band Veto cancellation.
+    ///
+    /// When set by the runner, `on_request` spawns a bridge task that
+    /// monitors this receiver and fires `kill_flag` + `cancel_token`
+    /// when interrupted — bypassing the runner's event loop.
+    interrupt_rx: Option<orcs_component::interrupt::InterruptReceiver>,
 }
 
 // SAFETY: LuaComponent can be safely sent between threads and accessed concurrently.
@@ -417,6 +435,14 @@ impl LuaComponent {
             child_spawner: component_table.get("child_spawner").unwrap_or(false),
         };
 
+        // Install instruction hook for cooperative kill via Veto signal.
+        let kill_flag = KillFlag::new();
+        kill_flag::install_hook(&lua, &kill_flag)?;
+
+        // Install cancel token for blocking FFI cancellation.
+        let cancel_token = CancelToken::new();
+        kill_flag::install_cancel_receiver(&lua, &cancel_token);
+
         Ok(Self {
             lua: Mutex::new(lua),
             id,
@@ -427,6 +453,7 @@ impl LuaComponent {
             on_signal_key,
             init_key,
             shutdown_key,
+            interrupt_rx: None,
             snapshot_key,
             restore_key,
             script_path: None,
@@ -434,6 +461,8 @@ impl LuaComponent {
             child_context: None,
             sandbox,
             hints,
+            kill_flag,
+            cancel_token,
         })
     }
 
@@ -467,7 +496,7 @@ impl LuaComponent {
 
         let new_component = Self::from_file(path, Arc::clone(&self.sandbox))?;
 
-        // Swap internals (preserve emitter)
+        // Swap internals (preserve emitter and kill_flag)
         self.lua = new_component.lua;
         self.subscriptions = new_component.subscriptions;
         self.on_request_key = new_component.on_request_key;
@@ -476,7 +505,15 @@ impl LuaComponent {
         self.shutdown_key = new_component.shutdown_key;
         self.snapshot_key = new_component.snapshot_key;
         self.restore_key = new_component.restore_key;
-        // Note: emitter is preserved across reload
+        // Note: emitter and kill_flag are preserved across reload
+
+        // Re-install kill flag hook and cancel receiver on the new Lua VM
+        // (preserving the original instances so external references remain valid).
+        {
+            let lua = self.lua.lock();
+            kill_flag::install_hook(&lua, &self.kill_flag)?;
+            kill_flag::install_cancel_receiver(&lua, &self.cancel_token);
+        }
 
         // Re-register orcs.output if emitter is set
         if let Some(emitter) = &self.emitter {
@@ -619,8 +656,57 @@ impl LuaComponent {
             tracing::warn!("Failed to wrap tools with hooks: {}", e);
         }
     }
+
+    /// Executes the Lua on_request callback synchronously.
+    ///
+    /// Extracted from `on_request` so the async wrapper can guarantee the
+    /// interrupt bridge task is aborted on ALL exit paths (success, error,
+    /// early return via `?`).
+    fn run_lua_on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
+        let lua = self.lua.lock();
+
+        // Get callback from registry
+        let on_request: Function = lua.registry_value(&self.on_request_key).map_err(|e| {
+            tracing::debug!("Failed to get on_request from registry: {}", e);
+            ComponentError::ExecutionFailed("lua callback not found".to_string())
+        })?;
+
+        // Convert request to Lua
+        let lua_req = LuaRequest::from_request(request);
+
+        // Call Lua function
+        let result: LuaResponse = on_request.call(lua_req).map_err(|e| {
+            // Propagate Suspended errors transparently — ChannelRunner needs
+            // the approval_id and grant_pattern to drive the HIL flow.
+            if let Some(suspended) = extract_suspended(&e) {
+                return suspended;
+            }
+            // Detect kill-flag cancellation: the instruction hook raises
+            // RuntimeError("killed by veto") when the flag is set.
+            if self.kill_flag.is_set() {
+                tracing::info!("Lua execution killed by veto signal");
+                self.kill_flag.reset();
+                return ComponentError::ExecutionFailed("killed by veto".to_string());
+            }
+            // Sanitize other error messages to avoid leaking internal details
+            tracing::debug!("Lua on_request error: {}", e);
+            ComponentError::ExecutionFailed("lua script execution failed".to_string())
+        })?;
+
+        drop(lua);
+        self.status = Status::Idle;
+
+        if result.success {
+            Ok(result.data.unwrap_or(JsonValue::Null))
+        } else {
+            Err(ComponentError::ExecutionFailed(
+                result.error.unwrap_or_else(|| "unknown error".into()),
+            ))
+        }
+    }
 }
 
+#[async_trait]
 impl Component for LuaComponent {
     fn id(&self) -> &ComponentId {
         &self.id
@@ -646,7 +732,7 @@ impl Component for LuaComponent {
         skip(self, request),
         fields(component = %self.id.fqn(), operation = %request.operation)
     )]
-    fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
+    async fn on_request(&mut self, request: &Request) -> Result<JsonValue, ComponentError> {
         if self.status == Status::Aborted {
             return Err(ComponentError::ExecutionFailed(
                 "component is aborted".to_string(),
@@ -654,39 +740,45 @@ impl Component for LuaComponent {
         }
         self.status = Status::Running;
 
-        let lua = self.lua.lock();
-
-        // Get callback from registry
-        let on_request: Function = lua.registry_value(&self.on_request_key).map_err(|e| {
-            tracing::debug!("Failed to get on_request from registry: {}", e);
-            ComponentError::ExecutionFailed("lua callback not found".to_string())
-        })?;
-
-        // Convert request to Lua
-        let lua_req = LuaRequest::from_request(request);
-
-        // Call Lua function
-        let result: LuaResponse = on_request.call(lua_req).map_err(|e| {
-            // Propagate Suspended errors transparently — ChannelRunner needs
-            // the approval_id and grant_pattern to drive the HIL flow.
-            if let Some(suspended) = extract_suspended(&e) {
-                return suspended;
-            }
-            // Sanitize other error messages to avoid leaking internal details
-            tracing::debug!("Lua on_request error: {}", e);
-            ComponentError::ExecutionFailed("lua script execution failed".to_string())
-        })?;
-
-        drop(lua);
-        self.status = Status::Idle;
-
-        if result.success {
-            Ok(result.data.unwrap_or(JsonValue::Null))
-        } else {
-            Err(ComponentError::ExecutionFailed(
-                result.error.unwrap_or_else(|| "unknown error".into()),
-            ))
+        // Reset kill flag, cancel token, and interrupt receiver before each
+        // request so previous cancellations don't affect new executions.
+        self.kill_flag.reset();
+        self.cancel_token.reset();
+        if let Some(rx) = &self.interrupt_rx {
+            rx.reset();
         }
+
+        // Re-install cancel receiver for the new token in Lua app_data.
+        {
+            let lua = self.lua.lock();
+            kill_flag::install_cancel_receiver(&lua, &self.cancel_token);
+        }
+
+        // Spawn interrupt bridge: when the runner's veto-watcher fires the
+        // InterruptSender, this task sets kill_flag and fires cancel_token,
+        // cancelling in-flight Lua code and FFI calls.  Runs independently
+        // of the parking_lot::Mutex lock below — no Component Mutex needed.
+        let interrupt_guard = self.interrupt_rx.as_ref().map(|rx| {
+            let kill_flag = self.kill_flag.clone();
+            let cancel_sender = self.cancel_token.sender();
+            let mut rx = rx.clone();
+            tokio::spawn(async move {
+                rx.interrupted().await;
+                kill_flag.set();
+                let _ = cancel_sender.send(true);
+            })
+        });
+
+        // Run Lua call, then always abort the interrupt bridge before returning.
+        let lua_result = self.run_lua_on_request(request);
+
+        // Abort the interrupt bridge — it served its purpose for this request.
+        // Must happen on ALL exit paths (success, error, early return).
+        if let Some(guard) = interrupt_guard {
+            guard.abort();
+        }
+
+        lua_result
     }
 
     #[tracing::instrument(
@@ -694,6 +786,25 @@ impl Component for LuaComponent {
         fields(component = %self.id.fqn(), signal_kind = ?signal.kind)
     )]
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
+        let is_veto = signal.is_veto();
+
+        // Shutdown (hard stop): handle entirely in Rust, don't forward to Lua.
+        // Set kill mechanisms and abort immediately.
+        if signal.is_shutdown() {
+            self.cancel_token.cancel();
+            self.kill_flag.set();
+            self.status = Status::Aborted;
+            return SignalResponse::Abort;
+        }
+
+        // Veto (soft cancel): the interrupt bridge (veto-watcher → InterruptSender)
+        // already handles cancelling in-flight on_request.  We do NOT set kill_flag
+        // or cancel_token here — on_signal runs AFTER on_request returns (serialized
+        // by the runner's event loop).  Setting them would kill the NEXT request.
+        //
+        // The Lua handler still runs so scripts can log/clean up, but the return
+        // value is overridden to Handled — Veto never stops the runner.
+
         let lua = self.lua.lock();
 
         let Ok(on_signal): Result<Function, _> = lua.registry_value(&self.on_signal_key) else {
@@ -707,6 +818,13 @@ impl Component for LuaComponent {
         match result {
             Ok(response_str) => {
                 let response = parse_signal_response(&response_str);
+
+                // For Veto: override Abort → Handled so the runner stays alive.
+                // Don't set status=Aborted — the component remains available.
+                if is_veto {
+                    return SignalResponse::Handled;
+                }
+
                 if matches!(response, SignalResponse::Abort) {
                     drop(lua);
                     self.status = Status::Aborted;
@@ -767,6 +885,10 @@ impl Component for LuaComponent {
         let Some(shutdown_key) = &self.shutdown_key else {
             return;
         };
+
+        // Clear kill flag so the shutdown handler can execute.
+        // This is the final lifecycle call — no subsequent on_request.
+        self.kill_flag.reset();
 
         let lua = self.lua.lock();
 
@@ -836,6 +958,10 @@ impl Component for LuaComponent {
 
     fn set_child_context(&mut self, ctx: Box<dyn ChildContext>) {
         self.install_child_context(ctx);
+    }
+
+    fn set_interrupt(&mut self, rx: orcs_component::interrupt::InterruptReceiver) {
+        self.interrupt_rx = Some(rx);
     }
 }
 

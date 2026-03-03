@@ -30,8 +30,8 @@ return {
             name = "embedded echo responds to veto",
             run = function(h)
                 local response = h:veto()
-                expect(response).to.equal("Abort")
-                expect(h:status()).to.equal("Aborted")
+                expect(response).to.equal("Handled")
+                expect(h:status()).to.equal("Idle")
             end,
         },
     },

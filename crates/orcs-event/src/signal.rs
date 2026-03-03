@@ -60,16 +60,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalKind {
     // === Stop signals ===
-    /// Global stop - requires elevated privilege.
-    ///
-    /// Stops all operations across all channels.
-    /// This is the "emergency stop" for the entire system.
+    /// Soft cancel — interrupts in-flight operations but keeps the
+    /// session alive.  Components cancel their current work and return
+    /// to Idle so the user can send the next request.
     Veto,
 
     /// Cancel operations in a specific scope.
     ///
     /// Stops operations in the targeted channel(s).
     Cancel,
+
+    /// Hard shutdown — terminates all runners and the engine.
+    ///
+    /// Sent by [`OrcsEngine::stop()`] when the process is exiting.
+    /// Components should treat this the same as the old Veto (abort).
+    /// Not forwarded to Lua — handled entirely in Rust.
+    Shutdown,
 
     // === Control signals ===
     /// Pause operations in a specific scope.
@@ -228,6 +234,19 @@ impl Signal {
         }
     }
 
+    /// Creates a Shutdown signal (global hard stop).
+    ///
+    /// Sent by the engine when the process is exiting.
+    /// All runners and the engine itself should terminate.
+    #[must_use]
+    pub fn shutdown(source: Principal) -> Self {
+        Self {
+            kind: SignalKind::Shutdown,
+            scope: SignalScope::Global,
+            source,
+        }
+    }
+
     /// Creates a Cancel signal for a specific channel.
     ///
     /// # Arguments
@@ -261,6 +280,12 @@ impl Signal {
     #[must_use]
     pub fn is_veto(&self) -> bool {
         matches!(self.kind, SignalKind::Veto)
+    }
+
+    /// Returns `true` if this is a Shutdown signal.
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        matches!(self.kind, SignalKind::Shutdown)
     }
 
     /// Returns `true` if this signal has Global scope.

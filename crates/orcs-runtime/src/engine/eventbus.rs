@@ -1108,6 +1108,7 @@ mod tests {
         struct EchoRpcComponent {
             id: ComponentId,
         }
+        #[async_trait::async_trait]
         impl orcs_component::Component for EchoRpcComponent {
             fn id(&self) -> &ComponentId {
                 &self.id
@@ -1115,14 +1116,14 @@ mod tests {
             fn status(&self) -> Status {
                 Status::Idle
             }
-            fn on_request(
+            async fn on_request(
                 &mut self,
                 request: &orcs_event::Request,
             ) -> Result<Value, ComponentError> {
                 Ok(request.payload.clone())
             }
             fn on_signal(&mut self, signal: &orcs_event::Signal) -> SignalResponse {
-                if signal.is_veto() {
+                if signal.is_shutdown() {
                     SignalResponse::Abort
                 } else {
                     SignalResponse::Handled
@@ -1221,8 +1222,8 @@ mod tests {
 
         // Stop the runner first so reply never comes
         signal_tx
-            .send(orcs_event::Signal::veto(crate::Principal::System))
-            .expect("send veto signal to stop runner should succeed");
+            .send(orcs_event::Signal::shutdown(crate::Principal::System))
+            .expect("send shutdown signal to stop runner should succeed");
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), runner_task).await;
 
         let req = Request::new(

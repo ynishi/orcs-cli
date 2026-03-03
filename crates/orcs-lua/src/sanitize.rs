@@ -158,33 +158,73 @@ pub fn exec_argv_impl(
         arg_vec.push(arg);
     }
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(&arg_vec);
-
-    // Handle opts.env_remove
+    // Parse opts upfront so both async and sync paths share the same config.
+    let mut env_removes: Vec<String> = Vec::new();
+    let cwd;
     if let Some(opts_table) = opts {
         if let Ok(env_remove) = opts_table.get::<Table>("env_remove") {
             let env_len = env_remove.len()? as usize;
             for i in 1..=env_len {
                 if let Ok(var) = env_remove.get::<String>(i) {
-                    cmd.env_remove(&var);
+                    env_removes.push(var);
                 }
             }
         }
-
-        // Handle opts.cwd
-        if let Ok(cwd) = opts_table.get::<String>("cwd") {
-            cmd.current_dir(&cwd);
-        } else {
-            cmd.current_dir(default_cwd);
-        }
+        cwd = opts_table
+            .get::<String>("cwd")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| default_cwd.to_path_buf());
     } else {
-        cmd.current_dir(default_cwd);
+        cwd = default_cwd.to_path_buf();
     }
 
-    let output = cmd
-        .output()
-        .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+    // Cancellable async path when tokio runtime is available;
+    // sync fallback for non-tokio contexts (unit tests).
+    let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+    let output = if let Some(handle) = tokio::runtime::Handle::try_current()
+        .ok()
+        .filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                let mut cmd = tokio::process::Command::new(program);
+                cmd.args(&arg_vec).kill_on_drop(true).current_dir(&cwd);
+                for var in &env_removes {
+                    cmd.env_remove(var);
+                }
+
+                let child = cmd
+                    .spawn()
+                    .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+
+                if let Some(mut rx) = cancel_rx {
+                    tokio::select! {
+                        biased;
+                        _ = rx.changed() => {
+                            Err(mlua::Error::RuntimeError("killed by veto".into()))
+                        }
+                        result = child.wait_with_output() => {
+                            result.map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))
+                        }
+                    }
+                } else {
+                    child
+                        .wait_with_output()
+                        .await
+                        .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))
+                }
+            })
+        })?
+    } else {
+        // Sync fallback (no tokio runtime, no cancel support)
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(&arg_vec).current_dir(&cwd);
+        for var in &env_removes {
+            cmd.env_remove(var);
+        }
+        cmd.output()
+            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?
+    };
 
     let result = lua.create_table()?;
     result.set("ok", output.status.success())?;

@@ -88,6 +88,7 @@ fn signal_kind_to_string(kind: &SignalKind) -> String {
     match kind {
         SignalKind::Veto => "Veto".to_string(),
         SignalKind::Cancel => "Cancel".to_string(),
+        SignalKind::Shutdown => "Shutdown".to_string(),
         SignalKind::Pause => "Pause".to_string(),
         SignalKind::Resume => "Resume".to_string(),
         SignalKind::Steer { .. } => "Steer".to_string(),

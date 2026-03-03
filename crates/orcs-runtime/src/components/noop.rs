@@ -7,6 +7,7 @@
 //! Use this when a Channel needs a bound Component but no specific
 //! functionality is required (e.g., IO channel that routes events elsewhere).
 
+use async_trait::async_trait;
 use orcs_component::{Component, ComponentError, Status};
 use orcs_event::{EventCategory, Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
@@ -38,6 +39,7 @@ impl NoopComponent {
     }
 }
 
+#[async_trait]
 impl Component for NoopComponent {
     fn id(&self) -> &ComponentId {
         &self.id
@@ -51,15 +53,18 @@ impl Component for NoopComponent {
         self.status
     }
 
-    fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+    async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
         // Return the payload as-is (echo behavior)
         Ok(request.payload.clone())
     }
 
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-        if signal.is_veto() {
+        if signal.is_shutdown() {
             self.status = Status::Aborted;
             SignalResponse::Abort
+        } else if signal.is_veto() {
+            // Soft cancel: acknowledge but stay alive.
+            SignalResponse::Handled
         } else {
             SignalResponse::Handled
         }
@@ -82,8 +87,8 @@ mod tests {
         assert_eq!(comp.status(), Status::Idle);
     }
 
-    #[test]
-    fn noop_handles_request() {
+    #[tokio::test]
+    async fn noop_handles_request() {
         let mut comp = NoopComponent::new("test");
         let source = ComponentId::builtin("source");
         let channel = ChannelId::new();
@@ -95,7 +100,7 @@ mod tests {
             Value::String("hello".into()),
         );
 
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Value::String("hello".into()));
     }
@@ -106,7 +111,7 @@ mod tests {
         let signal = Signal::veto(Principal::User(PrincipalId::new()));
 
         let resp = comp.on_signal(&signal);
-        assert_eq!(resp, SignalResponse::Abort);
-        assert_eq!(comp.status(), Status::Aborted);
+        assert_eq!(resp, SignalResponse::Handled);
+        assert_eq!(comp.status(), Status::Idle);
     }
 }

@@ -42,6 +42,8 @@ pub enum SignalAction {
 /// # Returns
 ///
 /// `SignalAction::Stop` if component requests abort, otherwise `Continue`.
+/// For Veto signals, always returns `Continue` regardless of the component's
+/// response — Veto is a soft cancel that keeps the runner alive.
 pub async fn dispatch_signal_to_component(
     signal: &Signal,
     component: &Arc<Mutex<Box<dyn Component>>>,
@@ -50,6 +52,12 @@ pub async fn dispatch_signal_to_component(
         let mut comp = component.lock().await;
         comp.on_signal(signal)
     };
+
+    // Veto is a soft cancel: the component receives the signal for internal
+    // cleanup, but its response never stops the runner.
+    if signal.is_veto() {
+        return SignalAction::Continue;
+    }
 
     match response {
         SignalResponse::Abort => SignalAction::Stop {
@@ -73,11 +81,14 @@ pub async fn dispatch_signal_to_component(
 #[must_use]
 pub fn determine_channel_action(kind: &SignalKind) -> SignalAction {
     match kind {
-        SignalKind::Veto => SignalAction::Stop {
-            reason: "veto received".to_string(),
-        },
+        // Veto is a soft cancel: interrupt in-flight operations but keep
+        // the runner alive so the session can accept the next request.
+        SignalKind::Veto => SignalAction::Continue,
         SignalKind::Cancel => SignalAction::Stop {
             reason: "cancelled".to_string(),
+        },
+        SignalKind::Shutdown => SignalAction::Stop {
+            reason: "shutdown".to_string(),
         },
         SignalKind::Pause => SignalAction::Transition(StateTransition::Pause),
         SignalKind::Resume => SignalAction::Transition(StateTransition::Resume),
@@ -223,6 +234,12 @@ mod tests {
     #[test]
     fn determine_channel_action_veto() {
         let action = determine_channel_action(&SignalKind::Veto);
+        assert!(matches!(action, SignalAction::Continue));
+    }
+
+    #[test]
+    fn determine_channel_action_shutdown() {
+        let action = determine_channel_action(&SignalKind::Shutdown);
         assert!(matches!(action, SignalAction::Stop { .. }));
     }
 

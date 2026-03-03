@@ -93,6 +93,7 @@ pub(crate) mod context_wrapper;
 mod error;
 pub mod hook_helpers;
 pub mod http_command;
+pub(crate) mod kill_flag;
 pub mod llm_adapter;
 pub mod llm_command;
 mod loader;

@@ -29,6 +29,7 @@
 //!   │◄────────────────────────┤                            │
 //! ```
 
+use async_trait::async_trait;
 use orcs_component::{
     Component, ComponentError, Emitter, EventCategory, Package, PackageError, PackageInfo,
     Packageable, Status,
@@ -242,6 +243,7 @@ impl Default for EchoWithHilComponent {
     }
 }
 
+#[async_trait]
 impl Component for EchoWithHilComponent {
     fn id(&self) -> &ComponentId {
         &self.id
@@ -255,7 +257,7 @@ impl Component for EchoWithHilComponent {
         self.status
     }
 
-    fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+    async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
         match request.operation.as_str() {
             "echo" => {
                 // Support both formats:
@@ -312,9 +314,15 @@ impl Component for EchoWithHilComponent {
 
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
         match &signal.kind {
-            SignalKind::Veto => {
+            SignalKind::Shutdown => {
                 self.abort();
                 SignalResponse::Abort
+            }
+            SignalKind::Veto => {
+                // Soft cancel: clear pending work, return to Idle.
+                self.pending = None;
+                self.status = Status::Idle;
+                SignalResponse::Handled
             }
             SignalKind::Approve { approval_id } => {
                 if self.handle_approve(approval_id) {
@@ -447,12 +455,12 @@ mod tests {
         assert!(subs.contains(&EventCategory::Lifecycle));
     }
 
-    #[test]
-    fn echo_request_creates_pending_approval() {
+    #[tokio::test]
+    async fn echo_request_creates_pending_approval() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
 
         assert!(result.is_ok());
         let response = result.expect("echo request should succeed");
@@ -463,22 +471,27 @@ mod tests {
         assert_eq!(comp.status(), Status::Running);
     }
 
-    #[test]
-    fn pending_has_description() {
+    #[tokio::test]
+    async fn pending_has_description() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        comp.on_request(&req).expect("echo request should succeed");
+        comp.on_request(&req)
+            .await
+            .expect("echo request should succeed");
 
         assert_eq!(comp.pending_description(), Some("You say 'Hi'?"));
     }
 
-    #[test]
-    fn echo_approved_produces_output() {
+    #[tokio::test]
+    async fn echo_approved_produces_output() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string")
@@ -496,12 +509,15 @@ mod tests {
         assert_eq!(comp.status(), Status::Idle);
     }
 
-    #[test]
-    fn echo_rejected_no_output() {
+    #[tokio::test]
+    async fn echo_rejected_no_output() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Bad message".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string")
@@ -519,12 +535,15 @@ mod tests {
         assert_eq!(comp.status(), Status::Idle);
     }
 
-    #[test]
-    fn echo_modified_uses_new_message() {
+    #[tokio::test]
+    async fn echo_modified_uses_new_message() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Original".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string")
@@ -539,34 +558,37 @@ mod tests {
         assert_eq!(comp.last_result(), Some("Echo: Modified"));
     }
 
-    #[test]
-    fn echo_veto_aborts() {
+    #[tokio::test]
+    async fn echo_veto_soft_cancel() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        let _ = comp.on_request(&req);
+        let _ = comp.on_request(&req).await;
 
         let signal = Signal::veto(test_user());
         let response = comp.on_signal(&signal);
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(comp.status(), Status::Aborted);
-        assert!(!comp.has_pending());
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(comp.status(), Status::Idle);
     }
 
-    #[test]
-    fn echo_check_status() {
+    #[tokio::test]
+    async fn echo_check_status() {
         let mut comp = EchoWithHilComponent::new();
 
         // Check idle state
         let req = test_request("check", Value::Null);
-        let result = comp.on_request(&req).expect("check request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("check request should succeed");
         assert_eq!(result["status"], "idle");
 
         // Start echo
         let echo_req = test_request("echo", Value::String("Hi".into()));
         let echo_result = comp
             .on_request(&echo_req)
+            .await
             .expect("echo request should succeed");
         let approval_id = echo_result["approval_id"]
             .as_str()
@@ -576,6 +598,7 @@ mod tests {
         // Check pending state
         let result = comp
             .on_request(&req)
+            .await
             .expect("check request should succeed while pending");
         assert_eq!(result["status"], "pending_approval");
 
@@ -586,17 +609,18 @@ mod tests {
         // Check completed state
         let result = comp
             .on_request(&req)
+            .await
             .expect("check request should succeed after approval");
         assert_eq!(result["status"], "completed");
         assert_eq!(result["result"], "Echo: Hi");
     }
 
-    #[test]
-    fn echo_invalid_payload() {
+    #[tokio::test]
+    async fn echo_invalid_payload() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", serde_json::json!({"not": "string"}));
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
 
         assert!(result.is_err());
         match result.expect_err("should return InvalidPayload error for missing message field") {
@@ -605,12 +629,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn echo_unsupported_operation() {
+    #[tokio::test]
+    async fn echo_unsupported_operation() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("unknown", Value::Null);
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
 
         assert!(result.is_err());
         match result.expect_err("should return NotSupported error for unknown operation") {
@@ -619,12 +643,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn signal_wrong_approval_id_ignored() {
+    #[tokio::test]
+    async fn signal_wrong_approval_id_ignored() {
         let mut comp = EchoWithHilComponent::new();
 
         let req = test_request("echo", Value::String("Hi".into()));
-        let _ = comp.on_request(&req);
+        let _ = comp.on_request(&req).await;
 
         // Wrong approval_id
         let signal = Signal::approve("wrong-id", test_user());
@@ -646,13 +670,16 @@ mod tests {
     }
 
     /// E2E test: Full user interaction flow
-    #[test]
-    fn e2e_user_says_hi_and_approves() {
+    #[tokio::test]
+    async fn e2e_user_says_hi_and_approves() {
         let mut comp = EchoWithHilComponent::new();
 
         // User: "Hi"
         let req = test_request("echo", Value::String("Hi".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
 
         // System prompts: "You say 'Hi'?"
         assert_eq!(result["status"], "pending_approval");
@@ -672,13 +699,16 @@ mod tests {
     }
 
     /// E2E test: User rejects
-    #[test]
-    fn e2e_user_says_bad_word_and_rejects() {
+    #[tokio::test]
+    async fn e2e_user_says_bad_word_and_rejects() {
         let mut comp = EchoWithHilComponent::new();
 
         // User: "BadWord"
         let req = test_request("echo", Value::String("BadWord".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string");
@@ -758,8 +788,8 @@ mod tests {
         assert!(matches!(result, Err(PackageError::NotFound(_))));
     }
 
-    #[test]
-    fn package_decorator_applied_to_echo() {
+    #[tokio::test]
+    async fn package_decorator_applied_to_echo() {
         let mut comp = EchoWithHilComponent::new();
 
         // Install decorator
@@ -769,7 +799,10 @@ mod tests {
 
         // Request echo
         let req = test_request("echo", Value::String("Hello".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string");
@@ -782,8 +815,8 @@ mod tests {
         assert_eq!(comp.last_result(), Some("Echo: [Hello]"));
     }
 
-    #[test]
-    fn package_uninstall_removes_decoration() {
+    #[tokio::test]
+    async fn package_uninstall_removes_decoration() {
         let mut comp = EchoWithHilComponent::new();
 
         // Install and then uninstall
@@ -795,7 +828,10 @@ mod tests {
 
         // Request echo
         let req = test_request("echo", Value::String("Hello".into()));
-        let result = comp.on_request(&req).expect("echo request should succeed");
+        let result = comp
+            .on_request(&req)
+            .await
+            .expect("echo request should succeed");
         let approval_id = result["approval_id"]
             .as_str()
             .expect("approval_id should be a string");

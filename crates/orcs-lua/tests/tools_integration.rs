@@ -67,14 +67,14 @@ mod read {
             .expect("should create read test harness from script")
     }
 
-    #[test]
-    fn read_existing_file() {
+    #[tokio::test]
+    async fn read_existing_file() {
         let dir = tempdir();
         let file = dir.join("read_test.txt");
         fs::write(&file, "hello from read").expect("should write test file for read");
 
         let mut h = read_harness(&escape_path(&file));
-        let result = h.request(EventCategory::Echo, "read", json!(null));
+        let result = h.request(EventCategory::Echo, "read", json!(null)).await;
 
         assert!(result.is_ok());
         let data = result.expect("read request should succeed");
@@ -82,26 +82,26 @@ mod read {
         assert_eq!(data["size"], 15);
     }
 
-    #[test]
-    fn read_nonexistent_returns_error() {
+    #[tokio::test]
+    async fn read_nonexistent_returns_error() {
         let mut h = read_harness("nonexistent_path_xyz.txt");
-        let result = h.request(EventCategory::Echo, "read", json!(null));
+        let result = h.request(EventCategory::Echo, "read", json!(null)).await;
 
         // success = false → ComponentError
         assert!(result.is_err());
     }
 
-    #[test]
-    fn read_outside_cwd_returns_error() {
+    #[tokio::test]
+    async fn read_outside_cwd_returns_error() {
         let mut h = read_harness("/etc/hosts");
-        let result = h.request(EventCategory::Echo, "read", json!(null));
+        let result = h.request(EventCategory::Echo, "read", json!(null)).await;
 
         // success = false (access denied) → ComponentError
         assert!(result.is_err());
     }
 
-    #[test]
-    fn read_utf8_content() {
+    #[tokio::test]
+    async fn read_utf8_content() {
         let dir = tempdir();
         let file = dir.join("utf8.txt");
         fs::write(&file, "日本語テスト").expect("should write UTF-8 test file");
@@ -109,6 +109,7 @@ mod read {
         let mut h = read_harness(&escape_path(&file));
         let result = h
             .request(EventCategory::Echo, "read", json!(null))
+            .await
             .expect("read UTF-8 content should succeed");
         assert_eq!(result["content"], "日本語テスト");
     }
@@ -119,8 +120,8 @@ mod read {
 mod write {
     use super::*;
 
-    #[test]
-    fn write_and_verify() {
+    #[tokio::test]
+    async fn write_and_verify() {
         let dir = tempdir();
         let file = dir.join("write_test.txt");
         let path = escape_path(&file);
@@ -144,6 +145,7 @@ mod write {
             .expect("should create write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
+            .await
             .expect("write request should succeed");
 
         assert_eq!(result["bytes_written"], 15);
@@ -153,8 +155,8 @@ mod write {
         );
     }
 
-    #[test]
-    fn write_creates_subdirs() {
+    #[tokio::test]
+    async fn write_creates_subdirs() {
         let dir = tempdir();
         let file = dir.join("sub/deep/file.txt");
         let path = escape_path(&file);
@@ -178,6 +180,7 @@ mod write {
             .expect("should create subdir write test harness");
         let result = h
             .request(EventCategory::Echo, "write", json!(null))
+            .await
             .expect("write with subdirs should succeed");
 
         assert_eq!(result["bytes"], 6);
@@ -193,8 +196,8 @@ mod write {
 mod grep {
     use super::*;
 
-    #[test]
-    fn grep_finds_matches() {
+    #[tokio::test]
+    async fn grep_finds_matches() {
         let dir = tempdir();
         let file = dir.join("grep_test.txt");
         fs::write(&file, "line one\nline two\nthird").expect("should write grep test file");
@@ -230,6 +233,7 @@ mod grep {
             .expect("should create grep test harness");
         let result = h
             .request(EventCategory::Echo, "grep", json!(null))
+            .await
             .expect("grep request should succeed");
 
         assert_eq!(result["count"], 2);
@@ -237,8 +241,8 @@ mod grep {
         assert_eq!(result["first_line"], "line one");
     }
 
-    #[test]
-    fn grep_regex_works() {
+    #[tokio::test]
+    async fn grep_regex_works() {
         let dir = tempdir();
         let file = dir.join("regex_test.txt");
         fs::write(&file, "foo123\nbar\nfoo456").expect("should write regex test file");
@@ -263,6 +267,7 @@ mod grep {
             .expect("should create regex grep test harness");
         let result = h
             .request(EventCategory::Echo, "grep", json!(null))
+            .await
             .expect("regex grep request should succeed");
         assert_eq!(result["count"], 2);
     }
@@ -273,8 +278,8 @@ mod grep {
 mod glob {
     use super::*;
 
-    #[test]
-    fn glob_finds_by_extension() {
+    #[tokio::test]
+    async fn glob_finds_by_extension() {
         let dir = tempdir();
         fs::write(dir.join("a.rs"), "").expect("should write a.rs");
         fs::write(dir.join("b.rs"), "").expect("should write b.rs");
@@ -300,12 +305,13 @@ mod glob {
             .expect("should create glob test harness");
         let result = h
             .request(EventCategory::Echo, "glob", json!(null))
+            .await
             .expect("glob request should succeed");
         assert_eq!(result["count"], 2);
     }
 
-    #[test]
-    fn glob_default_dir_uses_cwd() {
+    #[tokio::test]
+    async fn glob_default_dir_uses_cwd() {
         // glob without dir arg should use current directory
         let script = r#"
             return {
@@ -323,6 +329,7 @@ mod glob {
             .expect("should create glob cwd test harness");
         let result = h
             .request(EventCategory::Echo, "glob", json!(null))
+            .await
             .expect("glob with default dir should succeed");
         // Should find at least Cargo.toml in workspace root
         assert!(
@@ -336,8 +343,8 @@ mod glob {
 
 // ─── Write + Read roundtrip ─────────────────────────────────────────
 
-#[test]
-fn write_read_roundtrip() {
+#[tokio::test]
+async fn write_read_roundtrip() {
     let dir = tempdir();
     let file = dir.join("roundtrip.txt");
     let path = escape_path(&file);
@@ -362,14 +369,15 @@ fn write_read_roundtrip() {
         .expect("should create roundtrip test harness");
     let result = h
         .request(EventCategory::Echo, "test", json!(null))
+        .await
         .expect("write-read roundtrip should succeed");
     assert_eq!(result["content"], "roundtrip data 123");
 }
 
 // ─── Write + Grep ───────────────────────────────────────────────────
 
-#[test]
-fn write_then_grep() {
+#[tokio::test]
+async fn write_then_grep() {
     let dir = tempdir();
     let file = dir.join("write_grep.txt");
     let path = escape_path(&file);
@@ -394,6 +402,7 @@ fn write_then_grep() {
         .expect("should create write-then-grep test harness");
     let result = h
         .request(EventCategory::Echo, "test", json!(null))
+        .await
         .expect("write-then-grep should succeed");
     assert_eq!(result["count"], 2);
 }
@@ -489,8 +498,8 @@ mod capability_gating {
         )
     }
 
-    #[test]
-    fn read_allowed_with_read_capability() {
+    #[tokio::test]
+    async fn read_allowed_with_read_capability() {
         let dir = tempdir();
         let file = dir.join("cap_read.txt");
         fs::write(&file, "cap-gated content").expect("should write capability test file");
@@ -505,14 +514,15 @@ mod capability_gating {
 
         let result = h
             .request(EventCategory::Echo, "read", json!(null))
+            .await
             .expect("read with READ capability should succeed");
         assert_eq!(result["content"], "cap-gated content");
 
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn read_denied_without_read_capability() {
+    #[tokio::test]
+    async fn read_denied_without_read_capability() {
         let dir = tempdir();
         let file = dir.join("cap_read_deny.txt");
         fs::write(&file, "should not read").expect("should write deny-read test file");
@@ -525,7 +535,7 @@ mod capability_gating {
         h.component_mut()
             .set_child_context(CapMockContext::with_caps(Capability::WRITE));
 
-        let result = h.request(EventCategory::Echo, "read", json!(null));
+        let result = h.request(EventCategory::Echo, "read", json!(null)).await;
         // Request succeeds (Lua returns success=false), so check inner data
         assert!(
             result.is_err() || {
@@ -538,8 +548,8 @@ mod capability_gating {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn write_denied_without_write_capability() {
+    #[tokio::test]
+    async fn write_denied_without_write_capability() {
         let dir = tempdir();
         let file = dir.join("cap_write_deny.txt");
 
@@ -551,7 +561,7 @@ mod capability_gating {
         h.component_mut()
             .set_child_context(CapMockContext::with_caps(Capability::READ));
 
-        let result = h.request(EventCategory::Echo, "write", json!(null));
+        let result = h.request(EventCategory::Echo, "write", json!(null)).await;
         assert!(
             result.is_err() || {
                 let v = result.expect("write result should be available for inspection");
@@ -566,8 +576,8 @@ mod capability_gating {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn remove_denied_without_delete_capability() {
+    #[tokio::test]
+    async fn remove_denied_without_delete_capability() {
         let dir = tempdir();
         let file = dir.join("cap_remove_deny.txt");
         fs::write(&file, "should survive").expect("should write deny-delete test file");
@@ -582,7 +592,7 @@ mod capability_gating {
                 Capability::READ | Capability::WRITE,
             ));
 
-        let result = h.request(EventCategory::Echo, "remove", json!(null));
+        let result = h.request(EventCategory::Echo, "remove", json!(null)).await;
         assert!(
             result.is_err() || {
                 let v = result.expect("remove result should be available for inspection");
@@ -597,8 +607,8 @@ mod capability_gating {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn without_child_context_read_works_sandbox_only() {
+    #[tokio::test]
+    async fn without_child_context_read_works_sandbox_only() {
         // Without ChildContext, base tools (sandbox-only) are used
         let dir = tempdir();
         let file = dir.join("no_ctx_read.txt");
@@ -611,6 +621,7 @@ mod capability_gating {
         // No set_child_context — base tools active
         let result = h
             .request(EventCategory::Echo, "read", json!(null))
+            .await
             .expect("sandbox-only read should succeed");
         assert_eq!(result["content"], "sandbox only");
 

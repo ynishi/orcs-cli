@@ -61,6 +61,7 @@
 //!     status: Status,
 //! }
 //!
+//! #[async_trait::async_trait]
 //! impl Component for EchoComponent {
 //!     fn id(&self) -> &ComponentId {
 //!         &self.id
@@ -70,7 +71,7 @@
 //!         self.status
 //!     }
 //!
-//!     fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+//!     async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
 //!         match request.operation.as_str() {
 //!             "echo" => Ok(request.payload.clone()),
 //!             _ => Err(ComponentError::NotSupported(request.operation.clone())),
@@ -95,6 +96,7 @@
 use crate::{
     ComponentError, ComponentSnapshot, EventCategory, SnapshotError, Status, StatusDetail,
 };
+use async_trait::async_trait;
 use orcs_event::{Request, Signal, SignalResponse};
 use orcs_types::ComponentId;
 use serde_json::Value;
@@ -163,6 +165,7 @@ pub struct RuntimeHints {
 ///
 /// Components must be `Send + Sync` for concurrent access.
 /// Use interior mutability patterns if needed.
+#[async_trait]
 pub trait Component: Send + Sync {
     /// Returns the component's identifier.
     ///
@@ -255,7 +258,7 @@ pub trait Component: Send + Sync {
     /// | LLM | chat, complete, embed |
     /// | Tools | read, write, edit, bash |
     /// | HIL | approve, reject |
-    fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError>;
+    async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError>;
 
     /// Handle an incoming signal.
     ///
@@ -396,6 +399,21 @@ pub trait Component: Send + Sync {
         // Default: no-op
     }
 
+    /// Sets the interrupt receiver for out-of-band Veto cancellation.
+    ///
+    /// When the runner's event loop is blocked in `on_request`, signal
+    /// dispatch cannot reach `on_signal`. The interrupt receiver provides
+    /// a parallel cancellation path: a background veto-watcher task fires
+    /// the paired [`InterruptSender`](crate::InterruptSender), and the
+    /// component bridges that signal to its internal cancel mechanisms.
+    ///
+    /// # Default
+    ///
+    /// No-op - component does not support out-of-band cancellation.
+    fn set_interrupt(&mut self, _rx: crate::interrupt::InterruptReceiver) {
+        // Default: no-op
+    }
+
     // === Snapshot Support ===
 
     /// Captures the component's current state as a snapshot.
@@ -472,6 +490,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Component for MockComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -481,7 +500,7 @@ mod tests {
             self.status
         }
 
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+        async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
             match request.operation.as_str() {
                 "echo" => Ok(request.payload.clone()),
                 _ => Err(ComponentError::NotSupported(request.operation.clone())),
@@ -502,8 +521,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn component_echo() {
+    #[tokio::test]
+    async fn component_echo() {
         let mut comp = MockComponent::new("echo");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
@@ -516,19 +535,19 @@ mod tests {
         );
 
         assert_eq!(
-            comp.on_request(&req).unwrap(),
+            comp.on_request(&req).await.unwrap(),
             Value::String("hello".into())
         );
     }
 
-    #[test]
-    fn component_not_supported() {
+    #[tokio::test]
+    async fn component_not_supported() {
         let mut comp = MockComponent::new("test");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
         let req = Request::new(EventCategory::Echo, "unknown", source, channel, Value::Null);
 
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), "COMPONENT_NOT_SUPPORTED");
     }
