@@ -425,4 +425,160 @@ mod tests {
             d
         );
     }
+
+    /// Slow HTTP server that sends chunked response body one chunk every 50ms.
+    /// Returns the listener address for the client to connect to.
+    async fn start_slow_chunked_server() -> std::net::SocketAddr {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+
+            // Consume the HTTP request
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+
+            // Send response headers (chunked transfer encoding)
+            let header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let _ = socket.write_all(header.as_bytes()).await;
+
+            // Send 100 chunks slowly (each "0123456789" = 10 bytes, total 1000 bytes)
+            for _ in 0..100 {
+                // Chunked encoding: size in hex \r\n data \r\n
+                if socket.write_all(b"a\r\n0123456789\r\n").await.is_err() {
+                    break; // Client disconnected
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // Terminal chunk
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_body_limited_cancels_during_streaming() {
+        let addr = start_slow_chunked_server().await;
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        // Fire cancel after 200ms (server will have sent ~4 chunks)
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = cancel_tx.send(true);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect("send");
+
+        let start = std::time::Instant::now();
+        let result = read_body_limited(resp, 1024 * 1024, Some(cancel_rx));
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ReadBodyError::Cancelled)),
+            "expected Cancelled, got: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should cancel quickly, took: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_body_limited_succeeds_without_cancel() {
+        use tokio::io::AsyncWriteExt;
+
+        // Fast server: send complete response immediately
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+
+            let body = "hello world";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect("send");
+
+        let result = read_body_limited(resp, 1024, None);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_body_limited_cancel_already_fired() {
+        use tokio::io::AsyncWriteExt;
+
+        // Server that waits before sending body
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+
+            let header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let _ = socket.write_all(header.as_bytes()).await;
+            // Hold connection open (slow chunks)
+            for _ in 0..100 {
+                if socket.write_all(b"5\r\nhello\r\n").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+
+        // Pre-fire cancel BEFORE reading body
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let _ = cancel_tx.send(true);
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect("send");
+
+        let start = std::time::Instant::now();
+        let result = read_body_limited(resp, 1024 * 1024, Some(cancel_rx));
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ReadBodyError::Cancelled)),
+            "expected Cancelled for pre-fired cancel, got: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "pre-fired cancel should return immediately, took: {elapsed:?}"
+        );
+    }
 }
