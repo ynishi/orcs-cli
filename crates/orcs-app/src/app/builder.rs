@@ -307,8 +307,11 @@ impl OrcsAppBuilder {
         tracing::info!("ClientRunner spawned: channel={} (IO bridge)", io);
 
         // Elevated session + shared grants for builtin components.
+        // Indefinite elevation: builtins are trusted and run for the entire
+        // process lifetime. Time-limited elevation caused spawn failures
+        // when sessions exceeded the previous 1-hour expiration window.
         let elevated_session: Arc<Session> =
-            Arc::new(Session::new(principal.clone()).elevate(std::time::Duration::from_secs(3600)));
+            Arc::new(Session::new(principal.clone()).elevate_indefinite());
         // Elevated components share grants; non-elevated get their own store.
         // Concrete type so save_session/resume can call restore_grants directly.
         let shared_grants = Arc::new(DefaultGrantStore::new());

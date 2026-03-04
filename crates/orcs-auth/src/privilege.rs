@@ -37,6 +37,10 @@ use std::time::{Duration, Instant};
 /// let until = Instant::now() + Duration::from_secs(300);
 /// let elevated = PrivilegeLevel::Elevated { until };
 /// assert!(elevated.is_elevated());
+///
+/// // Indefinite elevation (for trusted builtin components)
+/// let indefinite = PrivilegeLevel::ElevatedIndefinite;
+/// assert!(indefinite.is_elevated());
 /// ```
 #[derive(Debug, Clone, Default)]
 pub enum PrivilegeLevel {
@@ -65,6 +69,17 @@ pub enum PrivilegeLevel {
         /// Expiration time for elevated privileges.
         until: Instant,
     },
+
+    /// Elevated privileges without expiration.
+    ///
+    /// For trusted builtin components that run for the entire process
+    /// lifetime. Unlike [`Elevated`](Self::Elevated), this never expires.
+    ///
+    /// Time-limited [`Elevated`](Self::Elevated) is intended for
+    /// interactive sudo-style flows where a human temporarily escalates.
+    /// Builtins are trusted by definition and should not lose privileges
+    /// mid-session.
+    ElevatedIndefinite,
 }
 
 impl PrivilegeLevel {
@@ -92,6 +107,22 @@ impl PrivilegeLevel {
         }
     }
 
+    /// Creates an indefinite elevation for trusted components.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_auth::PrivilegeLevel;
+    ///
+    /// let level = PrivilegeLevel::elevated_indefinite();
+    /// assert!(level.is_elevated());
+    /// assert!(level.remaining().is_none());
+    /// ```
+    #[must_use]
+    pub fn elevated_indefinite() -> Self {
+        Self::ElevatedIndefinite
+    }
+
     /// Returns `true` if currently elevated (and not expired).
     ///
     /// # Example
@@ -111,6 +142,7 @@ impl PrivilegeLevel {
         match self {
             Self::Standard => false,
             Self::Elevated { until } => Instant::now() < *until,
+            Self::ElevatedIndefinite => true,
         }
     }
 
@@ -136,7 +168,7 @@ impl PrivilegeLevel {
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {
         match self {
-            Self::Standard => None,
+            Self::Standard | Self::ElevatedIndefinite => None,
             Self::Elevated { until } => {
                 let now = Instant::now();
                 if now < *until {
@@ -192,5 +224,21 @@ mod tests {
             .remaining()
             .expect("elevated level should have remaining duration");
         assert!(remaining <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn indefinite_is_elevated() {
+        let level = PrivilegeLevel::elevated_indefinite();
+        assert!(level.is_elevated());
+        assert!(!level.is_standard());
+    }
+
+    #[test]
+    fn indefinite_has_no_remaining() {
+        let level = PrivilegeLevel::ElevatedIndefinite;
+        assert!(
+            level.remaining().is_none(),
+            "indefinite elevation should return None for remaining"
+        );
     }
 }
