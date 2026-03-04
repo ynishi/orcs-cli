@@ -152,6 +152,30 @@ impl Session {
         }
     }
 
+    /// Returns a new session with indefinite elevated privileges.
+    ///
+    /// For trusted builtin components that run for the entire process
+    /// lifetime. Unlike [`elevate`](Self::elevate), this never expires.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use orcs_auth::Session;
+    /// use orcs_types::{Principal, PrincipalId};
+    ///
+    /// let session = Session::new(Principal::User(PrincipalId::new()));
+    /// let elevated = session.elevate_indefinite();
+    /// assert!(elevated.is_elevated());
+    /// assert!(elevated.remaining_elevation().is_none());
+    /// ```
+    #[must_use]
+    pub fn elevate_indefinite(&self) -> Self {
+        Self {
+            principal: self.principal.clone(),
+            privilege: PrivilegeLevel::elevated_indefinite(),
+        }
+    }
+
     /// Returns a new session with Standard privilege level.
     ///
     /// Use this to explicitly drop elevated privileges before
@@ -270,5 +294,43 @@ mod tests {
 
         assert!(cloned.is_elevated());
         assert_eq!(elevated.principal().user_id(), cloned.principal().user_id());
+    }
+
+    #[test]
+    fn elevate_indefinite_creates_elevated_session() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        let elevated = session.elevate_indefinite();
+
+        assert!(
+            elevated.is_elevated(),
+            "indefinite session should be elevated"
+        );
+        assert!(
+            elevated.remaining_elevation().is_none(),
+            "indefinite session should have no remaining duration"
+        );
+        // Original unchanged
+        assert!(!session.is_elevated());
+    }
+
+    #[test]
+    fn elevate_indefinite_display_shows_elevated() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        let elevated = session.elevate_indefinite();
+        let display = format!("{elevated}");
+        assert!(
+            display.contains("elevated"),
+            "indefinite session display should contain 'elevated', got: {display}"
+        );
+    }
+
+    #[test]
+    fn drop_privilege_from_indefinite() {
+        let session = Session::new(Principal::User(PrincipalId::new()));
+        let elevated = session.elevate_indefinite();
+        let dropped = elevated.drop_privilege();
+
+        assert!(elevated.is_elevated(), "original should still be elevated");
+        assert!(!dropped.is_elevated(), "dropped should be standard");
     }
 }
