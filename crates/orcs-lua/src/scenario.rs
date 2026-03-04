@@ -51,12 +51,15 @@ use std::sync::{Arc, Mutex};
 /// Used to bridge synchronous Lua callbacks with async `on_request`.
 /// Scenario tests always run inside a tokio runtime, so `Handle::current()`
 /// is available. `block_in_place` allows blocking from within a tokio task.
-fn block_on_request<T>(fut: impl std::future::Future<Output = T>) -> T {
+fn block_on_request<T>(
+    fut: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, mlua::Error> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(fut))),
         Err(_) => {
-            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime for scenario");
-            rt.block_on(fut)
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| mlua::Error::external(format!("create tokio runtime: {e}")))?;
+            Ok(rt.block_on(fut))
         }
     }
 }
@@ -269,7 +272,7 @@ impl UserData for ScenarioHarness {
                     .lock()
                     .map_err(|e| mlua::Error::external(format!("lock poisoned: {e}")))?;
 
-                match block_on_request(harness.request(category, &op, json_payload)) {
+                match block_on_request(harness.request(category, &op, json_payload))? {
                     Ok(val) => serde_json_to_lua(&val, lua),
                     Err(e) => Err(mlua::Error::external(format!("request failed: {e}"))),
                 }

@@ -138,7 +138,7 @@ pub(crate) fn get_cancel_receiver(lua: &Lua) -> Option<watch::Receiver<bool>> {
 /// Returns `false` if no kill flag is installed (e.g. in tests).
 pub(crate) fn is_killed(lua: &Lua) -> bool {
     lua.app_data_ref::<KillFlagAppData>()
-        .map_or(false, |d| d.0.load(Ordering::Acquire))
+        .is_some_and(|d| d.0.load(Ordering::Acquire))
 }
 
 // ─── Instruction hook installation ───────────────────────────────────

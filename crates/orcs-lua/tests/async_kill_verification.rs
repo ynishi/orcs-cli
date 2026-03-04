@@ -11,7 +11,7 @@
 //! 5. Combined: cooperative cancel for async FFI + instruction hook for pure Lua = complete kill.
 
 use mlua::{Lua, VmState};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -134,16 +134,23 @@ async fn cooperative_cancel_kills_subprocess() {
     let lua = Lua::new();
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let child_pid = Arc::new(AtomicU32::new(0));
+    let child_pid_clone = Arc::clone(&child_pid);
 
     let exec_fn = lua
         .create_async_function(move |_lua, ()| {
             let mut rx = cancel_rx.clone();
+            let pid_store = Arc::clone(&child_pid_clone);
             async move {
                 let mut child = tokio::process::Command::new("sleep")
                     .arg("60")
                     .kill_on_drop(true)
                     .spawn()
                     .map_err(mlua::Error::external)?;
+
+                if let Some(pid) = child.id() {
+                    pid_store.store(pid, Ordering::Release);
+                }
 
                 tokio::select! {
                     status = child.wait() => {
@@ -191,19 +198,20 @@ async fn cooperative_cancel_kills_subprocess() {
     );
     assert!(result.is_err(), "Should have been cancelled");
 
-    // Verify no orphan `sleep 60` processes remain
+    // Verify the specific child process is no longer running
+    let pid = child_pid.load(Ordering::Acquire);
+    assert!(pid > 0, "Child PID should have been recorded");
+
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let ps_output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("pgrep -f 'sleep 60' || true")
-        .output()
-        .await
-        .expect("pgrep");
-    let remaining = String::from_utf8_lossy(&ps_output.stdout);
+
+    // Check if the specific PID is still alive (kill -0 = existence check)
+    let status = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status();
+    let still_alive = status.is_ok_and(|s| s.success());
     assert!(
-        remaining.trim().is_empty(),
-        "Orphan 'sleep 60' processes found: {}",
-        remaining.trim()
+        !still_alive,
+        "Child process (PID {pid}) should have been killed but is still running"
     );
 }
 
