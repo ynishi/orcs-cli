@@ -41,8 +41,8 @@ fn load_simple_component() {
     assert_eq!(component.subscriptions(), &[EventCategory::Echo]);
 }
 
-#[test]
-fn handle_request() {
+#[tokio::test]
+async fn handle_request() {
     let script = r#"
             return {
                 id = "echo-lua",
@@ -62,7 +62,7 @@ fn handle_request() {
     let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
     let req = create_test_request("echo", JsonValue::String("hello".into()));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok());
     assert_eq!(
@@ -72,7 +72,7 @@ fn handle_request() {
 }
 
 #[test]
-fn handle_signal_abort() {
+fn handle_veto_as_soft_cancel() {
     let script = r#"
             return {
                 id = "signal-test",
@@ -91,11 +91,12 @@ fn handle_signal_abort() {
 
     let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
+    // Veto is soft cancel — Lua returns "Abort" but Rust overrides to Handled
     let signal = Signal::veto(test_principal());
     let response = component.on_signal(&signal);
 
-    assert!(matches!(response, SignalResponse::Abort));
-    assert_eq!(component.status(), Status::Aborted);
+    assert!(matches!(response, SignalResponse::Handled));
+    assert_eq!(component.status(), Status::Idle);
 }
 
 #[test]
@@ -206,8 +207,8 @@ mod exec_tests {
         comp
     }
 
-    #[test]
-    fn exec_denied_without_context() {
+    #[tokio::test]
+    async fn exec_denied_without_context() {
         // Without ChildContext, exec should deny
         let script = r#"
                 return {
@@ -230,7 +231,7 @@ mod exec_tests {
 
         let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req).expect("should succeed");
+        let result = component.on_request(&req).await.expect("should succeed");
 
         assert!(!result["ok"].as_bool().unwrap_or(true));
         let stderr = result["stderr"]
@@ -242,12 +243,12 @@ mod exec_tests {
         );
     }
 
-    #[test]
-    fn exec_echo_command_with_context() {
+    #[tokio::test]
+    async fn exec_echo_command_with_context() {
         let mut component = create_exec_component("echo 'hello world'");
 
         let req = create_test_request("test", JsonValue::Null);
-        let data = component.on_request(&req).expect("should succeed");
+        let data = component.on_request(&req).await.expect("should succeed");
 
         assert!(data["ok"].as_bool().unwrap_or(false));
         assert!(data["stdout"]
@@ -257,23 +258,23 @@ mod exec_tests {
         assert_eq!(data["code"].as_i64(), Some(0));
     }
 
-    #[test]
-    fn exec_failing_command() {
+    #[tokio::test]
+    async fn exec_failing_command() {
         let mut component = create_exec_component("exit 42");
 
         let req = create_test_request("test", JsonValue::Null);
-        let data = component.on_request(&req).expect("should succeed");
+        let data = component.on_request(&req).await.expect("should succeed");
 
         assert!(!data["ok"].as_bool().unwrap_or(true));
         assert_eq!(data["code"].as_i64(), Some(42));
     }
 
-    #[test]
-    fn exec_stderr_captured() {
+    #[tokio::test]
+    async fn exec_stderr_captured() {
         let mut component = create_exec_component("echo 'error output' >&2");
 
         let req = create_test_request("test", JsonValue::Null);
-        let data = component.on_request(&req).expect("should succeed");
+        let data = component.on_request(&req).await.expect("should succeed");
 
         assert!(data["stderr"]
             .as_str()
@@ -287,11 +288,7 @@ mod exec_tests {
 
         let req = create_test_request("test", JsonValue::Null);
 
-        let result = tokio::task::spawn_blocking(move || component.on_request(&req))
-            .await
-            .expect("spawn_blocking should succeed");
-
-        let data = result.expect("should succeed");
+        let data = component.on_request(&req).await.expect("should succeed");
         assert!(data["ok"].as_bool().unwrap_or(false));
         assert!(data["stdout"]
             .as_str()
@@ -299,8 +296,8 @@ mod exec_tests {
             .contains("async test"));
     }
 
-    #[test]
-    fn exec_with_special_characters() {
+    #[tokio::test]
+    async fn exec_with_special_characters() {
         let script = r#"
                 return {
                     id = "exec-special",
@@ -321,7 +318,7 @@ mod exec_tests {
         let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         component.set_child_context(Box::new(PermissiveContext));
         let req = create_test_request("test", JsonValue::Null);
-        let data = component.on_request(&req).expect("should succeed");
+        let data = component.on_request(&req).await.expect("should succeed");
 
         assert!(data["stdout"]
             .as_str()
@@ -335,8 +332,8 @@ mod exec_tests {
 mod log_tests {
     use super::*;
 
-    #[test]
-    fn log_levels_work() {
+    #[tokio::test]
+    async fn log_levels_work() {
         let script = r#"
                 return {
                     id = "log-test",
@@ -357,7 +354,7 @@ mod log_tests {
 
         let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         // Should complete without error (log output goes to tracing)
         assert!(result.is_ok());
@@ -442,8 +439,8 @@ mod emitter_tests {
         assert!(component.has_emitter());
     }
 
-    #[test]
-    fn orcs_output_calls_emitter() {
+    #[tokio::test]
+    async fn orcs_output_calls_emitter() {
         let script = r#"
                 return {
                     id = "output-test",
@@ -465,7 +462,7 @@ mod emitter_tests {
         component.set_emitter(Box::new(emitter));
 
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok());
         assert!(
@@ -474,8 +471,8 @@ mod emitter_tests {
         );
     }
 
-    #[test]
-    fn orcs_output_with_level_calls_emitter() {
+    #[tokio::test]
+    async fn orcs_output_with_level_calls_emitter() {
         let script = r#"
                 return {
                     id = "output-level-test",
@@ -497,7 +494,7 @@ mod emitter_tests {
         component.set_emitter(Box::new(emitter));
 
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok());
         assert!(
@@ -506,8 +503,8 @@ mod emitter_tests {
         );
     }
 
-    #[test]
-    fn orcs_output_without_emitter_is_noop() {
+    #[tokio::test]
+    async fn orcs_output_without_emitter_is_noop() {
         let script = r#"
                 return {
                     id = "output-noop-test",
@@ -527,7 +524,7 @@ mod emitter_tests {
 
         // Note: no emitter set
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         // Should complete without error
         assert!(result.is_ok());
@@ -558,8 +555,8 @@ mod emitter_tests {
         }
     }
 
-    #[test]
-    fn board_recent_via_emitter() {
+    #[tokio::test]
+    async fn board_recent_via_emitter() {
         let script = r#"
                 return {
                     id = "board-test",
@@ -584,12 +581,12 @@ mod emitter_tests {
         component.set_emitter(Box::new(emitter));
 
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req).expect("should succeed");
+        let result = component.on_request(&req).await.expect("should succeed");
         assert_eq!(result["count"], 2);
     }
 
-    #[test]
-    fn board_recent_empty_without_emitter() {
+    #[tokio::test]
+    async fn board_recent_empty_without_emitter() {
         let script = r#"
                 return {
                     id = "board-empty-test",
@@ -606,12 +603,12 @@ mod emitter_tests {
         let mut component = LuaComponent::from_script(script, test_policy()).expect("load script");
 
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn board_recent_respects_limit() {
+    #[tokio::test]
+    async fn board_recent_respects_limit() {
         let script = r#"
                 return {
                     id = "board-limit-test",
@@ -639,7 +636,7 @@ mod emitter_tests {
         component.set_emitter(Box::new(emitter));
 
         let req = create_test_request("test", JsonValue::Null);
-        let result = component.on_request(&req).expect("should succeed");
+        let result = component.on_request(&req).await.expect("should succeed");
         assert_eq!(result["count"], 2);
         assert_eq!(result["last"], "msg4");
     }
@@ -889,8 +886,8 @@ mod snapshot_tests {
         );
     }
 
-    #[test]
-    fn snapshot_roundtrip_simple_state() {
+    #[tokio::test]
+    async fn snapshot_roundtrip_simple_state() {
         let script = r#"
             local state = { counter = 0, name = "test" }
 
@@ -922,13 +919,25 @@ mod snapshot_tests {
         let mut comp1 =
             LuaComponent::from_script(script, test_policy()).expect("should load script");
         let req = create_test_request("increment", JsonValue::Null);
-        comp1.on_request(&req).expect("increment should succeed");
-        comp1.on_request(&req).expect("increment should succeed");
-        comp1.on_request(&req).expect("increment should succeed");
+        comp1
+            .on_request(&req)
+            .await
+            .expect("increment should succeed");
+        comp1
+            .on_request(&req)
+            .await
+            .expect("increment should succeed");
+        comp1
+            .on_request(&req)
+            .await
+            .expect("increment should succeed");
 
         // Verify state is counter=3
         let get_req = create_test_request("get", JsonValue::Null);
-        let data = comp1.on_request(&get_req).expect("get should succeed");
+        let data = comp1
+            .on_request(&get_req)
+            .await
+            .expect("get should succeed");
         assert_eq!(data["counter"], 3);
 
         // Take snapshot
@@ -944,20 +953,26 @@ mod snapshot_tests {
             LuaComponent::from_script(script, test_policy()).expect("should load script");
 
         // Verify fresh state is counter=0
-        let data = comp2.on_request(&get_req).expect("get should succeed");
+        let data = comp2
+            .on_request(&get_req)
+            .await
+            .expect("get should succeed");
         assert_eq!(data["counter"], 0);
 
         // Restore from snapshot
         comp2.restore(&snapshot).expect("restore should succeed");
 
         // Verify restored state is counter=3
-        let data = comp2.on_request(&get_req).expect("get should succeed");
+        let data = comp2
+            .on_request(&get_req)
+            .await
+            .expect("get should succeed");
         assert_eq!(data["counter"], 3);
         assert_eq!(data["name"], "test");
     }
 
-    #[test]
-    fn snapshot_with_nested_tables() {
+    #[tokio::test]
+    async fn snapshot_with_nested_tables() {
         let script = r#"
             local state = {
                 items = {},
@@ -997,9 +1012,15 @@ mod snapshot_tests {
 
         // Add items
         let add_req = create_test_request("add", serde_json::json!({"item": "alpha"}));
-        comp1.on_request(&add_req).expect("add should succeed");
+        comp1
+            .on_request(&add_req)
+            .await
+            .expect("add should succeed");
         let add_req = create_test_request("add", serde_json::json!({"item": "beta"}));
-        comp1.on_request(&add_req).expect("add should succeed");
+        comp1
+            .on_request(&add_req)
+            .await
+            .expect("add should succeed");
 
         // Snapshot
         let snapshot = comp1.snapshot().expect("snapshot should succeed");
@@ -1011,7 +1032,10 @@ mod snapshot_tests {
 
         // Verify
         let get_req = create_test_request("get", JsonValue::Null);
-        let data = comp2.on_request(&get_req).expect("get should succeed");
+        let data = comp2
+            .on_request(&get_req)
+            .await
+            .expect("get should succeed");
         assert_eq!(data["count"], 2);
         assert_eq!(data["version"], 1);
         assert_eq!(data["items"][0], "alpha");
@@ -1046,8 +1070,8 @@ mod snapshot_tests {
 
 // --- from_script_with_globals tests ---
 
-#[test]
-fn globals_inject_string_value() {
+#[tokio::test]
+async fn globals_inject_string_value() {
     let script = r#"
         return {
             id = "globals-test",
@@ -1068,12 +1092,15 @@ fn globals_inject_string_value() {
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
-    let result = component.on_request(&req).expect("request should succeed");
+    let result = component
+        .on_request(&req)
+        .await
+        .expect("request should succeed");
     assert_eq!(result, JsonValue::String("injected_value".into()));
 }
 
-#[test]
-fn globals_inject_nested_table() {
+#[tokio::test]
+async fn globals_inject_nested_table() {
     let script = r#"
         return {
             id = "globals-nested",
@@ -1106,7 +1133,10 @@ fn globals_inject_nested_table() {
             .expect("load script with globals");
 
     let req = create_test_request("get", JsonValue::Null);
-    let result = component.on_request(&req).expect("request should succeed");
+    let result = component
+        .on_request(&req)
+        .await
+        .expect("request should succeed");
     assert_eq!(result["name"], "test-agent");
     assert_eq!(result["expertise"], "Rust expert");
 }

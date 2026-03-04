@@ -84,12 +84,12 @@ return {
         -- Signal handling
         -- =================================================================
         {
-            name = "veto signal aborts component",
+            name = "veto signal is soft cancel",
             run = function(h)
                 expect(h:status()).to.equal("Idle")
                 local response = h:veto()
-                expect(response).to.equal("Abort")
-                expect(h:status()).to.equal("Aborted")
+                expect(response).to.equal("Handled")
+                expect(h:status()).to.equal("Idle")
             end,
         },
         {
@@ -138,7 +138,7 @@ return {
                 local log = h:signal_log()
                 expect(#log).to.equal(2)
                 expect(log[1].response).to.equal("Handled")
-                expect(log[2].response).to.equal("Abort")
+                expect(log[2].response).to.equal("Handled")
             end,
         },
         {

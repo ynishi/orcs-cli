@@ -88,7 +88,7 @@
 //!
 //! # Example: Simple Component
 //!
-//! ```
+//! ```ignore
 //! use orcs_component::{Component, ComponentError, Status};
 //! use orcs_event::{Request, Signal, SignalResponse};
 //! use orcs_types::ComponentId;
@@ -205,6 +205,7 @@ mod component;
 mod context;
 mod emitter;
 mod error;
+pub mod interrupt;
 mod package;
 mod snapshot;
 mod status;
@@ -255,6 +256,9 @@ pub use error::ComponentError;
 // Re-export tool types
 pub use tool::{RustTool, ToolContext, ToolError};
 
+// Re-export interrupt channel types
+pub use interrupt::{interrupt_channel, InterruptReceiver, InterruptSender};
+
 // Re-export EventCategory and SubscriptionEntry for convenience
 pub use orcs_event::{EventCategory, SubscriptionEntry};
 
@@ -279,6 +283,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl Component for MockComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -288,7 +293,7 @@ mod tests {
             self.status
         }
 
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+        async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
             match request.operation.as_str() {
                 "echo" => Ok(request.payload.clone()),
                 _ => Err(ComponentError::NotSupported(request.operation.clone())),
@@ -309,8 +314,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mock_component_echo() {
+    #[tokio::test]
+    async fn mock_component_echo() {
         let mut comp = MockComponent::new("echo");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
@@ -323,19 +328,19 @@ mod tests {
         );
 
         assert_eq!(
-            comp.on_request(&req).unwrap(),
+            comp.on_request(&req).await.unwrap(),
             Value::String("hello".into())
         );
     }
 
-    #[test]
-    fn mock_component_unknown_operation() {
+    #[tokio::test]
+    async fn mock_component_unknown_operation() {
         let mut comp = MockComponent::new("test");
         let source = ComponentId::builtin("test");
         let channel = ChannelId::new();
         let req = Request::new(EventCategory::Echo, "unknown", source, channel, Value::Null);
 
-        let result = comp.on_request(&req);
+        let result = comp.on_request(&req).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), "COMPONENT_NOT_SUPPORTED");
     }

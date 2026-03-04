@@ -1432,7 +1432,7 @@ mod tests {
 
     impl SignalReceiver for TestWorker {
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
+            if signal.is_shutdown() {
                 self.status = Status::Aborted;
                 SignalResponse::Abort
             } else {

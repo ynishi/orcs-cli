@@ -699,10 +699,17 @@ impl OrcsApp {
                 return LoopControl::Exit;
             }
             InputCommand::Veto => {
-                tracing::warn!("Veto signal sent");
-                // Send via IOInput (ClientRunner will convert to Signal)
+                tracing::warn!("Veto signal sent (soft cancel)");
+                // Broadcast to ALL runners (including child-spawned delegates)
+                // via the Engine's signal bus.  Without this, only the
+                // ClientRunner sees the veto — delegate veto-watchers never
+                // fire and in-flight LLM requests are not cancelled.
+                self.engine.signal(Signal::veto(self.principal.clone()));
+                // Also send via IOInput so ClientRunner can perform any local
+                // IO-level handling (currently a no-op for Veto, but keeps the
+                // IOInput path consistent with other commands).
                 self.send_io_input(line);
-                return LoopControl::Exit;
+                return LoopControl::Continue;
             }
             InputCommand::Approve { approval_id } => {
                 self.handle_approve_via_io(line, approval_id.as_deref());

@@ -84,8 +84,9 @@ pub(super) fn parse_response_body(
 ) -> mlua::Result<ResponseOrError> {
     let status = resp.status().as_u16();
 
-    // Read body with streaming size limit
-    let body_text = match read_body_limited(resp, MAX_BODY_SIZE) {
+    // Read body with streaming size limit + cancel support
+    let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+    let body_text = match read_body_limited(resp, MAX_BODY_SIZE, cancel_rx) {
         Ok(text) => text,
         Err(ReadBodyError::TooLarge) => {
             let result = lua.create_table()?;
@@ -112,6 +113,9 @@ pub(super) fn parse_response_body(
             result.set("error_kind", "network")?;
             result.set("session_id", session_id)?;
             return Ok(ResponseOrError::ErrorTable(result));
+        }
+        Err(ReadBodyError::Cancelled) => {
+            return Err(mlua::Error::RuntimeError("killed by veto".into()));
         }
     };
 

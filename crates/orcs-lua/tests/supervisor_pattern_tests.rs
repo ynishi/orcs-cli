@@ -221,7 +221,11 @@ fn user_input() -> EventCategory {
     EventCategory::UserInput
 }
 
-fn send_runner_exited(h: &mut LuaTestHarness, fqn: &str, exit_reason: &str) -> serde_json::Value {
+async fn send_runner_exited(
+    h: &mut LuaTestHarness,
+    fqn: &str,
+    exit_reason: &str,
+) -> serde_json::Value {
     h.request(
         lifecycle(),
         "runner_exited",
@@ -230,21 +234,23 @@ fn send_runner_exited(h: &mut LuaTestHarness, fqn: &str, exit_reason: &str) -> s
             "exit_reason": exit_reason,
         }),
     )
+    .await
     .expect("runner_exited request should succeed")
 }
 
-fn get_status(h: &mut LuaTestHarness) -> serde_json::Value {
+async fn get_status(h: &mut LuaTestHarness) -> serde_json::Value {
     h.request(lifecycle(), "status", json!({}))
+        .await
         .expect("status request should succeed")
 }
 
 // ─── Concierge restart ──────────────────────────────────────────────
 
-#[test]
-fn concierge_restart_on_runner_exited() {
+#[tokio::test]
+async fn concierge_restart_on_runner_exited() {
     let mut h = make_harness();
 
-    let result = send_runner_exited(&mut h, "builtin::concierge-v1", "component_stopped");
+    let result = send_runner_exited(&mut h, "builtin::concierge-v1", "component_stopped").await;
 
     assert_eq!(
         result["action"], "restart_concierge",
@@ -253,7 +259,7 @@ fn concierge_restart_on_runner_exited() {
     assert_eq!(result["restarted"], true, "restart should succeed");
 
     // Verify new FQN was assigned
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     let new_fqn = status["concierge_fqn"]
         .as_str()
         .expect("concierge_fqn should be a string");
@@ -269,11 +275,12 @@ fn concierge_restart_on_runner_exited() {
 
 // ─── Delegate-worker restart ────────────────────────────────────────
 
-#[test]
-fn delegate_worker_restart_on_runner_exited() {
+#[tokio::test]
+async fn delegate_worker_restart_on_runner_exited() {
     let mut h = make_harness();
 
-    let result = send_runner_exited(&mut h, "builtin::delegate-worker-v1", "component_stopped");
+    let result =
+        send_runner_exited(&mut h, "builtin::delegate-worker-v1", "component_stopped").await;
 
     assert_eq!(
         result["action"], "restart_delegate_worker",
@@ -281,7 +288,7 @@ fn delegate_worker_restart_on_runner_exited() {
     );
     assert_eq!(result["restarted"], true, "restart should succeed");
 
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     let new_fqn = status["delegate_worker_fqn"]
         .as_str()
         .expect("delegate_worker_fqn should be a string");
@@ -293,8 +300,8 @@ fn delegate_worker_restart_on_runner_exited() {
 
 // ─── External concierge protection ─────────────────────────────────
 
-#[test]
-fn external_concierge_not_replaced_with_builtin() {
+#[tokio::test]
+async fn external_concierge_not_replaced_with_builtin() {
     let mut h = make_harness();
 
     // Replace concierge FQN with external
@@ -303,9 +310,11 @@ fn external_concierge_not_replaced_with_builtin() {
         "_set_fqn",
         json!({ "concierge": "custom::external-concierge" }),
     )
+    .await
     .expect("set FQN should succeed");
 
-    let result = send_runner_exited(&mut h, "custom::external-concierge", "component_stopped");
+    let result =
+        send_runner_exited(&mut h, "custom::external-concierge", "component_stopped").await;
 
     assert_eq!(
         result["action"], "external_concierge_exited",
@@ -317,7 +326,7 @@ fn external_concierge_not_replaced_with_builtin() {
     );
 
     // concierge_fqn should be nil (cleared, not replaced)
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     assert!(
         status["concierge_fqn"].is_null(),
         "concierge_fqn should be nil after external exit"
@@ -326,20 +335,21 @@ fn external_concierge_not_replaced_with_builtin() {
 
 // ─── Restart intensity limit ────────────────────────────────────────
 
-#[test]
-fn restart_intensity_blocks_after_max_restarts() {
+#[tokio::test]
+async fn restart_intensity_blocks_after_max_restarts() {
     let mut h = make_harness();
 
     // Restart 1-3: should all succeed
     for i in 1..=3 {
         // Reset FQN to the "current" concierge so the match works
-        let status = get_status(&mut h);
+        let status = get_status(&mut h).await;
         let current_fqn = if status["concierge_fqn"].is_null() {
             // After a restart, FQN was updated. Set it to match next time.
             // But the restart_counts track the old FQN. Simulate fresh crash.
             // For simplicity, use _set_fqn to set a known FQN each round.
             let fqn = format!("builtin::concierge-round-{i}");
             h.request(lifecycle(), "_set_fqn", json!({ "concierge": fqn }))
+                .await
                 .expect("set FQN should succeed");
             fqn
         } else {
@@ -349,7 +359,7 @@ fn restart_intensity_blocks_after_max_restarts() {
                 .to_string()
         };
 
-        let result = send_runner_exited(&mut h, &current_fqn, "component_stopped");
+        let result = send_runner_exited(&mut h, &current_fqn, "component_stopped").await;
         assert_eq!(result["restarted"], true, "restart #{i} should succeed");
     }
 
@@ -363,22 +373,25 @@ fn restart_intensity_blocks_after_max_restarts() {
         "_set_restart_count",
         json!({ "fqn": "builtin::concierge-intensity", "count": 3 }),
     )
+    .await
     .expect("set restart count should succeed");
     h.request(
         lifecycle(),
         "_set_fqn",
         json!({ "concierge": "builtin::concierge-intensity" }),
     )
+    .await
     .expect("set FQN should succeed");
 
-    let result = send_runner_exited(&mut h, "builtin::concierge-intensity", "component_stopped");
+    let result =
+        send_runner_exited(&mut h, "builtin::concierge-intensity", "component_stopped").await;
     assert_eq!(
         result["restarted"], false,
         "4th restart should be blocked by intensity limit"
     );
 
     // Verify restart log records the failure
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     let log = status["restart_log"]
         .as_array()
         .expect("restart_log should be an array");
@@ -389,30 +402,33 @@ fn restart_intensity_blocks_after_max_restarts() {
 
 // ─── Restart window reset ───────────────────────────────────────────
 
-#[test]
-fn restart_window_resets_after_expiry() {
+#[tokio::test]
+async fn restart_window_resets_after_expiry() {
     let mut h = make_harness();
 
     let base_time = 1_000_000;
 
     // Set mock time and exhaust restart budget
     h.request(lifecycle(), "_set_mock_time", json!({ "time": base_time }))
+        .await
         .expect("set mock time should succeed");
     h.request(
         lifecycle(),
         "_set_restart_count",
         json!({ "fqn": "builtin::concierge-window", "count": 3, "window_start": base_time }),
     )
+    .await
     .expect("set restart count should succeed");
     h.request(
         lifecycle(),
         "_set_fqn",
         json!({ "concierge": "builtin::concierge-window" }),
     )
+    .await
     .expect("set FQN should succeed");
 
     // Attempt restart within window → should fail
-    let result = send_runner_exited(&mut h, "builtin::concierge-window", "component_stopped");
+    let result = send_runner_exited(&mut h, "builtin::concierge-window", "component_stopped").await;
     assert_eq!(result["restarted"], false, "should fail within window");
 
     // Advance time past the window (61 seconds)
@@ -421,6 +437,7 @@ fn restart_window_resets_after_expiry() {
         "_set_mock_time",
         json!({ "time": base_time + 61 }),
     )
+    .await
     .expect("advance mock time should succeed");
 
     // Set FQN again (was cleared by previous attempt)
@@ -429,9 +446,10 @@ fn restart_window_resets_after_expiry() {
         "_set_fqn",
         json!({ "concierge": "builtin::concierge-window" }),
     )
+    .await
     .expect("set FQN should succeed");
 
-    let result = send_runner_exited(&mut h, "builtin::concierge-window", "component_stopped");
+    let result = send_runner_exited(&mut h, "builtin::concierge-window", "component_stopped").await;
     assert_eq!(
         result["restarted"], true,
         "should succeed after window expiry"
@@ -440,16 +458,17 @@ fn restart_window_resets_after_expiry() {
 
 // ─── Per-delegation worker failure ──────────────────────────────────
 
-#[test]
-fn per_delegation_worker_failure_recorded() {
+#[tokio::test]
+async fn per_delegation_worker_failure_recorded() {
     let mut h = make_harness();
 
-    let result = send_runner_exited(&mut h, "builtin::delegate-req-abc123", "component_stopped");
+    let result =
+        send_runner_exited(&mut h, "builtin::delegate-req-abc123", "component_stopped").await;
 
     assert_eq!(result["action"], "delegation_failed");
     assert_eq!(result["request_id"], "req-abc123");
 
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     let results = status["delegation_results"]
         .as_array()
         .expect("delegation_results should be an array");
@@ -470,13 +489,13 @@ fn per_delegation_worker_failure_recorded() {
 /// "builtin::delegate-worker" matches delegate_worker_fqn BEFORE the
 /// per-delegation pattern "^builtin::delegate%-". Without the correct
 /// branch order, it would be misidentified as request_id="worker".
-#[test]
-fn delegate_worker_fqn_matches_before_per_delegation_pattern() {
+#[tokio::test]
+async fn delegate_worker_fqn_matches_before_per_delegation_pattern() {
     let mut h = make_harness();
 
     // The initial delegate_worker_fqn is "builtin::delegate-worker-v1"
     // which also matches "^builtin::delegate%-". Verify the exact match wins.
-    let result = send_runner_exited(&mut h, "builtin::delegate-worker-v1", "signal");
+    let result = send_runner_exited(&mut h, "builtin::delegate-worker-v1", "signal").await;
 
     assert_eq!(
         result["action"], "restart_delegate_worker",
@@ -492,8 +511,8 @@ fn delegate_worker_fqn_matches_before_per_delegation_pattern() {
 
 // ─── Lifecycle fallthrough guard ────────────────────────────────────
 
-#[test]
-fn unknown_lifecycle_op_does_not_reach_userinput_handler() {
+#[tokio::test]
+async fn unknown_lifecycle_op_does_not_reach_userinput_handler() {
     let mut h = make_harness();
 
     let result = h
@@ -502,6 +521,7 @@ fn unknown_lifecycle_op_does_not_reach_userinput_handler() {
             "some_future_lifecycle_event",
             json!({ "data": "whatever" }),
         )
+        .await
         .expect("unknown lifecycle op should succeed");
 
     assert_eq!(
@@ -518,11 +538,12 @@ fn unknown_lifecycle_op_does_not_reach_userinput_handler() {
 
 // ─── Unmanaged component ────────────────────────────────────────────
 
-#[test]
-fn unmanaged_component_exit_is_logged_only() {
+#[tokio::test]
+async fn unmanaged_component_exit_is_logged_only() {
     let mut h = make_harness();
 
-    let result = send_runner_exited(&mut h, "custom::some-other-component", "channel_inactive");
+    let result =
+        send_runner_exited(&mut h, "custom::some-other-component", "channel_inactive").await;
 
     assert_eq!(
         result["action"], "unmanaged",
@@ -531,7 +552,7 @@ fn unmanaged_component_exit_is_logged_only() {
     assert_eq!(result["fqn"], "custom::some-other-component");
 
     // No restarts should have been attempted
-    let status = get_status(&mut h);
+    let status = get_status(&mut h).await;
     let log = &status["restart_log"];
     // Empty Lua table serialises as JSON object {}, not array [].
     let is_empty = log.is_null()
@@ -542,16 +563,17 @@ fn unmanaged_component_exit_is_logged_only() {
 
 // ─── UserInput NOT affected by Lifecycle handling ───────────────────
 
-#[test]
-fn userinput_still_works_after_lifecycle_events() {
+#[tokio::test]
+async fn userinput_still_works_after_lifecycle_events() {
     let mut h = make_harness();
 
     // Process a Lifecycle event first
-    send_runner_exited(&mut h, "custom::something", "signal");
+    send_runner_exited(&mut h, "custom::something", "signal").await;
 
     // UserInput should still work normally
     let result = h
         .request(user_input(), "input", json!({ "message": "hello" }))
+        .await
         .expect("UserInput should succeed");
     assert_eq!(result["echo"], "hello");
 }

@@ -41,6 +41,7 @@
 //! assert!(hil.is_pending(&id));
 //! ```
 
+use async_trait::async_trait;
 use orcs_component::{
     Component, ComponentError, ComponentSnapshot, EventCategory, SnapshotError, Status,
 };
@@ -286,6 +287,7 @@ impl Default for HilComponent {
     }
 }
 
+#[async_trait]
 impl Component for HilComponent {
     fn id(&self) -> &ComponentId {
         &self.id
@@ -299,7 +301,7 @@ impl Component for HilComponent {
         self.status
     }
 
-    fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+    async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
         match request.operation.as_str() {
             "submit" => {
                 // Parse the approval request from payload
@@ -341,9 +343,23 @@ impl Component for HilComponent {
 
     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
         match &signal.kind {
-            SignalKind::Veto => {
+            SignalKind::Shutdown => {
                 self.abort();
                 SignalResponse::Abort
+            }
+            SignalKind::Veto => {
+                // Soft cancel: reject all pending requests, return to Idle.
+                let pending_ids: Vec<_> = self.pending.keys().cloned().collect();
+                for id in pending_ids {
+                    let _ = self.resolve(
+                        &id,
+                        ApprovalResult::Rejected {
+                            reason: Some("vetoed".into()),
+                        },
+                    );
+                }
+                self.status = Status::Idle;
+                SignalResponse::Handled
             }
             SignalKind::Approve { approval_id } => self.handle_approve(approval_id),
             SignalKind::Reject {
@@ -563,8 +579,8 @@ mod tests {
         assert_eq!(hil.pending_count(), 0);
     }
 
-    #[test]
-    fn hil_request_submit() {
+    #[tokio::test]
+    async fn hil_request_submit() {
         let mut hil = HilComponent::new();
         let source = ComponentId::builtin("tools");
         let channel = ChannelId::new();
@@ -578,15 +594,15 @@ mod tests {
         });
 
         let req = Request::new(EventCategory::Hil, "submit", source, channel, payload);
-        let result = hil.on_request(&req);
+        let result = hil.on_request(&req).await;
 
         let response = result.expect("submit request");
         assert_eq!(response["status"], "pending");
         assert!(hil.is_pending("custom-id"));
     }
 
-    #[test]
-    fn hil_request_list() {
+    #[tokio::test]
+    async fn hil_request_list() {
         let mut hil = HilComponent::new();
         hil.submit(ApprovalRequest::with_id(
             "req-1",
@@ -611,15 +627,15 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let response = hil.on_request(&req).expect("list request");
+        let response = hil.on_request(&req).await.expect("list request");
         let pending = response["pending"]
             .as_array()
             .expect("pending should be array");
         assert_eq!(pending.len(), 2);
     }
 
-    #[test]
-    fn hil_request_status() {
+    #[tokio::test]
+    async fn hil_request_status() {
         let mut hil = HilComponent::new();
         hil.submit(ApprovalRequest::with_id(
             "check-me",
@@ -638,7 +654,7 @@ mod tests {
             serde_json::json!({ "approval_id": "check-me" }),
         );
 
-        let response = hil.on_request(&req).expect("status request");
+        let response = hil.on_request(&req).await.expect("status request");
         assert_eq!(response["status"], "pending");
     }
 

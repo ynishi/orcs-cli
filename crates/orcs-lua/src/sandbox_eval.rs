@@ -79,8 +79,11 @@ fn sandbox_eval(lua: &Lua, code: String) -> LuaResult<Table> {
     // Execute
     let exec_result: LuaResult<Value> = chunk.eval();
 
-    // Clear hook immediately
+    // Clear instruction-limit hook and restore kill-flag hook (if installed).
     lua.remove_hook();
+    if let Err(e) = crate::kill_flag::restore_hook(lua) {
+        tracing::debug!("Failed to restore kill-flag hook after sandbox_eval: {}", e);
+    }
 
     // Collect output (recover from poisoned mutex to avoid silent data loss)
     let output_str = output_buf

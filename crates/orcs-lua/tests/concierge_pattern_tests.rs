@@ -137,13 +137,14 @@ return {
 mod status {
     use super::*;
 
-    #[test]
-    fn initial_status_returns_idle() {
+    #[tokio::test]
+    async fn initial_status_returns_idle() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         let result = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(result["busy"], false, "should not be busy initially");
@@ -158,8 +159,8 @@ mod status {
         );
     }
 
-    #[test]
-    fn status_reflects_processing_state() {
+    #[tokio::test]
+    async fn status_reflects_processing_state() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
@@ -170,6 +171,7 @@ mod status {
                 "process",
                 json!({ "message": "hello", "config": { "provider": "ollama", "model": "qwen" } }),
             )
+            .await
             .expect("process should succeed");
 
         assert_eq!(result["response"], "processed: hello");
@@ -177,6 +179,7 @@ mod status {
         // Check status after processing
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(status["busy"], false, "should not be busy after processing");
@@ -186,8 +189,8 @@ mod status {
         assert_eq!(status["model"], "qwen");
     }
 
-    #[test]
-    fn turn_count_increments_per_process() {
+    #[tokio::test]
+    async fn turn_count_increments_per_process() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
@@ -198,11 +201,13 @@ mod status {
                     "process",
                     json!({ "message": format!("msg{i}") }),
                 )
+                .await
                 .expect("process should succeed");
         }
 
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(status["turn_count"], 3);
@@ -217,14 +222,15 @@ mod status {
 mod busy_guard {
     use super::*;
 
-    #[test]
-    fn empty_message_is_accepted_regardless() {
+    #[tokio::test]
+    async fn empty_message_is_accepted_regardless() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // Empty message should return success without setting busy
         let result = harness
             .request(ext_cat(), "process", json!({ "message": "" }))
+            .await
             .expect("empty message should succeed");
 
         // Empty message returns success=true (top-level, not in data)
@@ -238,6 +244,7 @@ mod busy_guard {
         // Verify status: turn_count should still be 0 (empty msg doesn't count)
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
         assert_eq!(
             status["turn_count"], 0,
@@ -253,13 +260,15 @@ mod busy_guard {
 mod pcall_safety {
     use super::*;
 
-    #[test]
-    fn busy_resets_after_lua_error() {
+    #[tokio::test]
+    async fn busy_resets_after_lua_error() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // Trigger a Lua error during processing
-        let result = harness.request(ext_cat(), "process", json!({ "message": "TRIGGER_ERROR" }));
+        let result = harness
+            .request(ext_cat(), "process", json!({ "message": "TRIGGER_ERROR" }))
+            .await;
 
         // The request should return an error (not panic)
         assert!(
@@ -270,6 +279,7 @@ mod pcall_safety {
         // Verify busy flag was reset (pcall guarantee)
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed after error");
 
         assert_eq!(
@@ -282,17 +292,20 @@ mod pcall_safety {
         );
     }
 
-    #[test]
-    fn processing_resumes_after_error() {
+    #[tokio::test]
+    async fn processing_resumes_after_error() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
         // First: trigger error
-        let _ = harness.request(ext_cat(), "process", json!({ "message": "TRIGGER_ERROR" }));
+        let _ = harness
+            .request(ext_cat(), "process", json!({ "message": "TRIGGER_ERROR" }))
+            .await;
 
         // Second: normal processing should work
         let result = harness
             .request(ext_cat(), "process", json!({ "message": "recovery" }))
+            .await
             .expect("should succeed after error recovery");
 
         assert_eq!(
@@ -303,6 +316,7 @@ mod pcall_safety {
         // Verify state is consistent
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(status["turn_count"], 2, "both calls should be counted");
@@ -317,8 +331,8 @@ mod pcall_safety {
 mod tracking {
     use super::*;
 
-    #[test]
-    fn tracking_preserves_provider_when_config_absent() {
+    #[tokio::test]
+    async fn tracking_preserves_provider_when_config_absent() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
@@ -329,16 +343,19 @@ mod tracking {
                 "process",
                 json!({ "message": "first", "config": { "provider": "anthropic", "model": "claude" } }),
             )
+            .await
             .expect("should succeed");
 
         // Second call: no config (simulates session resumption)
         harness
             .request(ext_cat(), "process", json!({ "message": "second" }))
+            .await
             .expect("should succeed");
 
         // Verify provider/model were NOT overwritten to nil
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(
@@ -351,8 +368,8 @@ mod tracking {
         );
     }
 
-    #[test]
-    fn tracking_updates_when_config_present() {
+    #[tokio::test]
+    async fn tracking_updates_when_config_present() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
@@ -363,6 +380,7 @@ mod tracking {
                 "process",
                 json!({ "message": "a", "config": { "provider": "ollama", "model": "qwen" } }),
             )
+            .await
             .expect("should succeed");
 
         // Second call with different provider
@@ -372,10 +390,12 @@ mod tracking {
                 "process",
                 json!({ "message": "b", "config": { "provider": "openai", "model": "gpt-4" } }),
             )
+            .await
             .expect("should succeed");
 
         let status = harness
             .request(ext_cat(), "status", json!({}))
+            .await
             .expect("status should succeed");
 
         assert_eq!(status["provider"], "openai");
@@ -390,12 +410,12 @@ mod tracking {
 mod unknown_ops {
     use super::*;
 
-    #[test]
-    fn unknown_operation_returns_error() {
+    #[tokio::test]
+    async fn unknown_operation_returns_error() {
         let mut harness = LuaTestHarness::from_script(CONCIERGE_PATTERN_SCRIPT, test_policy())
             .expect("should load concierge pattern script");
 
-        let result = harness.request(ext_cat(), "nonexistent", json!({}));
+        let result = harness.request(ext_cat(), "nonexistent", json!({})).await;
 
         assert!(result.is_err(), "unknown operation should return error");
     }

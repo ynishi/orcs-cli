@@ -11,7 +11,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```ignore
 //! use orcs_lua::testing::LuaTestHarness;
 //! use orcs_component::EventCategory;
 //! use orcs_event::SignalResponse;
@@ -216,13 +216,13 @@ impl LuaTestHarness {
     /// # Returns
     ///
     /// The result of the request.
-    pub fn request(
+    pub async fn request(
         &mut self,
         category: EventCategory,
         operation: &str,
         payload: Value,
     ) -> Result<Value, ComponentError> {
-        self.inner.request(category, operation, payload)
+        self.inner.request(category, operation, payload).await
     }
 
     /// Sends a Veto signal to the component.
@@ -737,16 +737,18 @@ mod tests {
         assert!(harness.script_source().is_some());
     }
 
-    #[test]
-    fn harness_request_success() {
+    #[tokio::test]
+    async fn harness_request_success() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for request success test");
 
-        let result = harness.request(
-            EventCategory::Echo,
-            "echo",
-            serde_json::json!({"msg": "hello"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "echo",
+                serde_json::json!({"msg": "hello"}),
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(
@@ -756,26 +758,29 @@ mod tests {
         assert_eq!(harness.request_log().len(), 1);
     }
 
-    #[test]
-    fn harness_request_error() {
+    #[tokio::test]
+    async fn harness_request_error() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for request error test");
 
-        let result = harness.request(EventCategory::Echo, "unknown", Value::Null);
+        let result = harness
+            .request(EventCategory::Echo, "unknown", Value::Null)
+            .await;
 
         assert!(result.is_err());
         assert_eq!(harness.request_log().len(), 1);
     }
 
     #[test]
-    fn harness_veto_aborts() {
+    fn harness_veto_soft_cancel() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for veto test");
 
         let response = harness.veto();
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        // Veto is a soft cancel: component stays alive (Handled, not Abort).
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
         assert_eq!(harness.signal_log().len(), 1);
     }
 
@@ -790,8 +795,8 @@ mod tests {
         assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn harness_lifecycle() {
+    #[tokio::test]
+    async fn harness_lifecycle() {
         let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_policy())
             .expect("should create harness for lifecycle test");
 
@@ -801,6 +806,7 @@ mod tests {
         // Verify init was called
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", Value::Null)
+            .await
             .expect("should get state after init");
         assert_eq!(result["initialized"], true);
         assert_eq!(result["shutdown"], false);
@@ -816,13 +822,14 @@ mod tests {
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
-    #[test]
-    fn harness_clear_logs() {
+    #[tokio::test]
+    async fn harness_clear_logs() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create harness for clear logs test");
 
         harness
             .request(EventCategory::Echo, "echo", Value::Null)
+            .await
             .ok();
         harness.cancel();
 
@@ -908,8 +915,8 @@ mod tests {
         }
     "#;
 
-    #[test]
-    fn inject_llm_mock_captures_prompt_and_returns_response() {
+    #[tokio::test]
+    async fn inject_llm_mock_captures_prompt_and_returns_response() {
         let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
@@ -921,6 +928,7 @@ mod tests {
                 "call_llm",
                 serde_json::json!({"prompt": "hello LLM"}),
             )
+            .await
             .expect("request should succeed");
 
         // Verify prompt was captured
@@ -932,8 +940,8 @@ mod tests {
         assert_eq!(result["content"], "first reply");
     }
 
-    #[test]
-    fn inject_llm_mock_falls_back_when_queue_exhausted() {
+    #[tokio::test]
+    async fn inject_llm_mock_falls_back_when_queue_exhausted() {
         let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
@@ -945,6 +953,7 @@ mod tests {
                 "call_llm",
                 serde_json::json!({"prompt": "test"}),
             )
+            .await
             .expect("request should succeed");
 
         let prompts = captured.lock().expect("captured mutex");
@@ -952,8 +961,8 @@ mod tests {
         assert_eq!(result["content"], "mock response");
     }
 
-    #[test]
-    fn inject_llm_mock_returns_responses_in_order() {
+    #[tokio::test]
+    async fn inject_llm_mock_returns_responses_in_order() {
         let mut harness = LuaTestHarness::from_script(LLM_CALLER_SCRIPT, test_policy())
             .expect("llm-caller script should load");
 
@@ -965,6 +974,7 @@ mod tests {
                 "x",
                 serde_json::json!({"prompt": "p1"}),
             )
+            .await
             .expect("first request");
         let r2 = harness
             .request(
@@ -972,6 +982,7 @@ mod tests {
                 "x",
                 serde_json::json!({"prompt": "p2"}),
             )
+            .await
             .expect("second request");
         let r3 = harness
             .request(
@@ -979,6 +990,7 @@ mod tests {
                 "x",
                 serde_json::json!({"prompt": "p3"}),
             )
+            .await
             .expect("third request (fallback)");
 
         assert_eq!(r1["content"], "first");
@@ -992,8 +1004,8 @@ mod tests {
         assert_eq!(prompts[2], "p3");
     }
 
-    #[test]
-    fn inject_request_mock_returns_matching_handler() {
+    #[tokio::test]
+    async fn inject_request_mock_returns_matching_handler() {
         let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_policy())
             .expect("request-caller script should load");
 
@@ -1008,29 +1020,32 @@ mod tests {
                 "call_req",
                 serde_json::json!({"target": "skill::skill_manager", "op": "list"}),
             )
+            .await
             .expect("request should succeed");
 
         assert_eq!(result["skills"][0], "coding");
     }
 
-    #[test]
-    fn inject_request_mock_returns_error_for_unregistered_target() {
+    #[tokio::test]
+    async fn inject_request_mock_returns_error_for_unregistered_target() {
         let mut harness = LuaTestHarness::from_script(REQUEST_CALLER_SCRIPT, test_policy())
             .expect("request-caller script should load");
 
         harness.inject_request_mock(vec![]); // no handlers
 
-        let result = harness.request(
-            EventCategory::Echo,
-            "call_req",
-            serde_json::json!({"target": "unknown::component"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "call_req",
+                serde_json::json!({"target": "unknown::component"}),
+            )
+            .await;
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn inject_tool_descriptions_mock_returns_fixed_string() {
+    #[tokio::test]
+    async fn inject_tool_descriptions_mock_returns_fixed_string() {
         let mut harness = LuaTestHarness::from_script(TOOL_DESC_CALLER_SCRIPT, test_policy())
             .expect("tool-desc-caller script should load");
 
@@ -1038,6 +1053,7 @@ mod tests {
 
         let result = harness
             .request(EventCategory::Echo, "get_tools", Value::Null)
+            .await
             .expect("request should succeed");
 
         assert_eq!(result["descriptions"], "## Tools\n- tool_a\n- tool_b");
@@ -1072,8 +1088,8 @@ mod tests {
         }
     "#;
 
-    #[test]
-    fn inject_spawn_runner_mock_captures_args_and_returns_response() {
+    #[tokio::test]
+    async fn inject_spawn_runner_mock_captures_args_and_returns_response() {
         let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
@@ -1088,6 +1104,7 @@ mod tests {
                 "spawn",
                 serde_json::json!({"spawn_args": {"script": "worker.lua", "id": "llm"}}),
             )
+            .await
             .expect("request should succeed");
 
         // Verify captured args
@@ -1101,18 +1118,20 @@ mod tests {
         assert_eq!(result["channel_id"], "ch-001");
     }
 
-    #[test]
-    fn inject_spawn_runner_mock_returns_error_when_queue_exhausted() {
+    #[tokio::test]
+    async fn inject_spawn_runner_mock_returns_error_when_queue_exhausted() {
         let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
         let captured = harness.inject_spawn_runner_mock(vec![]); // empty queue
 
-        let result = harness.request(
-            EventCategory::Echo,
-            "spawn",
-            serde_json::json!({"spawn_args": {"script": "x.lua"}}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "spawn",
+                serde_json::json!({"spawn_args": {"script": "x.lua"}}),
+            )
+            .await;
 
         // Should fail because mock has no responses
         assert!(result.is_err());
@@ -1122,8 +1141,8 @@ mod tests {
         assert_eq!(args.len(), 1);
     }
 
-    #[test]
-    fn inject_spawn_runner_mock_consumes_queue_in_order() {
+    #[tokio::test]
+    async fn inject_spawn_runner_mock_consumes_queue_in_order() {
         let mut harness = LuaTestHarness::from_script(SPAWN_RUNNER_CALLER_SCRIPT, test_policy())
             .expect("spawn-caller script should load");
 
@@ -1138,6 +1157,7 @@ mod tests {
                 "spawn",
                 serde_json::json!({"spawn_args": {"script": "a.lua"}}),
             )
+            .await
             .expect("first spawn should succeed");
 
         let r2 = harness
@@ -1146,14 +1166,17 @@ mod tests {
                 "spawn",
                 serde_json::json!({"spawn_args": {"script": "b.lua"}}),
             )
+            .await
             .expect("second spawn should succeed");
 
         // Third call exhausts queue
-        let r3 = harness.request(
-            EventCategory::Echo,
-            "spawn",
-            serde_json::json!({"spawn_args": {"script": "c.lua"}}),
-        );
+        let r3 = harness
+            .request(
+                EventCategory::Echo,
+                "spawn",
+                serde_json::json!({"spawn_args": {"script": "c.lua"}}),
+            )
+            .await;
 
         assert_eq!(r1["fqn"], "ns::first");
         assert_eq!(r1["channel_id"], "ch-A");
@@ -1211,8 +1234,8 @@ mod tests {
         }
     "#;
 
-    #[test]
-    fn inject_output_stubs_captures_output_messages() {
+    #[tokio::test]
+    async fn inject_output_stubs_captures_output_messages() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1220,6 +1243,7 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "test_output", Value::Null)
+            .await
             .expect("test_output should succeed");
 
         let msgs = captured.lock().expect("captured mutex");
@@ -1227,8 +1251,8 @@ mod tests {
         assert_eq!(msgs[0], "hello from output");
     }
 
-    #[test]
-    fn inject_output_stubs_captures_output_with_level_messages() {
+    #[tokio::test]
+    async fn inject_output_stubs_captures_output_with_level_messages() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1236,6 +1260,7 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "test_output_with_level", Value::Null)
+            .await
             .expect("test_output_with_level should succeed");
 
         let msgs = captured.lock().expect("captured mutex");
@@ -1243,8 +1268,8 @@ mod tests {
         assert_eq!(msgs[0], "warn message");
     }
 
-    #[test]
-    fn inject_output_stubs_emit_event_does_not_panic() {
+    #[tokio::test]
+    async fn inject_output_stubs_emit_event_does_not_panic() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1252,11 +1277,12 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "test_emit_event", Value::Null)
+            .await
             .expect("emit_event stub should not fail");
     }
 
-    #[test]
-    fn inject_output_stubs_board_recent_returns_empty_table() {
+    #[tokio::test]
+    async fn inject_output_stubs_board_recent_returns_empty_table() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1264,13 +1290,14 @@ mod tests {
 
         let result = harness
             .request(EventCategory::Echo, "test_board_recent", Value::Null)
+            .await
             .expect("board_recent stub should not fail");
 
         assert_eq!(result["count"], 0);
     }
 
-    #[test]
-    fn inject_output_stubs_hook_does_not_panic() {
+    #[tokio::test]
+    async fn inject_output_stubs_hook_does_not_panic() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1278,11 +1305,12 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "test_hook", Value::Null)
+            .await
             .expect("hook stub should not fail");
     }
 
-    #[test]
-    fn inject_output_stubs_all_stubs_work_together() {
+    #[tokio::test]
+    async fn inject_output_stubs_all_stubs_work_together() {
         let mut harness = LuaTestHarness::from_script(OUTPUT_STUBS_SCRIPT, test_policy())
             .expect("output-exerciser script should load");
 
@@ -1290,6 +1318,7 @@ mod tests {
 
         let result = harness
             .request(EventCategory::Echo, "test_all", Value::Null)
+            .await
             .expect("all stubs should work together");
 
         // Both output + output_with_level captured

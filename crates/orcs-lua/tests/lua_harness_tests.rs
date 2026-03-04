@@ -42,12 +42,14 @@ mod basic {
         }
     "#;
 
-    #[test]
-    fn echo_request() {
+    #[tokio::test]
+    async fn echo_request() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness");
 
-        let result = harness.request(EventCategory::Echo, "echo", json!({"msg": "hello"}));
+        let result = harness
+            .request(EventCategory::Echo, "echo", json!({"msg": "hello"}))
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(
@@ -56,16 +58,18 @@ mod basic {
         );
     }
 
-    #[test]
-    fn uppercase_request() {
+    #[tokio::test]
+    async fn uppercase_request() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for uppercase test");
 
-        let result = harness.request(
-            EventCategory::Echo,
-            "uppercase",
-            json!({"text": "hello world"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "uppercase",
+                json!({"text": "hello world"}),
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(
@@ -74,29 +78,31 @@ mod basic {
         );
     }
 
-    #[test]
-    fn unknown_operation_error() {
+    #[tokio::test]
+    async fn unknown_operation_error() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for unknown op test");
 
-        let result = harness.request(EventCategory::Echo, "unknown", json!({}));
+        let result = harness
+            .request(EventCategory::Echo, "unknown", json!({}))
+            .await;
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn veto_aborts() {
+    #[tokio::test]
+    async fn veto_soft_cancel() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for veto test");
 
         let response = harness.veto();
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn cancel_handled() {
+    #[tokio::test]
+    async fn cancel_handled() {
         let mut harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for cancel test");
 
@@ -106,16 +112,16 @@ mod basic {
         assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn subscriptions() {
+    #[tokio::test]
+    async fn subscriptions() {
         let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for subscriptions test");
 
         assert_eq!(harness.subscriptions(), &[EventCategory::Echo]);
     }
 
-    #[test]
-    fn component_id() {
+    #[tokio::test]
+    async fn component_id() {
         let harness = LuaTestHarness::from_script(ECHO_SCRIPT, test_policy())
             .expect("should create echo harness for component id test");
 
@@ -158,41 +164,48 @@ mod stateful {
         }
     "#;
 
-    #[test]
-    fn increment_counter() {
+    #[tokio::test]
+    async fn increment_counter() {
         let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_policy())
             .expect("should create counter harness for increment test");
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
+            .await
             .expect("first increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
+            .await
             .expect("second increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
+            .await
             .expect("third increment should succeed");
 
         let result = harness
             .request(EventCategory::Echo, "get", json!({}))
+            .await
             .expect("get counter should succeed");
         assert_eq!(result["count"], 3);
     }
 
-    #[test]
-    fn reset_counter() {
+    #[tokio::test]
+    async fn reset_counter() {
         let mut harness = LuaTestHarness::from_script(COUNTER_SCRIPT, test_policy())
             .expect("should create counter harness for reset test");
 
         harness
             .request(EventCategory::Echo, "increment", json!({}))
+            .await
             .expect("first increment should succeed");
         harness
             .request(EventCategory::Echo, "increment", json!({}))
+            .await
             .expect("second increment should succeed");
 
         let result = harness
             .request(EventCategory::Echo, "reset", json!({}))
+            .await
             .expect("reset counter should succeed");
         assert_eq!(result["count"], 0);
     }
@@ -249,8 +262,8 @@ mod lifecycle {
         }
     "#;
 
-    #[test]
-    fn init_called() {
+    #[tokio::test]
+    async fn init_called() {
         let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_policy())
             .expect("should create lifecycle harness for init test");
 
@@ -258,12 +271,13 @@ mod lifecycle {
 
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", json!({}))
+            .await
             .expect("get_state should succeed after init");
         assert_eq!(result["initialized"], true);
     }
 
-    #[test]
-    fn shutdown_called() {
+    #[tokio::test]
+    async fn shutdown_called() {
         let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_policy())
             .expect("should create lifecycle harness for shutdown test");
 
@@ -275,23 +289,27 @@ mod lifecycle {
         assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn request_count_tracked() {
+    #[tokio::test]
+    async fn request_count_tracked() {
         let mut harness = LuaTestHarness::from_script(LIFECYCLE_SCRIPT, test_policy())
             .expect("should create lifecycle harness for request count test");
 
         harness
             .request(EventCategory::Lifecycle, "any", json!({}))
+            .await
             .ok();
         harness
             .request(EventCategory::Lifecycle, "any", json!({}))
+            .await
             .ok();
         harness
             .request(EventCategory::Lifecycle, "any", json!({}))
+            .await
             .ok();
 
         let result = harness
             .request(EventCategory::Lifecycle, "get_state", json!({}))
+            .await
             .expect("get_state should succeed for request count check");
         assert_eq!(result["request_count"], 4); // 3 + 1 for get_state
     }
@@ -326,19 +344,19 @@ mod signals {
         }
     "#;
 
-    #[test]
-    fn veto_aborts() {
+    #[tokio::test]
+    async fn veto_soft_cancel() {
         let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_policy())
             .expect("should create signal harness for veto test");
 
         let response = harness.veto();
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn cancel_handled() {
+    #[tokio::test]
+    async fn cancel_handled() {
         let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_policy())
             .expect("should create signal harness for cancel test");
 
@@ -347,8 +365,8 @@ mod signals {
         assert_eq!(response, SignalResponse::Handled);
     }
 
-    #[test]
-    fn approve_handled() {
+    #[tokio::test]
+    async fn approve_handled() {
         let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_policy())
             .expect("should create signal harness for approve test");
 
@@ -357,8 +375,8 @@ mod signals {
         assert_eq!(response, SignalResponse::Handled);
     }
 
-    #[test]
-    fn reject_handled() {
+    #[tokio::test]
+    async fn reject_handled() {
         let mut harness = LuaTestHarness::from_script(SIGNAL_SCRIPT, test_policy())
             .expect("should create signal harness for reject test");
 
@@ -375,14 +393,14 @@ mod signals {
 mod errors {
     use super::*;
 
-    #[test]
-    fn invalid_script_syntax() {
+    #[tokio::test]
+    async fn invalid_script_syntax() {
         let result = LuaTestHarness::from_script("invalid lua syntax {{{", test_policy());
         assert!(result.is_err());
     }
 
-    #[test]
-    fn missing_id() {
+    #[tokio::test]
+    async fn missing_id() {
         let script = r#"
             return {
                 subscriptions = {"Echo"},
@@ -395,8 +413,8 @@ mod errors {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn missing_subscriptions() {
+    #[tokio::test]
+    async fn missing_subscriptions() {
         let script = r#"
             return {
                 id = "incomplete",
@@ -409,8 +427,8 @@ mod errors {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn missing_on_request() {
+    #[tokio::test]
+    async fn missing_on_request() {
         let script = r#"
             return {
                 id = "incomplete",
@@ -423,8 +441,8 @@ mod errors {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn missing_on_signal() {
+    #[tokio::test]
+    async fn missing_on_signal() {
         let script = r#"
             return {
                 id = "incomplete",
@@ -459,14 +477,23 @@ mod logging {
         }
     "#;
 
-    #[test]
-    fn request_log_captured() {
+    #[tokio::test]
+    async fn request_log_captured() {
         let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_policy())
             .expect("should create logging harness for request log test");
 
-        harness.request(EventCategory::Echo, "op1", json!(1)).ok();
-        harness.request(EventCategory::Echo, "op2", json!(2)).ok();
-        harness.request(EventCategory::Echo, "op3", json!(3)).ok();
+        harness
+            .request(EventCategory::Echo, "op1", json!(1))
+            .await
+            .ok();
+        harness
+            .request(EventCategory::Echo, "op2", json!(2))
+            .await
+            .ok();
+        harness
+            .request(EventCategory::Echo, "op3", json!(3))
+            .await
+            .ok();
 
         assert_eq!(harness.request_log().len(), 3);
         assert_eq!(harness.request_log()[0].operation, "op1");
@@ -474,8 +501,8 @@ mod logging {
         assert_eq!(harness.request_log()[2].operation, "op3");
     }
 
-    #[test]
-    fn signal_log_captured() {
+    #[tokio::test]
+    async fn signal_log_captured() {
         let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_policy())
             .expect("should create logging harness for signal log test");
 
@@ -486,12 +513,15 @@ mod logging {
         assert_eq!(harness.signal_log().len(), 3);
     }
 
-    #[test]
-    fn clear_logs() {
+    #[tokio::test]
+    async fn clear_logs() {
         let mut harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_policy())
             .expect("should create logging harness for clear logs test");
 
-        harness.request(EventCategory::Echo, "op", json!({})).ok();
+        harness
+            .request(EventCategory::Echo, "op", json!({}))
+            .await
+            .ok();
         harness.cancel();
 
         assert_eq!(harness.request_log().len(), 1);
@@ -503,8 +533,8 @@ mod logging {
         assert_eq!(harness.signal_log().len(), 0);
     }
 
-    #[test]
-    fn script_source_accessible() {
+    #[tokio::test]
+    async fn script_source_accessible() {
         let harness = LuaTestHarness::from_script(SIMPLE_SCRIPT, test_policy())
             .expect("should create logging harness for script source test");
 

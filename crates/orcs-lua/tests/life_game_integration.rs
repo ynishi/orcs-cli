@@ -216,23 +216,24 @@ fn life_game_init_and_shutdown() {
 }
 
 #[test]
-fn life_game_veto_aborts() {
+fn life_game_veto_soft_cancel() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
+    // Veto is soft cancel — component stays alive
     let signal = Signal::veto(Principal::System);
     let response = component.on_signal(&signal);
 
-    assert_eq!(response, SignalResponse::Abort);
-    assert_eq!(component.status(), Status::Aborted);
+    assert_eq!(response, SignalResponse::Handled);
+    assert_eq!(component.status(), Status::Idle);
 }
 
 // =============================================================================
 // Run Operation Tests
 // =============================================================================
 
-#[test]
-fn life_game_run_default_params() {
+#[tokio::test]
+async fn life_game_run_default_params() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -241,7 +242,7 @@ fn life_game_run_default_params() {
     component.set_child_context(Box::new(ctx));
 
     let req = create_request("run", json!({}));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok(), "run failed: {:?}", result.err());
     let data = result.expect("run result");
@@ -273,8 +274,8 @@ fn life_game_run_default_params() {
     );
 }
 
-#[test]
-fn life_game_run_custom_params() {
+#[tokio::test]
+async fn life_game_run_custom_params() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -290,7 +291,7 @@ fn life_game_run_custom_params() {
             "generations": 2,
         }),
     );
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok(), "run failed: {:?}", result.err());
     let data = result.expect("run result");
@@ -314,8 +315,8 @@ fn life_game_run_custom_params() {
     assert_eq!(ids[7], "cell-8");
 }
 
-#[test]
-fn life_game_run_verifies_grid_rendering() {
+#[tokio::test]
+async fn life_game_run_verifies_grid_rendering() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -329,7 +330,7 @@ fn life_game_run_verifies_grid_rendering() {
             "generations": 1,
         }),
     );
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok(), "run failed: {:?}", result.err());
     let data = result.expect("run result");
@@ -347,8 +348,8 @@ fn life_game_run_verifies_grid_rendering() {
     );
 }
 
-#[test]
-fn life_game_run_simulation_produces_changes() {
+#[tokio::test]
+async fn life_game_run_simulation_produces_changes() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -362,7 +363,7 @@ fn life_game_run_simulation_produces_changes() {
             "generations": 2,
         }),
     );
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok(), "run failed: {:?}", result.err());
     let data = result.expect("run result");
@@ -399,8 +400,8 @@ fn life_game_run_simulation_produces_changes() {
 // Error Cases
 // =============================================================================
 
-#[test]
-fn life_game_grid_size_exceeds_max() {
+#[tokio::test]
+async fn life_game_grid_size_exceeds_max() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -408,7 +409,7 @@ fn life_game_grid_size_exceeds_max() {
     component.set_child_context(Box::new(ctx));
 
     let req = create_request("run", json!({"grid_size": 100}));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     // Should return error (success=false), which maps to ComponentError
     assert!(result.is_err(), "grid_size > 64 should fail");
@@ -421,8 +422,8 @@ fn life_game_grid_size_exceeds_max() {
     );
 }
 
-#[test]
-fn life_game_unknown_operation() {
+#[tokio::test]
+async fn life_game_unknown_operation() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -430,7 +431,7 @@ fn life_game_unknown_operation() {
     component.set_child_context(Box::new(ctx));
 
     let req = create_request("nonexistent", json!({}));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_err(), "unknown operation should fail");
     let err = result.expect_err("should be error");
@@ -441,8 +442,8 @@ fn life_game_unknown_operation() {
     );
 }
 
-#[test]
-fn life_game_spawn_failure_returns_error() {
+#[tokio::test]
+async fn life_game_spawn_failure_returns_error() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -451,7 +452,7 @@ fn life_game_spawn_failure_returns_error() {
     component.set_child_context(Box::new(ctx));
 
     let req = create_request("run", json!({"grid_size": 4, "generations": 1}));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(
         result.is_err(),
@@ -463,8 +464,8 @@ fn life_game_spawn_failure_returns_error() {
 // Status Operation Tests
 // =============================================================================
 
-#[test]
-fn life_game_status_before_run() {
+#[tokio::test]
+async fn life_game_status_before_run() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -472,7 +473,7 @@ fn life_game_status_before_run() {
     component.set_child_context(Box::new(ctx));
 
     let req = create_request("status", json!({}));
-    let result = component.on_request(&req);
+    let result = component.on_request(&req).await;
 
     assert!(result.is_ok(), "status failed: {:?}", result.err());
     let data = result.expect("status result");
@@ -482,8 +483,8 @@ fn life_game_status_before_run() {
     assert_eq!(data["alive"], 0, "alive should be 0 before run");
 }
 
-#[test]
-fn life_game_status_after_run() {
+#[tokio::test]
+async fn life_game_status_after_run() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -492,12 +493,12 @@ fn life_game_status_after_run() {
 
     // Run first
     let run_req = create_request("run", json!({"grid_size": 6, "generations": 1}));
-    let run_result = component.on_request(&run_req);
+    let run_result = component.on_request(&run_req).await;
     assert!(run_result.is_ok(), "run failed: {:?}", run_result.err());
 
     // Then check status
     let status_req = create_request("status", json!({}));
-    let status_result = component.on_request(&status_req);
+    let status_result = component.on_request(&status_req).await;
 
     assert!(
         status_result.is_ok(),
@@ -521,8 +522,8 @@ fn life_game_status_after_run() {
 // Incremental Spawning (cells reused across runs)
 // =============================================================================
 
-#[test]
-fn life_game_reuses_spawned_cells() {
+#[tokio::test]
+async fn life_game_reuses_spawned_cells() {
     let mut component =
         LuaComponent::from_script(LIFE_GAME_SCRIPT, test_policy()).expect("load life_game");
 
@@ -532,13 +533,13 @@ fn life_game_reuses_spawned_cells() {
 
     // First run: 4 cells
     let req1 = create_request("run", json!({"grid_size": 4, "generations": 1}));
-    let r1 = component.on_request(&req1);
+    let r1 = component.on_request(&req1).await;
     assert!(r1.is_ok(), "first run failed: {:?}", r1.err());
     assert_eq!(spawn_count.load(Ordering::SeqCst), 4, "first run spawns 4");
 
     // Second run: same size → no new spawns
     let req2 = create_request("run", json!({"grid_size": 4, "generations": 1}));
-    let r2 = component.on_request(&req2);
+    let r2 = component.on_request(&req2).await;
     assert!(r2.is_ok(), "second run failed: {:?}", r2.err());
     assert_eq!(
         spawn_count.load(Ordering::SeqCst),
@@ -548,7 +549,7 @@ fn life_game_reuses_spawned_cells() {
 
     // Third run: larger size → spawns additional cells
     let req3 = create_request("run", json!({"grid_size": 6, "generations": 1}));
-    let r3 = component.on_request(&req3);
+    let r3 = component.on_request(&req3).await;
     assert!(r3.is_ok(), "third run failed: {:?}", r3.err());
     assert_eq!(
         spawn_count.load(Ordering::SeqCst),

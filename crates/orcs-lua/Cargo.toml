@@ -60,6 +60,9 @@ uuid = { workspace = true }
 # Async runtime (process execution + reqwest bridge)
 tokio = { version = "1", features = ["process", "rt", "rt-multi-thread"] }
 
+# Async trait support
+async-trait = { workspace = true }
+
 # Test framework (optional, gated by test-utils)
 mlua-lspec = { version = "0.1", optional = true }
 

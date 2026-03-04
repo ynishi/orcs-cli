@@ -15,12 +15,14 @@ use serde_json::{json, Value};
 mod noop_component {
     use super::*;
 
-    #[test]
-    fn basic_echo() {
+    #[tokio::test]
+    async fn basic_echo() {
         let comp = NoopComponent::new("noop-test");
         let mut harness = ComponentTestHarness::new(comp);
 
-        let result = harness.request(EventCategory::Echo, "any_operation", json!({"data": 123}));
+        let result = harness
+            .request(EventCategory::Echo, "any_operation", json!({"data": 123}))
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(
@@ -30,7 +32,7 @@ mod noop_component {
     }
 
     #[test]
-    fn veto_aborts() {
+    fn veto_soft_cancel() {
         let comp = NoopComponent::new("noop-test");
         let mut harness = ComponentTestHarness::new(comp);
 
@@ -38,8 +40,8 @@ mod noop_component {
 
         let response = harness.veto();
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
     }
 
     #[test]
@@ -53,14 +55,23 @@ mod noop_component {
         assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn request_log_captured() {
+    #[tokio::test]
+    async fn request_log_captured() {
         let comp = NoopComponent::new("noop-test");
         let mut harness = ComponentTestHarness::new(comp);
 
-        harness.request(EventCategory::Echo, "op1", json!(1)).ok();
-        harness.request(EventCategory::Echo, "op2", json!(2)).ok();
-        harness.request(EventCategory::Echo, "op3", json!(3)).ok();
+        harness
+            .request(EventCategory::Echo, "op1", json!(1))
+            .await
+            .ok();
+        harness
+            .request(EventCategory::Echo, "op2", json!(2))
+            .await
+            .ok();
+        harness
+            .request(EventCategory::Echo, "op3", json!(3))
+            .await
+            .ok();
 
         assert_eq!(harness.request_log().len(), 3);
         assert_eq!(harness.request_log()[0].operation, "op1");
@@ -97,24 +108,26 @@ mod hil_component {
         })
     }
 
-    #[test]
-    fn submit_and_list() {
+    #[tokio::test]
+    async fn submit_and_list() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
         // Submit an approval request
-        let result = harness.request(
-            EventCategory::Hil,
-            "submit",
-            create_approval_request("req-1", "write"),
-        );
+        let result = harness
+            .request(
+                EventCategory::Hil,
+                "submit",
+                create_approval_request("req-1", "write"),
+            )
+            .await;
 
         assert!(result.is_ok());
         let response = result.expect("submit request should return Ok");
         assert_eq!(response["status"], "pending");
 
         // List pending requests
-        let result = harness.request(EventCategory::Hil, "list", json!({}));
+        let result = harness.request(EventCategory::Hil, "list", json!({})).await;
         assert!(result.is_ok());
 
         let list_response = result.expect("list request should return Ok");
@@ -124,8 +137,8 @@ mod hil_component {
         assert_eq!(pending.len(), 1);
     }
 
-    #[test]
-    fn submit_and_approve_via_signal() {
+    #[tokio::test]
+    async fn submit_and_approve_via_signal() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
@@ -136,14 +149,17 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-approve", "write"),
             )
+            .await
             .expect("submit approval request should succeed");
 
         // Check status (pending)
-        let result = harness.request(
-            EventCategory::Hil,
-            "status",
-            json!({"approval_id": "req-approve"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Hil,
+                "status",
+                json!({"approval_id": "req-approve"}),
+            )
+            .await;
         assert_eq!(
             result.expect("status request should return Ok")["status"],
             "pending"
@@ -154,19 +170,21 @@ mod hil_component {
         assert_eq!(response, SignalResponse::Handled);
 
         // Check status (resolved)
-        let result = harness.request(
-            EventCategory::Hil,
-            "status",
-            json!({"approval_id": "req-approve"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Hil,
+                "status",
+                json!({"approval_id": "req-approve"}),
+            )
+            .await;
         assert_eq!(
             result.expect("status request after approve should return Ok")["status"],
             "resolved"
         );
     }
 
-    #[test]
-    fn submit_and_reject_via_signal() {
+    #[tokio::test]
+    async fn submit_and_reject_via_signal() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
@@ -177,6 +195,7 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-reject", "bash"),
             )
+            .await
             .expect("submit rejection request should succeed");
 
         // Reject via signal
@@ -184,11 +203,13 @@ mod hil_component {
         assert_eq!(response, SignalResponse::Handled);
 
         // Check status (resolved)
-        let result = harness.request(
-            EventCategory::Hil,
-            "status",
-            json!({"approval_id": "req-reject"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Hil,
+                "status",
+                json!({"approval_id": "req-reject"}),
+            )
+            .await;
         let status_response = result.expect("status request after reject should return Ok");
         assert_eq!(status_response["status"], "resolved");
         assert!(status_response["result"]["Rejected"].is_object());
@@ -203,8 +224,8 @@ mod hil_component {
         assert_eq!(response, SignalResponse::Ignored);
     }
 
-    #[test]
-    fn veto_rejects_all_pending() {
+    #[tokio::test]
+    async fn veto_rejects_all_pending() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
@@ -215,6 +236,7 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-1", "op1"),
             )
+            .await
             .expect("submit first approval request should succeed");
         harness
             .request(
@@ -222,11 +244,13 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-2", "op2"),
             )
+            .await
             .expect("submit second approval request should succeed");
 
         // Verify pending
         let result = harness
             .request(EventCategory::Hil, "list", json!({}))
+            .await
             .expect("list request should return Ok");
         assert_eq!(
             result["pending"]
@@ -236,14 +260,15 @@ mod hil_component {
             2
         );
 
-        // Veto
+        // Veto (soft cancel: clears pending, returns to Idle)
         let response = harness.veto();
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
 
         // All pending should be rejected
         let result = harness
             .request(EventCategory::Hil, "list", json!({}))
+            .await
             .expect("list request after veto should return Ok");
         assert_eq!(
             result["pending"]
@@ -254,18 +279,20 @@ mod hil_component {
         );
     }
 
-    #[test]
-    fn unsupported_operation() {
+    #[tokio::test]
+    async fn unsupported_operation() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
-        let result = harness.request(EventCategory::Hil, "unknown_operation", json!({}));
+        let result = harness
+            .request(EventCategory::Hil, "unknown_operation", json!({}))
+            .await;
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn request_and_signal_log() {
+    #[tokio::test]
+    async fn request_and_signal_log() {
         let hil = HilComponent::new();
         let mut harness = ComponentTestHarness::new(hil);
 
@@ -276,10 +303,12 @@ mod hil_component {
                 "submit",
                 create_approval_request("req-log", "write"),
             )
+            .await
             .expect("submit request for log test should succeed");
         harness.approve("req-log");
         harness
             .request(EventCategory::Hil, "list", json!({}))
+            .await
             .expect("list request for log test should return Ok");
 
         // Check logs

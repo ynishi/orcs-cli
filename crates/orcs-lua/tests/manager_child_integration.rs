@@ -459,13 +459,13 @@ mod manager_component {
         assert!(component.id().fqn().contains("manager"));
     }
 
-    #[test]
-    fn manager_dispatch_task() {
+    #[tokio::test]
+    async fn manager_dispatch_task() {
         let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for dispatch test");
 
         let req = create_request("dispatch", json!({"task": "process-item"}));
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok(), "Request failed: {:?}", result.err());
         let data = result.expect("dispatch request should succeed");
@@ -473,13 +473,13 @@ mod manager_component {
         assert_eq!(data["by"], "manager-direct");
     }
 
-    #[test]
-    fn manager_status() {
+    #[tokio::test]
+    async fn manager_status() {
         let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for status test");
 
         let req = create_request("status", json!({}));
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok());
         let data = result.expect("status request should succeed");
@@ -487,15 +487,15 @@ mod manager_component {
     }
 
     #[test]
-    fn manager_veto_aborts() {
+    fn manager_veto_soft_cancel() {
         let mut component = LuaComponent::from_script(MANAGER_SCRIPT, test_policy())
             .expect("should load manager component for veto test");
 
         let signal = orcs_event::Signal::veto(orcs_types::Principal::System);
         let response = component.on_signal(&signal);
 
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(component.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(component.status(), Status::Idle);
     }
 
     #[test]
@@ -723,8 +723,8 @@ mod component_spawns_child {
         assert!(component.has_child_context());
     }
 
-    #[test]
-    fn component_spawn_child_via_request() {
+    #[tokio::test]
+    async fn component_spawn_child_via_request() {
         let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for spawn via request test");
 
@@ -735,7 +735,7 @@ mod component_spawns_child {
 
         // Request to spawn workers
         let req = create_request("spawn_workers", json!({"count": 3}));
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok(), "Request failed: {:?}", result.err());
 
@@ -754,8 +754,8 @@ mod component_spawns_child {
         assert_eq!(spawn_count.load(Ordering::SeqCst), 3);
     }
 
-    #[test]
-    fn component_get_counts_without_spawning() {
+    #[tokio::test]
+    async fn component_get_counts_without_spawning() {
         let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for counts test");
 
@@ -765,7 +765,7 @@ mod component_spawns_child {
 
         // Request counts
         let req = create_request("get_counts", json!({}));
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         assert!(result.is_ok());
         let data = result.expect("get_counts request should succeed");
@@ -773,8 +773,8 @@ mod component_spawns_child {
         assert_eq!(data["max_children"], 10); // MockChildContext default
     }
 
-    #[test]
-    fn component_without_context_spawn_fails_gracefully() {
+    #[tokio::test]
+    async fn component_without_context_spawn_fails_gracefully() {
         let mut component = LuaComponent::from_script(SPAWNING_MANAGER, test_policy())
             .expect("should load spawning manager for no-context test");
 
@@ -782,7 +782,7 @@ mod component_spawns_child {
 
         // Try to spawn - should fail or return error
         let req = create_request("spawn_workers", json!({"count": 1}));
-        let result = component.on_request(&req);
+        let result = component.on_request(&req).await;
 
         // orcs.spawn_child won't exist or will error
         // The Lua script might error, which maps to ComponentError

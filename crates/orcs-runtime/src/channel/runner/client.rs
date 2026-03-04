@@ -724,24 +724,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_runner_handles_veto() {
+    async fn client_runner_handles_veto_as_soft_cancel() {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let (port, _input, _output) = IOPort::with_defaults(primary);
         let config = make_config(world_tx.clone(), world, &signal_tx);
         let (runner, _handle) = ClientRunner::new(primary, config, port, test_principal());
 
-        let runner_task = tokio::spawn(runner.run());
+        let mut runner_task = tokio::spawn(runner.run());
         tokio::task::yield_now().await;
 
-        // Send veto
+        // Send veto — soft cancel, runner should NOT stop
         signal_tx
             .send(Signal::veto(Principal::System))
             .expect("send veto signal");
 
-        // Runner should stop
+        // Runner should still be running (timeout = NOT finished)
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut runner_task).await;
+        assert!(result.is_err(), "runner should NOT stop on veto");
+
+        // Now send shutdown — runner should stop
+        signal_tx
+            .send(Signal::shutdown(Principal::System))
+            .expect("send shutdown signal");
+
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "runner should stop on shutdown");
 
         teardown(manager_task, world_tx).await;
     }

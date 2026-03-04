@@ -155,10 +155,26 @@ pub fn http_request_impl(lua: &Lua, args: (String, String, Option<Table>)) -> ml
         req = req.body(body_str.clone());
     }
 
-    // Execute request via async→sync bridge (block_in_place allows nesting in multi-thread runtime)
-    match tokio::task::block_in_place(|| handle.block_on(req.send())) {
-        Ok(resp) => build_success_response(lua, resp),
-        Err(e) => build_error_response(lua, e),
+    // Execute request via async→sync bridge with cooperative cancel support.
+    // When a Veto signal fires, the cancel receiver resolves and the request is aborted.
+    let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+    let send_result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            if let Some(mut rx) = cancel_rx {
+                tokio::select! {
+                    biased;
+                    _ = rx.changed() => None,
+                    result = req.send() => Some(result),
+                }
+            } else {
+                Some(req.send().await)
+            }
+        })
+    });
+    match send_result {
+        None => Err(mlua::Error::RuntimeError("killed by veto".into())),
+        Some(Ok(resp)) => build_success_response(lua, resp),
+        Some(Err(e)) => build_error_response(lua, e),
     }
 }
 
@@ -183,7 +199,8 @@ fn build_success_response(lua: &Lua, resp: reqwest::Response) -> mlua::Result<Ta
     result.set("status", status)?;
     result.set("headers", headers_table)?;
 
-    match read_body_limited(resp, MAX_BODY_SIZE) {
+    let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+    match read_body_limited(resp, MAX_BODY_SIZE, cancel_rx) {
         Ok(body_str) => {
             result.set("body", body_str)?;
         }
@@ -206,6 +223,11 @@ fn build_success_response(lua: &Lua, resp: reqwest::Response) -> mlua::Result<Ta
             result.set("body", "")?;
             result.set("error", format!("failed to read response body: {msg}"))?;
             result.set("error_kind", "network")?;
+        }
+        Err(ReadBodyError::Cancelled) => {
+            result.set("body", "")?;
+            result.set("error", "killed by veto")?;
+            result.set("error_kind", "cancelled")?;
         }
     }
 

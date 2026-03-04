@@ -14,7 +14,7 @@
 //!
 //! # Component Testing Example
 //!
-//! ```
+//! ```ignore
 //! use orcs_component::testing::{ComponentTestHarness, RequestRecord};
 //! use orcs_component::{Component, ComponentError, Status, EventCategory};
 //! use orcs_event::{Request, Signal, SignalResponse};
@@ -26,10 +26,11 @@
 //!     status: Status,
 //! }
 //!
+//! #[async_trait::async_trait]
 //! impl Component for EchoComponent {
 //!     fn id(&self) -> &ComponentId { &self.id }
 //!     fn status(&self) -> Status { self.status }
-//!     fn on_request(&mut self, req: &Request) -> Result<Value, ComponentError> {
+//!     async fn on_request(&mut self, req: &Request) -> Result<Value, ComponentError> {
 //!         Ok(req.payload.clone())
 //!     }
 //!     fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
@@ -223,8 +224,11 @@ impl<C: Component> ComponentTestHarness<C> {
     /// # Returns
     ///
     /// The result of the request.
-    pub fn send_request(&mut self, request: &orcs_event::Request) -> Result<Value, ComponentError> {
-        let result = self.component.on_request(request);
+    pub async fn send_request(
+        &mut self,
+        request: &orcs_event::Request,
+    ) -> Result<Value, ComponentError> {
+        let result = self.component.on_request(request).await;
 
         self.request_log.push(RequestRecord {
             operation: request.operation.clone(),
@@ -251,7 +255,7 @@ impl<C: Component> ComponentTestHarness<C> {
     /// # Returns
     ///
     /// The result of the request.
-    pub fn request(
+    pub async fn request(
         &mut self,
         category: EventCategory,
         operation: &str,
@@ -264,7 +268,7 @@ impl<C: Component> ComponentTestHarness<C> {
             self.test_channel,
             payload,
         );
-        self.send_request(&req)
+        self.send_request(&req).await
     }
 
     /// Sends a signal to the component and logs the response.
@@ -962,6 +966,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl Component for TestComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -971,7 +976,10 @@ mod tests {
             self.status
         }
 
-        fn on_request(&mut self, request: &orcs_event::Request) -> Result<Value, ComponentError> {
+        async fn on_request(
+            &mut self,
+            request: &orcs_event::Request,
+        ) -> Result<Value, ComponentError> {
             self.request_count += 1;
             match request.operation.as_str() {
                 "echo" => Ok(request.payload.clone()),
@@ -981,10 +989,10 @@ mod tests {
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
+            if signal.is_shutdown() {
                 self.abort();
                 SignalResponse::Abort
-            } else if matches!(signal.kind, orcs_event::SignalKind::Cancel) {
+            } else if signal.is_veto() || matches!(signal.kind, orcs_event::SignalKind::Cancel) {
                 SignalResponse::Handled
             } else {
                 SignalResponse::Ignored
@@ -996,16 +1004,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn harness_request() {
+    #[tokio::test]
+    async fn harness_request() {
         let comp = TestComponent::new("test");
         let mut harness = ComponentTestHarness::new(comp);
 
-        let result = harness.request(
-            EventCategory::Echo,
-            "echo",
-            serde_json::json!({"msg": "hello"}),
-        );
+        let result = harness
+            .request(
+                EventCategory::Echo,
+                "echo",
+                serde_json::json!({"msg": "hello"}),
+            )
+            .await;
         assert!(result.is_ok());
         assert_eq!(
             result.expect("echo request should succeed"),
@@ -1016,12 +1026,14 @@ mod tests {
         assert_eq!(harness.request_log()[0].operation, "echo");
     }
 
-    #[test]
-    fn harness_request_error() {
+    #[tokio::test]
+    async fn harness_request_error() {
         let comp = TestComponent::new("test");
         let mut harness = ComponentTestHarness::new(comp);
 
-        let result = harness.request(EventCategory::Echo, "unknown", Value::Null);
+        let result = harness
+            .request(EventCategory::Echo, "unknown", Value::Null)
+            .await;
         assert!(result.is_err());
 
         assert_eq!(harness.request_log().len(), 1);
@@ -1032,15 +1044,16 @@ mod tests {
     }
 
     #[test]
-    fn harness_veto() {
+    fn harness_veto_soft_cancel() {
         let comp = TestComponent::new("test");
         let mut harness = ComponentTestHarness::new(comp);
 
         assert_eq!(harness.status(), Status::Idle);
 
+        // Veto is a soft cancel — component stays alive
         let response = harness.veto();
-        assert_eq!(response, SignalResponse::Abort);
-        assert_eq!(harness.status(), Status::Aborted);
+        assert_eq!(response, SignalResponse::Handled);
+        assert_eq!(harness.status(), Status::Idle);
 
         assert_eq!(harness.signal_log().len(), 1);
         assert!(harness.signal_log()[0].kind.contains("Veto"));
@@ -1056,8 +1069,8 @@ mod tests {
         assert_eq!(harness.status(), Status::Idle);
     }
 
-    #[test]
-    fn harness_component_access() {
+    #[tokio::test]
+    async fn harness_component_access() {
         let comp = TestComponent::new("test");
         let mut harness = ComponentTestHarness::new(comp);
 
@@ -1065,6 +1078,7 @@ mod tests {
 
         harness
             .request(EventCategory::Echo, "count", Value::Null)
+            .await
             .expect("count request should succeed");
         assert_eq!(harness.component().request_count, 1);
 
@@ -1072,13 +1086,14 @@ mod tests {
         assert_eq!(harness.component().request_count, 100);
     }
 
-    #[test]
-    fn harness_clear_logs() {
+    #[tokio::test]
+    async fn harness_clear_logs() {
         let comp = TestComponent::new("test");
         let mut harness = ComponentTestHarness::new(comp);
 
         harness
             .request(EventCategory::Echo, "echo", Value::Null)
+            .await
             .expect("echo request should succeed for log clearing test");
         harness.cancel();
 

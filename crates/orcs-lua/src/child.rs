@@ -556,13 +556,51 @@ fn register_context_functions(
             }
         }
 
+        drop(ctx);
+        drop(wrapper);
+
         tracing::debug!("Lua exec (authorized): {}", cmd);
 
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
-            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+        let cancel_rx = crate::kill_flag::get_cancel_receiver(lua);
+        let output = if let Some(handle) = tokio::runtime::Handle::try_current()
+            .ok()
+            .filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    let child = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .kill_on_drop(true)
+                        .spawn()
+                        .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?;
+
+                    if let Some(mut rx) = cancel_rx {
+                        tokio::select! {
+                            biased;
+                            _ = rx.changed() => {
+                                Err(mlua::Error::RuntimeError("killed by veto".into()))
+                            }
+                            result = child.wait_with_output() => {
+                                result.map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))
+                            }
+                        }
+                    } else {
+                        child
+                            .wait_with_output()
+                            .await
+                            .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))
+                    }
+                })
+            })?
+        } else {
+            // Sync fallback (no tokio runtime, no cancel support)
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .map_err(|e| mlua::Error::ExternalError(std::sync::Arc::new(e)))?
+        };
 
         let result = lua.create_table()?;
         result.set("ok", output.status.success())?;

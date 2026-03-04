@@ -204,16 +204,14 @@ return {
                 local count = h:request("Hil", "pending_count", {})
                 expect(count.count).to.equal(3)
 
+                -- Veto is soft cancel — Lua handler clears pending, Rust overrides to Handled
                 local response = h:veto()
-                expect(response).to.equal("Abort")
-                expect(h:status()).to.equal("Aborted")
+                expect(response).to.equal("Handled")
+                expect(h:status()).to.equal("Idle")
 
-                -- After veto, component is aborted and rejects requests
-                local ok, err = pcall(function()
-                    h:request("Hil", "pending_count", {})
-                end)
-                expect(ok).to.equal(false)
-                expect(tostring(err)).to.match("aborted")
+                -- After veto, pending requests were cleared by Lua handler
+                local count2 = h:request("Hil", "pending_count", {})
+                expect(count2.count).to.equal(0)
             end,
         },
 

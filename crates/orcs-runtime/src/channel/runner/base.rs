@@ -450,6 +450,17 @@ pub struct ChannelRunner {
     sandbox: Option<Arc<dyn orcs_auth::SandboxPolicy>>,
     /// Runner exit notification sender for child-spawned runner lifecycle events.
     runner_exit_tx: Option<mpsc::UnboundedSender<crate::engine::RunnerExitNotice>>,
+    /// Interrupt sender for out-of-band Veto cancellation.
+    ///
+    /// When the event loop is blocked in `on_request`, the veto-watcher task
+    /// fires this sender to cancel in-flight operations without acquiring the
+    /// Component Mutex.
+    interrupt_tx: Option<orcs_component::InterruptSender>,
+    /// Secondary signal subscription for the veto-watcher task.
+    ///
+    /// Subscribes to the same broadcast as `signal_rx` but runs in a separate
+    /// tokio task so Veto signals are processed even when the event loop is busy.
+    veto_watcher_signal_rx: Option<broadcast::Receiver<Signal>>,
 }
 
 /// Helper for `tokio::select!`: receives from an optional request channel.
@@ -660,6 +671,46 @@ impl ChannelRunner {
     pub async fn run(mut self) -> RunnerResult {
         info!("ChannelRunner started");
 
+        // Spawn veto-watcher: independently watches for Veto/Shutdown signals
+        // and fires the interrupt sender, bypassing the event loop which may
+        // be blocked in on_request.
+        //
+        // - Veto (soft cancel): fires interrupt but CONTINUES watching so the
+        //   runner can handle future requests and future Veto signals.
+        // - Shutdown (hard stop): fires interrupt and exits.
+        let veto_watcher = match (self.interrupt_tx.take(), self.veto_watcher_signal_rx.take()) {
+            (Some(interrupt_tx), Some(mut veto_signal_rx)) => {
+                let channel_id = self.id;
+                Some(tokio::spawn(async move {
+                    loop {
+                        match veto_signal_rx.recv().await {
+                            Ok(signal)
+                                if (signal.is_veto() || signal.is_shutdown())
+                                    && signal.affects_channel(channel_id) =>
+                            {
+                                debug!(
+                                    "veto-watcher: firing interrupt for channel {} (kind={:?})",
+                                    channel_id, signal.kind
+                                );
+                                interrupt_tx.interrupt();
+                                if signal.is_shutdown() {
+                                    break;
+                                }
+                                // Soft cancel (Veto): continue watching.
+                            }
+                            Ok(_) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("veto-watcher: signal receiver lagged by {}", n);
+                                continue;
+                            }
+                        }
+                    }
+                }))
+            }
+            _ => None,
+        };
+
         // Restore + Initialize component
         {
             let mut comp = self.component.lock().await;
@@ -788,6 +839,11 @@ impl ChannelRunner {
 
             (fqn, snapshot)
         };
+
+        // Stop the veto-watcher — the runner is shutting down.
+        if let Some(handle) = veto_watcher {
+            handle.abort();
+        }
 
         info!(exit_reason = %exit_reason, "ChannelRunner stopped");
 
@@ -1007,7 +1063,7 @@ impl ChannelRunner {
         // 3. Re-dispatch the original request.
         let result = {
             let mut comp = self.component.lock().await;
-            comp.on_request(&pending.original_request)
+            comp.on_request(&pending.original_request).await
         };
 
         match result {
@@ -1190,7 +1246,7 @@ impl ChannelRunner {
 
         let result = {
             let mut comp = self.component.lock().await;
-            comp.on_request(&request)
+            comp.on_request(&request).await
         };
 
         // --- Post-dispatch hook ---
@@ -1333,7 +1389,7 @@ impl ChannelRunner {
 
         let result = {
             let mut comp = self.component.lock().await;
-            comp.on_request(&envelope.request)
+            comp.on_request(&envelope.request).await
         };
 
         // --- Post-dispatch hook ---
@@ -1933,6 +1989,19 @@ impl ChannelRunnerBuilder {
             None
         };
 
+        // Create interrupt channel for out-of-band Veto cancellation.
+        // The runner spawns a veto-watcher task that fires the sender when
+        // Veto arrives, and the component bridges the receiver to its internal
+        // cancel mechanisms (kill_flag + cancel_token in LuaComponent).
+        let (interrupt_tx, veto_watcher_signal_rx) =
+            if let Some(signal_tx) = &self.emitter_signal_tx {
+                let (itx, irx) = orcs_component::interrupt_channel();
+                self.component.set_interrupt(irx);
+                (Some(itx), Some(signal_tx.subscribe()))
+            } else {
+                (None, None)
+            };
+
         // Cache subscription entries from Component to avoid locking on every event.
         // Uses subscription_entries() which includes operation-level filtering.
         let subscriptions = self.component.subscription_entries();
@@ -1968,6 +2037,8 @@ impl ChannelRunnerBuilder {
             pending_approval: None,
             sandbox: self.sandbox.clone(),
             runner_exit_tx: self.runner_exit_tx.clone(),
+            interrupt_tx,
+            veto_watcher_signal_rx,
         };
 
         let mut handle = ChannelHandle::new(self.id, event_tx);
@@ -2007,6 +2078,7 @@ mod tests {
     use super::*;
     use crate::channel::manager::WorldManager;
     use crate::channel::ChannelConfig;
+    use async_trait::async_trait;
     use orcs_component::{ComponentError, Status};
     use orcs_event::{EventCategory, SignalResponse};
     use orcs_types::{ComponentId, Principal};
@@ -2027,6 +2099,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Component for MockComponent {
         fn id(&self) -> &ComponentId {
             &self.id
@@ -2040,12 +2113,12 @@ mod tests {
             &[EventCategory::Echo, EventCategory::Lifecycle]
         }
 
-        fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+        async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
             Ok(request.payload.clone())
         }
 
         fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-            if signal.is_veto() {
+            if signal.is_shutdown() {
                 self.status = Status::Aborted;
                 SignalResponse::Abort
             } else {
@@ -2149,7 +2222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runner_handles_veto() {
+    async fn runner_handles_shutdown() {
         let (manager_task, world_tx, world, signal_tx, primary) = setup().await;
 
         let signal_rx = signal_tx.subscribe();
@@ -2167,8 +2240,8 @@ mod tests {
         tokio::task::yield_now().await;
 
         signal_tx
-            .send(Signal::veto(Principal::System))
-            .expect("send veto signal");
+            .send(Signal::shutdown(Principal::System))
+            .expect("send shutdown signal");
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), runner_task).await;
         assert!(result.is_ok());
@@ -2239,6 +2312,7 @@ mod tests {
             }
         }
 
+        #[async_trait]
         impl Component for EmittingComponent {
             fn id(&self) -> &ComponentId {
                 &self.id
@@ -2252,7 +2326,7 @@ mod tests {
                 &[EventCategory::Echo]
             }
 
-            fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
+            async fn on_request(&mut self, request: &Request) -> Result<Value, ComponentError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 // Emit output via emitter when receiving a request
                 if let Some(emitter) = &self.emitter {
@@ -2262,7 +2336,7 @@ mod tests {
             }
 
             fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-                if signal.is_veto() {
+                if signal.is_shutdown() {
                     SignalResponse::Abort
                 } else {
                     SignalResponse::Handled
@@ -2554,6 +2628,7 @@ mod tests {
             id: ComponentId,
         }
 
+        #[async_trait]
         impl Component for FailingComponent {
             fn id(&self) -> &ComponentId {
                 &self.id
@@ -2561,13 +2636,13 @@ mod tests {
             fn status(&self) -> Status {
                 Status::Idle
             }
-            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+            async fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
                 Err(ComponentError::ExecutionFailed(
                     "deliberate test failure".into(),
                 ))
             }
             fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-                if signal.is_veto() {
+                if signal.is_shutdown() {
                     SignalResponse::Abort
                 } else {
                     SignalResponse::Handled
@@ -2648,6 +2723,7 @@ mod tests {
             }
         }
 
+        #[async_trait]
         impl Component for OutputRoutingComponent {
             fn id(&self) -> &ComponentId {
                 &self.id
@@ -2658,7 +2734,7 @@ mod tests {
             fn subscriptions(&self) -> &[EventCategory] {
                 &[EventCategory::Echo]
             }
-            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+            async fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 if let Some(emitter) = &self.emitter {
                     emitter.emit_output("routed output message");
@@ -2666,7 +2742,7 @@ mod tests {
                 Ok(serde_json::json!({"success": true}))
             }
             fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-                if signal.is_veto() {
+                if signal.is_shutdown() {
                     SignalResponse::Abort
                 } else {
                     SignalResponse::Handled
@@ -2764,6 +2840,7 @@ mod tests {
             }
         }
 
+        #[async_trait]
         impl Component for BoardOutputComponent {
             fn id(&self) -> &ComponentId {
                 &self.id
@@ -2774,7 +2851,7 @@ mod tests {
             fn subscriptions(&self) -> &[EventCategory] {
                 &[EventCategory::Echo]
             }
-            fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
+            async fn on_request(&mut self, _request: &Request) -> Result<Value, ComponentError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 if let Some(emitter) = &self.emitter {
                     emitter.emit_output("board and io message");
@@ -2782,7 +2859,7 @@ mod tests {
                 Ok(serde_json::json!({"success": true}))
             }
             fn on_signal(&mut self, signal: &Signal) -> SignalResponse {
-                if signal.is_veto() {
+                if signal.is_shutdown() {
                     SignalResponse::Abort
                 } else {
                     SignalResponse::Handled
