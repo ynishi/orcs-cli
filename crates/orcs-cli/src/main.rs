@@ -93,6 +93,10 @@ struct Args {
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
 
+    /// Run as ACP (Agent Client Protocol) server on stdio
+    #[arg(long)]
+    acp: bool,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -325,6 +329,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ACP server mode: run as ACP agent on stdio
+    if args.acp {
+        info!("Starting ACP server mode");
+        return orcs_acp::run_acp_server().await;
+    }
+
     // Create sandbox from project root
     let sandbox = Arc::new(
         ProjectSandbox::new(&resolver.project_root)
@@ -495,6 +505,7 @@ mod tests {
             sandbox: None,
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -525,6 +536,7 @@ mod tests {
             sandbox: None,
             log_file: Some(PathBuf::from("/custom/logs")),
             log_level: Some("trace".into()),
+            acp: false,
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -687,6 +699,7 @@ mod tests {
             sandbox: None,
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -711,6 +724,7 @@ mod tests {
             sandbox: Some(None), // --sandbox without DIR
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -737,6 +751,7 @@ mod tests {
             sandbox: Some(Some(explicit.clone())),
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
