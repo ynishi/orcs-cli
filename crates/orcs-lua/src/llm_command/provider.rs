@@ -475,7 +475,7 @@ fn build_gemini_body(
                             });
                             // Echo back thought_signature for Gemini 2.5 thinking models
                             if let Some(sig) = thought_signature {
-                                part["thought_signature"] = serde_json::json!(sig);
+                                part["thoughtSignature"] = serde_json::json!(sig);
                             }
                             parts.push(part);
                         }

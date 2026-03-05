@@ -279,7 +279,7 @@ pub(crate) fn extract_content_gemini(json: &serde_json::Value) -> Vec<ContentBlo
             // Gemini 2.5 thinking models include thought_signature at part level;
             // must be echoed back when replaying this functionCall.
             let thought_signature = part
-                .get("thought_signature")
+                .get("thoughtSignature")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
