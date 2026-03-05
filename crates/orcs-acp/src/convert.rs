@@ -108,4 +108,119 @@ mod tests {
             other => panic!("expected AgentMessageChunk, got: {other:?}"),
         }
     }
+
+    #[test]
+    fn text_to_thought_chunk_conversion() {
+        let update = text_to_agent_thought_chunk("thinking");
+        assert!(
+            matches!(update, SessionUpdate::AgentThoughtChunk(_)),
+            "expected AgentThoughtChunk, got: {update:?}"
+        );
+    }
+
+    // --- io_output_to_session_update tests ---
+
+    #[test]
+    fn io_output_print_normal_is_message_chunk() {
+        let output = orcs_runtime::IOOutput::print("hello");
+        let update = io_output_to_session_update(&output)
+            .expect("Print/Normal should produce a SessionUpdate");
+        assert!(
+            matches!(update, SessionUpdate::AgentMessageChunk(_)),
+            "Normal print should be AgentMessageChunk"
+        );
+    }
+
+    #[test]
+    fn io_output_print_debug_is_thought_chunk() {
+        let output = orcs_runtime::IOOutput::Print {
+            text: "debug info".into(),
+            style: orcs_runtime::OutputStyle::Debug,
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("Print/Debug should produce a SessionUpdate");
+        assert!(
+            matches!(update, SessionUpdate::AgentThoughtChunk(_)),
+            "Debug print should be AgentThoughtChunk"
+        );
+    }
+
+    #[test]
+    fn io_output_show_processing_is_thought_chunk() {
+        let output = orcs_runtime::IOOutput::ShowProcessing {
+            component: "shell".into(),
+            operation: "executing".into(),
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("ShowProcessing should produce a SessionUpdate");
+        assert!(
+            matches!(update, SessionUpdate::AgentThoughtChunk(_)),
+            "ShowProcessing should be AgentThoughtChunk"
+        );
+    }
+
+    #[test]
+    fn io_output_approval_request_is_message_chunk() {
+        let output = orcs_runtime::IOOutput::ShowApprovalRequest {
+            id: "req-1".into(),
+            operation: "write".into(),
+            description: "write file".into(),
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("ShowApprovalRequest should produce a SessionUpdate");
+        assert!(
+            matches!(update, SessionUpdate::AgentMessageChunk(_)),
+            "ShowApprovalRequest should be AgentMessageChunk"
+        );
+    }
+
+    #[test]
+    fn io_output_approved_is_message_chunk() {
+        let output = orcs_runtime::IOOutput::ShowApproved {
+            approval_id: "req-1".into(),
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("ShowApproved should produce a SessionUpdate");
+        assert!(matches!(update, SessionUpdate::AgentMessageChunk(_)));
+    }
+
+    #[test]
+    fn io_output_rejected_with_reason() {
+        let output = orcs_runtime::IOOutput::ShowRejected {
+            approval_id: "req-2".into(),
+            reason: Some("not allowed".into()),
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("ShowRejected should produce a SessionUpdate");
+        assert!(matches!(update, SessionUpdate::AgentMessageChunk(_)));
+    }
+
+    #[test]
+    fn io_output_rejected_without_reason() {
+        let output = orcs_runtime::IOOutput::ShowRejected {
+            approval_id: "req-3".into(),
+            reason: None,
+        };
+        let update = io_output_to_session_update(&output)
+            .expect("ShowRejected without reason should produce a SessionUpdate");
+        assert!(matches!(update, SessionUpdate::AgentMessageChunk(_)));
+    }
+
+    #[test]
+    fn io_output_prompt_returns_none() {
+        let output = orcs_runtime::IOOutput::prompt("orcs>");
+        assert!(
+            io_output_to_session_update(&output).is_none(),
+            "Prompt should have no ACP representation"
+        );
+    }
+
+    #[test]
+    fn io_output_clear_returns_none() {
+        let output = orcs_runtime::IOOutput::Clear;
+        assert!(
+            io_output_to_session_update(&output).is_none(),
+            "Clear should have no ACP representation"
+        );
+    }
 }

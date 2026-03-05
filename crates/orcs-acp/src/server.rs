@@ -23,7 +23,7 @@ use std::rc::Rc;
 use agent_client_protocol::{
     AgentSideConnection, Client, PromptResponse, SessionNotification, StopReason,
 };
-use orcs_runtime::io::{IOInputHandle, IOOutputHandle};
+use orcs_runtime::io::{IOInputHandle, IOOutputHandle, InputContext};
 use orcs_runtime::IOOutput;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
@@ -52,6 +52,16 @@ const IDLE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(3);
 /// Maximum wait for the first output from the engine.
 const MAX_WAIT: tokio::time::Duration = tokio::time::Duration::from_secs(120);
 
+/// Checks if the prompt text is a HIL response (approve/reject).
+///
+/// Returns `true` for "y", "yes", "n", "no" (case-insensitive).
+fn is_hil_response(text: &str) -> bool {
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "y" | "yes" | "n" | "no"
+    )
+}
+
 /// Processes prompt jobs by sending text to the ORCS engine and
 /// streaming output back as ACP session updates.
 ///
@@ -60,23 +70,56 @@ const MAX_WAIT: tokio::time::Duration = tokio::time::Duration::from_secs(120);
 /// 2. Collects `IOOutput` from `IOOutputHandle` with idle-timeout
 /// 3. Converts each `IOOutput` to an ACP `SessionUpdate` and sends it
 /// 4. Completes the prompt when `IOOutput::Prompt` is received or timeout
+///
+/// HIL (Human-in-the-Loop) approval flow:
+/// - When `ShowApprovalRequest` is received, the approval ID is stored
+/// - If the next prompt is "y"/"n", it is sent with the stored approval ID
+///   as `InputContext`, so the engine's IOBridge can dispatch the correct signal
 async fn engine_worker(
     mut rx: mpsc::Receiver<PromptJob>,
     conn: Rc<AgentSideConnection>,
     io_input: IOInputHandle,
     mut io_output: IOOutputHandle,
 ) {
+    // Tracks the most recent pending approval ID across prompts.
+    let mut pending_approval_id: Option<String> = None;
+
     while let Some(job) = rx.recv().await {
         let session_id = &job.session_id;
         debug!(session_id = %session_id, text = %job.text, "engine_worker: processing prompt");
 
-        // Send user text to ORCS engine.
-        if let Err(e) = io_input.send_line(&job.text).await {
+        // Determine if this prompt is a HIL response to a pending approval.
+        let io_input_msg = if is_hil_response(&job.text) {
+            if let Some(ref approval_id) = pending_approval_id {
+                debug!(
+                    session_id = %session_id,
+                    approval_id = %approval_id,
+                    response = %job.text,
+                    "engine_worker: HIL response with approval context"
+                );
+                orcs_runtime::io::IOInput::line_with_context(
+                    &job.text,
+                    InputContext::with_approval_id(approval_id.as_str()),
+                )
+            } else {
+                orcs_runtime::io::IOInput::line(&job.text)
+            }
+        } else {
+            orcs_runtime::io::IOInput::line(&job.text)
+        };
+
+        // Send input to ORCS engine.
+        if let Err(e) = io_input.send(io_input_msg).await {
             error!(session_id = %session_id, error = %e, "failed to send input to engine");
             let _ = job
                 .response_tx
                 .send(PromptResponse::new(StopReason::EndTurn));
             continue;
+        }
+
+        // Clear pending approval after sending a HIL response.
+        if is_hil_response(&job.text) && pending_approval_id.is_some() {
+            pending_approval_id = None;
         }
 
         // Collect output with idle-timeout detection.
@@ -110,6 +153,16 @@ async fn engine_worker(
                     }
 
                     received_output = true;
+
+                    // Track pending approval for HIL flow.
+                    if let IOOutput::ShowApprovalRequest { ref id, .. } = io_out {
+                        debug!(
+                            session_id = %session_id,
+                            approval_id = %id,
+                            "engine_worker: tracking pending approval"
+                        );
+                        pending_approval_id = Some(id.clone());
+                    }
 
                     // Convert IOOutput to ACP SessionUpdate.
                     if let Some(update) = convert::io_output_to_session_update(&io_out) {
@@ -231,4 +284,42 @@ pub async fn run_acp_server(
     engine.shutdown().await;
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_hil_response_approvals() {
+        assert!(is_hil_response("y"));
+        assert!(is_hil_response("Y"));
+        assert!(is_hil_response("yes"));
+        assert!(is_hil_response("YES"));
+        assert!(is_hil_response("Yes"));
+    }
+
+    #[test]
+    fn is_hil_response_rejections() {
+        assert!(is_hil_response("n"));
+        assert!(is_hil_response("N"));
+        assert!(is_hil_response("no"));
+        assert!(is_hil_response("NO"));
+        assert!(is_hil_response("No"));
+    }
+
+    #[test]
+    fn is_hil_response_with_whitespace() {
+        assert!(is_hil_response(" y "));
+        assert!(is_hil_response("  no  "));
+    }
+
+    #[test]
+    fn is_hil_response_non_hil() {
+        assert!(!is_hil_response("hello"));
+        assert!(!is_hil_response("yeah"));
+        assert!(!is_hil_response("nope"));
+        assert!(!is_hil_response("y req-123"));
+        assert!(!is_hil_response(""));
+    }
 }
