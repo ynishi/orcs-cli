@@ -29,11 +29,13 @@ pub(super) fn parse_provider_response(
     let blocks = match provider.wire_format() {
         super::provider::WireFormat::OpenAI => llm_adapter::extract_content_openai(json),
         super::provider::WireFormat::Anthropic => llm_adapter::extract_content_anthropic(json),
+        super::provider::WireFormat::Gemini => llm_adapter::extract_content_gemini(json),
     };
 
     let stop_reason = match provider.wire_format() {
         super::provider::WireFormat::OpenAI => llm_adapter::extract_stop_reason_openai(json),
         super::provider::WireFormat::Anthropic => llm_adapter::extract_stop_reason_anthropic(json),
+        super::provider::WireFormat::Gemini => llm_adapter::extract_stop_reason_gemini(json),
     };
 
     let intents = llm_adapter::content_blocks_to_intents(&blocks);
@@ -42,8 +44,10 @@ pub(super) fn parse_provider_response(
     // Extract text for session history and backward-compatible `content` field
     let content = message_content.text().unwrap_or("").to_string();
 
+    // Model name: OpenAI/Anthropic use top-level "model", Gemini uses "modelVersion".
     let model = json
         .get("model")
+        .or_else(|| json.get("modelVersion"))
         .and_then(|m| m.as_str())
         .map(|s| s.to_string());
 

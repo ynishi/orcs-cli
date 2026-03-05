@@ -2,16 +2,17 @@
 //!
 //! # Architecture
 //!
-//! Two provider families, one unified HTTP transport (reqwest):
+//! Three wire format families, one unified HTTP transport (reqwest):
 //!
 //! ```text
 //! Lua: orcs.llm(prompt, opts)
 //!   → Capability::LLM gate (ctx_fns / child)
 //!   → llm_request_impl (Rust/reqwest)
-//!       ├── Ollama:    POST {base_url}/v1/chat/completions  ─┐
-//!       ├── OpenAI:    POST {base_url}/v1/chat/completions  ─┤ WireFormat::OpenAI
-//!       │   (llama.cpp, vLLM, LM Studio also use this)      ─┘
-//!       └── Anthropic: POST {base_url}/v1/messages           ── WireFormat::Anthropic
+//!       ├── Ollama:    POST {base_url}/v1/chat/completions        ─┐
+//!       ├── OpenAI:    POST {base_url}/v1/chat/completions        ─┤ WireFormat::OpenAI
+//!       │   (llama.cpp, vLLM, LM Studio also use this)            ─┘
+//!       ├── Anthropic: POST {base_url}/v1/messages                 ── WireFormat::Anthropic
+//!       └── Gemini:    POST {base_url}/v1beta/models/{m}:generate  ── WireFormat::Gemini
 //! ```
 //!
 //! # Design Decisions
@@ -396,6 +397,11 @@ pub fn llm_ping_impl(lua: &Lua, opts: Option<Table>) -> mlua::Result<Table> {
             }
             req = req.header("anthropic-version", "2023-06-01");
         }
+        Provider::Gemini => {
+            if let Some(ref key) = api_key {
+                req = req.header("x-goog-api-key", key.as_str());
+            }
+        }
     }
 
     let result = lua.create_table()?;
@@ -596,12 +602,10 @@ pub fn llm_request_impl(lua: &Lua, args: (String, Option<Table>)) -> mlua::Resul
         None
     };
 
-    // Build URL
-    let url = format!(
-        "{}{}",
-        llm_opts.base_url.trim_end_matches('/'),
-        llm_opts.provider.chat_path()
-    );
+    // Build URL (Gemini embeds model in URL path; other providers use simple concatenation)
+    let url = llm_opts
+        .provider
+        .chat_url(&llm_opts.base_url, &llm_opts.model);
 
     // Get shared client (reused across retries and tool turns)
     let client = get_or_init_http_client(lua)?;
@@ -1429,7 +1433,7 @@ mod tests {
     fn ping_invalid_provider() {
         let lua = Lua::new();
         let opts = lua.create_table().expect("create opts");
-        opts.set("provider", "gemini").expect("set provider");
+        opts.set("provider", "deepseek").expect("set provider");
 
         let result = llm_ping_impl(&lua, Some(opts)).expect("should not panic");
         assert!(!result.get::<bool>("ok").expect("get ok"));

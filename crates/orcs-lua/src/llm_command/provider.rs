@@ -3,13 +3,13 @@
 //! # Design
 //!
 //! `Provider` identifies **which server** we are talking to (Ollama, OpenAI,
-//! Anthropic). Each provider carries its own metadata: default base URL,
-//! default model, API-key env var, and health-check path.
+//! Anthropic, Gemini). Each provider carries its own metadata: default base
+//! URL, default model, API-key env var, and health-check path.
 //!
 //! `WireFormat` identifies **how** the request/response is serialized.
 //! Ollama and OpenAI share the same OpenAI Chat Completions wire format
-//! (`/v1/chat/completions`), while Anthropic uses a distinct format
-//! (`/v1/messages`). The mapping is: `Provider → WireFormat` via
+//! (`/v1/chat/completions`), while Anthropic and Gemini each use a distinct
+//! format. The mapping is: `Provider → WireFormat` via
 //! [`Provider::wire_format()`].
 //!
 //! ```text
@@ -17,6 +17,7 @@
 //!                      ├─ WireFormat::OpenAI  (/v1/chat/completions)
 //! Provider::OpenAI   ─┘
 //! Provider::Anthropic ── WireFormat::Anthropic (/v1/messages)
+//! Provider::Gemini    ── WireFormat::Gemini   (/v1beta/models/{model}:generateContent)
 //! ```
 //!
 //! # Continuous Batching (llama.cpp / vLLM)
@@ -48,6 +49,8 @@ pub(crate) enum Provider {
     OpenAI,
     /// Anthropic Messages API. Wire format: Anthropic (`/v1/messages`).
     Anthropic,
+    /// Google Gemini API. Wire format: Gemini (`/v1beta/models/{model}:generateContent`).
+    Gemini,
 }
 
 /// Wire format for request/response serialization.
@@ -61,6 +64,8 @@ pub(crate) enum WireFormat {
     OpenAI,
     /// Anthropic Messages format (`/v1/messages`).
     Anthropic,
+    /// Google Gemini generateContent format (`/v1beta/models/{model}:generateContent`).
+    Gemini,
 }
 
 impl std::str::FromStr for Provider {
@@ -68,14 +73,15 @@ impl std::str::FromStr for Provider {
 
     /// Parse provider from string (case-insensitive).
     ///
-    /// Accepts: "ollama", "openai", "anthropic".
+    /// Accepts: "ollama", "openai", "anthropic", "gemini".
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "ollama" => Ok(Self::Ollama),
             "openai" => Ok(Self::OpenAI),
             "anthropic" => Ok(Self::Anthropic),
+            "gemini" | "google" => Ok(Self::Gemini),
             other => Err(format!(
-                "unsupported provider: '{}' (expected: ollama, openai, anthropic)",
+                "unsupported provider: '{}' (expected: ollama, openai, anthropic, gemini)",
                 other
             )),
         }
@@ -89,6 +95,7 @@ impl Provider {
             Self::Ollama => "ollama",
             Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -97,6 +104,7 @@ impl Provider {
         match self {
             Self::Ollama | Self::OpenAI => WireFormat::OpenAI,
             Self::Anthropic => WireFormat::Anthropic,
+            Self::Gemini => WireFormat::Gemini,
         }
     }
 
@@ -106,6 +114,7 @@ impl Provider {
             Self::Ollama => "http://localhost:11434",
             Self::OpenAI => "https://api.openai.com",
             Self::Anthropic => "https://api.anthropic.com",
+            Self::Gemini => "https://generativelanguage.googleapis.com",
         }
     }
 
@@ -115,16 +124,33 @@ impl Provider {
             Self::Ollama => "llama3.2",
             Self::OpenAI => "gpt-4o",
             Self::Anthropic => "claude-sonnet-4-20250514",
+            Self::Gemini => "gemini-2.5-flash",
         }
     }
 
     /// Chat API path for this provider.
     ///
     /// Ollama and OpenAI share the same path (`/v1/chat/completions`).
+    /// Gemini embeds the model name in the URL path — use
+    /// [`Provider::chat_url()`] for the fully-resolved URL.
     pub fn chat_path(self) -> &'static str {
         match self.wire_format() {
             WireFormat::OpenAI => "/v1/chat/completions",
             WireFormat::Anthropic => "/v1/messages",
+            // Gemini path is model-dependent; return template for logging.
+            WireFormat::Gemini => "/v1beta/models/{model}:generateContent",
+        }
+    }
+
+    /// Build the full chat endpoint URL for this provider.
+    ///
+    /// Most providers: `{base_url}{chat_path}`.
+    /// Gemini: `{base_url}/v1beta/models/{model}:generateContent` (model in path).
+    pub fn chat_url(self, base_url: &str, model: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        match self {
+            Self::Gemini => format!("{base}/v1beta/models/{model}:generateContent"),
+            _ => format!("{base}{}", self.chat_path()),
         }
     }
 
@@ -136,6 +162,7 @@ impl Provider {
             Self::Ollama => None,
             Self::OpenAI => Some("OPENAI_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Gemini => Some("GEMINI_API_KEY"),
         }
     }
 
@@ -144,11 +171,13 @@ impl Provider {
     /// - Ollama: `GET /` returns `"Ollama is running"` (no auth)
     /// - OpenAI: `GET /v1/models` (requires auth, but proves connectivity)
     /// - Anthropic: probe the chat path (no dedicated health endpoint)
+    /// - Gemini: list models endpoint (requires auth)
     pub fn health_path(self) -> &'static str {
         match self {
             Self::Ollama => "/",
             Self::OpenAI => "/v1/models",
             Self::Anthropic => "/v1/messages",
+            Self::Gemini => "/v1beta/models",
         }
     }
 
@@ -156,7 +185,7 @@ impl Provider {
     pub fn requires_api_key(self) -> bool {
         match self {
             Self::Ollama => false,
-            Self::OpenAI | Self::Anthropic => true,
+            Self::OpenAI | Self::Anthropic | Self::Gemini => true,
         }
     }
 }
@@ -172,6 +201,7 @@ pub(super) fn build_request_body(
     match opts.provider.wire_format() {
         WireFormat::OpenAI => build_openai_body(opts, messages, tools),
         WireFormat::Anthropic => build_anthropic_body(opts, messages, tools),
+        WireFormat::Gemini => build_gemini_body(opts, messages, tools),
     }
 }
 
@@ -386,6 +416,118 @@ fn build_anthropic_body(
     Ok(body)
 }
 
+/// Build request body for Gemini `generateContent` endpoint.
+///
+/// Gemini format:
+/// - `contents[]` — conversation turns with `role: "user"` / `"model"` and `parts[]`
+/// - `systemInstruction` — top-level system prompt (optional)
+/// - `tools[].functionDeclarations[]` — function calling definitions
+/// - `generationConfig` — temperature, maxOutputTokens, etc.
+///
+/// Key differences from OpenAI/Anthropic:
+/// - Model is in the URL path, NOT in the request body
+/// - Tool results use `functionResponse` parts (not separate role)
+/// - Tool calls arrive as `functionCall` parts in model responses
+fn build_gemini_body(
+    opts: &LlmOpts,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    use orcs_types::intent::MessageContent;
+
+    let mut contents = Vec::new();
+
+    for m in messages {
+        if m.role == Role::System {
+            // System messages are handled via systemInstruction, not contents
+            continue;
+        }
+
+        let gemini_role = match m.role {
+            Role::User | Role::Tool => "user",
+            Role::Assistant => "model",
+            // System already filtered above
+            Role::System => continue,
+        };
+
+        let parts = match &m.content {
+            MessageContent::Text(s) => vec![serde_json::json!({"text": s})],
+            MessageContent::Blocks(blocks) => {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            parts.push(serde_json::json!({"text": text}));
+                        }
+                        ContentBlock::ToolUse { id: _, name, input } => {
+                            parts.push(serde_json::json!({
+                                "functionCall": {
+                                    "name": name,
+                                    "args": input,
+                                }
+                            }));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id: _,
+                            content,
+                            ..
+                        } => {
+                            // Gemini: functionResponse wraps the result.
+                            // The name field should ideally match the original functionCall name,
+                            // but we only have tool_use_id here. Use a generic name; Gemini
+                            // matches by position in the conversation.
+                            parts.push(serde_json::json!({
+                                "functionResponse": {
+                                    "name": "tool_result",
+                                    "response": {
+                                        "content": content,
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+                parts
+            }
+        };
+
+        contents.push(serde_json::json!({
+            "role": gemini_role,
+            "parts": parts,
+        }));
+    }
+
+    let mut body = serde_json::json!({
+        "contents": contents,
+    });
+
+    // System prompt at top level as systemInstruction
+    if let Some(ref sys) = opts.system_prompt {
+        body["systemInstruction"] = serde_json::json!({
+            "parts": [{"text": sys}]
+        });
+    }
+
+    // Generation config
+    let mut gen_config = serde_json::Map::new();
+    if let Some(temp) = opts.temperature {
+        gen_config.insert("temperature".into(), serde_json::json!(temp));
+    }
+    if let Some(max) = opts.max_tokens {
+        gen_config.insert("maxOutputTokens".into(), serde_json::json!(max));
+    }
+    if !gen_config.is_empty() {
+        body["generationConfig"] = serde_json::Value::Object(gen_config);
+    }
+
+    // Tools (Gemini wraps functionDeclarations inside a tools array)
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+
+    Ok(body)
+}
+
 // ── Tools JSON Builders ──────────────────────────────────────────────
 
 /// Build tools JSON from IntentRegistry for the given provider.
@@ -412,6 +554,7 @@ pub(super) fn build_tools_for_provider(lua: &Lua, provider: Provider) -> Option<
     let tools = match provider.wire_format() {
         WireFormat::Anthropic => build_tools_anthropic_format(defs),
         WireFormat::OpenAI => build_tools_openai_format(defs),
+        WireFormat::Gemini => build_tools_gemini_format(defs),
     };
     Some(tools)
 }
@@ -457,6 +600,32 @@ fn build_tools_anthropic_format(defs: &[IntentDef]) -> serde_json::Value {
     serde_json::Value::Array(tools)
 }
 
+/// Build tools array in Gemini format.
+///
+/// Gemini wraps function declarations inside a `tools` array with
+/// `functionDeclarations`:
+///
+/// ```json
+/// [{ "functionDeclarations": [
+///   { "name": "...", "description": "...", "parameters": {...} }
+/// ]}]
+/// ```
+fn build_tools_gemini_format(defs: &[IntentDef]) -> serde_json::Value {
+    let declarations: Vec<serde_json::Value> = defs
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.name,
+                "description": d.description,
+                "parameters": d.parameters,
+            })
+        })
+        .collect();
+    serde_json::json!([{
+        "functionDeclarations": declarations,
+    }])
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -486,10 +655,26 @@ mod tests {
     }
 
     #[test]
+    fn provider_from_str_gemini() {
+        assert_eq!(
+            "gemini".parse::<Provider>().expect("should parse gemini"),
+            Provider::Gemini
+        );
+        assert_eq!(
+            "google".parse::<Provider>().expect("should parse google"),
+            Provider::Gemini
+        );
+        assert_eq!(
+            "GEMINI".parse::<Provider>().expect("should parse GEMINI"),
+            Provider::Gemini
+        );
+    }
+
+    #[test]
     fn provider_from_str_invalid() {
-        let err = "gemini"
+        let err = "deepseek"
             .parse::<Provider>()
-            .expect_err("should reject gemini");
+            .expect_err("should reject deepseek");
         assert!(
             err.contains("unsupported provider"),
             "error should mention unsupported, got: {}",
@@ -511,6 +696,10 @@ mod tests {
             Provider::Anthropic.default_base_url(),
             "https://api.anthropic.com"
         );
+        assert_eq!(
+            Provider::Gemini.default_base_url(),
+            "https://generativelanguage.googleapis.com"
+        );
 
         assert_eq!(Provider::Ollama.default_model(), "llama3.2");
         assert_eq!(Provider::OpenAI.default_model(), "gpt-4o");
@@ -518,11 +707,16 @@ mod tests {
             Provider::Anthropic.default_model(),
             "claude-sonnet-4-20250514"
         );
+        assert_eq!(Provider::Gemini.default_model(), "gemini-2.5-flash");
 
         // Ollama and OpenAI share the same chat path via wire_format
         assert_eq!(Provider::Ollama.chat_path(), "/v1/chat/completions");
         assert_eq!(Provider::OpenAI.chat_path(), "/v1/chat/completions");
         assert_eq!(Provider::Anthropic.chat_path(), "/v1/messages");
+        assert_eq!(
+            Provider::Gemini.chat_path(),
+            "/v1beta/models/{model}:generateContent"
+        );
     }
 
     #[test]
@@ -530,6 +724,7 @@ mod tests {
         assert_eq!(Provider::Ollama.api_key_env(), None);
         assert_eq!(Provider::OpenAI.api_key_env(), Some("OPENAI_API_KEY"));
         assert_eq!(Provider::Anthropic.api_key_env(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(Provider::Gemini.api_key_env(), Some("GEMINI_API_KEY"));
     }
 
     #[test]
@@ -537,6 +732,7 @@ mod tests {
         assert_eq!(Provider::Ollama.wire_format(), WireFormat::OpenAI);
         assert_eq!(Provider::OpenAI.wire_format(), WireFormat::OpenAI);
         assert_eq!(Provider::Anthropic.wire_format(), WireFormat::Anthropic);
+        assert_eq!(Provider::Gemini.wire_format(), WireFormat::Gemini);
     }
 
     #[test]
@@ -544,6 +740,7 @@ mod tests {
         assert!(!Provider::Ollama.requires_api_key());
         assert!(Provider::OpenAI.requires_api_key());
         assert!(Provider::Anthropic.requires_api_key());
+        assert!(Provider::Gemini.requires_api_key());
     }
 
     #[test]
@@ -551,6 +748,41 @@ mod tests {
         assert_eq!(Provider::Ollama.health_path(), "/");
         assert_eq!(Provider::OpenAI.health_path(), "/v1/models");
         assert_eq!(Provider::Anthropic.health_path(), "/v1/messages");
+        assert_eq!(Provider::Gemini.health_path(), "/v1beta/models");
+    }
+
+    #[test]
+    fn provider_chat_url_standard() {
+        let url = Provider::OpenAI.chat_url("https://api.openai.com", "gpt-4o");
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+
+        let url =
+            Provider::Anthropic.chat_url("https://api.anthropic.com", "claude-sonnet-4-20250514");
+        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn provider_chat_url_gemini_embeds_model() {
+        let url = Provider::Gemini.chat_url(
+            "https://generativelanguage.googleapis.com",
+            "gemini-2.5-flash",
+        );
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+    }
+
+    #[test]
+    fn provider_chat_url_trims_trailing_slash() {
+        let url = Provider::Gemini.chat_url(
+            "https://generativelanguage.googleapis.com/",
+            "gemini-2.5-pro",
+        );
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        );
     }
 
     // ── Request body builder tests ─────────────────────────────────────
@@ -888,5 +1120,178 @@ mod tests {
         let wire = message_to_openai_wire(&msg);
         assert_eq!(wire.len(), 1, "empty blocks should produce fallback");
         assert_eq!(wire[0]["role"], "assistant");
+    }
+
+    // ── Gemini body builder tests ──────────────────────────────────────
+
+    fn gemini_opts() -> LlmOpts {
+        LlmOpts {
+            provider: Provider::Gemini,
+            base_url: "https://generativelanguage.googleapis.com".into(),
+            model: "gemini-2.5-flash".into(),
+            api_key: Some("test-key".into()),
+            system_prompt: None,
+            session_id: None,
+            temperature: None,
+            max_tokens: None,
+            timeout: 120,
+            max_retries: DEFAULT_MAX_RETRIES,
+            tools: false,
+            resolve: false,
+            max_tool_turns: DEFAULT_MAX_TOOL_TURNS,
+            hil_intents: false,
+            overall_timeout: None,
+        }
+    }
+
+    #[test]
+    fn build_gemini_body_basic() {
+        let opts = gemini_opts();
+        let messages = vec![Message {
+            role: Role::User,
+            content: "hello".into(),
+        }];
+
+        let body = build_gemini_body(&opts, &messages, None).expect("should build body");
+
+        // Gemini does NOT include model in body (it's in URL)
+        assert!(body.get("model").is_none(), "model should not be in body");
+
+        let contents = body["contents"].as_array().expect("contents array");
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn build_gemini_body_system_instruction() {
+        let mut opts = gemini_opts();
+        opts.system_prompt = Some("You are a coding assistant.".into());
+
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: "filtered out".into(),
+            },
+            Message {
+                role: Role::User,
+                content: "hello".into(),
+            },
+        ];
+
+        let body = build_gemini_body(&opts, &messages, None).expect("should build body");
+
+        // System at top level as systemInstruction
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "You are a coding assistant."
+        );
+
+        // Messages should NOT contain system role
+        let contents = body["contents"].as_array().expect("contents array");
+        assert_eq!(contents.len(), 1, "system message should be filtered out");
+        assert_eq!(contents[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_gemini_body_generation_config() {
+        let mut opts = gemini_opts();
+        opts.temperature = Some(0.7);
+        opts.max_tokens = Some(4096);
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+        }];
+
+        let body = build_gemini_body(&opts, &messages, None).expect("should build body");
+        assert_eq!(body["generationConfig"]["temperature"], 0.7);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 4096);
+    }
+
+    #[test]
+    fn build_gemini_body_with_tools() {
+        let opts = gemini_opts();
+        let messages = vec![Message {
+            role: Role::User,
+            content: "read file".into(),
+        }];
+
+        let tools = serde_json::json!([{
+            "functionDeclarations": [{
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+            }]
+        }]);
+
+        let body = build_gemini_body(&opts, &messages, Some(&tools))
+            .expect("should build body with tools");
+        let tools_arr = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 1);
+        assert!(tools_arr[0]["functionDeclarations"].is_array());
+    }
+
+    #[test]
+    fn build_gemini_body_tool_results() {
+        let opts = gemini_opts();
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "read a.rs".into(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                }]),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "fn main() {}".into(),
+                    is_error: None,
+                }]),
+            },
+        ];
+
+        let body = build_gemini_body(&opts, &messages, None).expect("should build body");
+        let contents = body["contents"].as_array().expect("contents array");
+        assert_eq!(contents.len(), 3);
+
+        // Assistant message with functionCall
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"][0]["functionCall"]["name"], "read");
+
+        // User message with functionResponse
+        assert_eq!(contents[2]["role"], "user");
+        assert!(contents[2]["parts"][0]["functionResponse"].is_object());
+    }
+
+    // ── Gemini tools format tests ──────────────────────────────────────
+
+    #[test]
+    fn build_tools_gemini_format_structure() {
+        let registry = IntentRegistry::new();
+        let tools = build_tools_gemini_format(registry.all());
+
+        // Gemini: [{ "functionDeclarations": [...] }]
+        let arr = tools.as_array().expect("should be array");
+        assert_eq!(arr.len(), 1, "single tools entry with functionDeclarations");
+
+        let decls = arr[0]["functionDeclarations"]
+            .as_array()
+            .expect("functionDeclarations array");
+        assert_eq!(decls.len(), 8, "8 builtin tools");
+
+        let first = &decls[0];
+        assert_eq!(first["name"], "read");
+        assert!(first["description"].is_string());
+        assert!(first["parameters"].is_object());
+        // Should NOT have OpenAI-style "type": "function" wrapper
+        assert!(first.get("type").is_none());
     }
 }

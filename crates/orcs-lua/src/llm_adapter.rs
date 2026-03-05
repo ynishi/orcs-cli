@@ -205,6 +205,111 @@ pub(crate) fn extract_stop_reason_anthropic(json: &serde_json::Value) -> StopRea
     }
 }
 
+/// Extract content blocks from a Gemini `generateContent` response.
+///
+/// Gemini format:
+/// ```json
+/// {
+///   "candidates": [{
+///     "content": {
+///       "parts": [
+///         { "text": "Let me read that file." },
+///         { "functionCall": { "name": "read", "args": { "path": "x" } } }
+///       ],
+///       "role": "model"
+///     },
+///     "finishReason": "STOP"
+///   }]
+/// }
+/// ```
+pub(crate) fn extract_content_gemini(json: &serde_json::Value) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+
+    let parts = match json
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+    {
+        Some(p) => p,
+        None => return blocks,
+    };
+
+    for (idx, part) in parts.iter().enumerate() {
+        // Text part
+        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+            if !text.is_empty() {
+                blocks.push(ContentBlock::Text {
+                    text: text.to_string(),
+                });
+            }
+        }
+
+        // Function call part
+        if let Some(fc) = part.get("functionCall") {
+            let name = fc
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if name.is_empty() {
+                warn!("Gemini functionCall has empty name at part index {idx}");
+            }
+
+            let input = fc
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            // Gemini does not provide call IDs; generate a synthetic one.
+            let id = format!("gemini_call_{idx}");
+
+            blocks.push(ContentBlock::ToolUse { id, name, input });
+        }
+    }
+
+    blocks
+}
+
+/// Extract normalized `StopReason` from a Gemini response.
+///
+/// Gemini: `candidates[0].finishReason` → "STOP" | "MAX_TOKENS" | etc.
+/// When function calls are present, finishReason is "STOP" but the
+/// presence of `functionCall` parts indicates tool use.
+pub(crate) fn extract_stop_reason_gemini(json: &serde_json::Value) -> StopReason {
+    let reason = json
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("STOP");
+
+    match reason {
+        "MAX_TOKENS" => StopReason::MaxTokens,
+        "STOP" => {
+            // Gemini returns "STOP" even for function calls.
+            // Check if any functionCall parts are present.
+            let has_function_call = json
+                .get("candidates")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("content"))
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+                .map(|parts| parts.iter().any(|p| p.get("functionCall").is_some()))
+                .unwrap_or(false);
+
+            if has_function_call {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+        _ => StopReason::EndTurn, // SAFETY, RECITATION, OTHER, etc.
+    }
+}
+
 // ── ContentBlock → ActionIntent Conversion ──────────────────────────
 
 /// Convert tool_use content blocks into `ActionIntent`s.
@@ -732,5 +837,212 @@ mod tests {
         assert_eq!(intents[0].name, "grep");
         assert_eq!(intents[0].id, "toolu_abc");
         assert_eq!(content.text(), Some("Let me check."));
+    }
+
+    // ── Gemini extraction ────────────────────────────────────────
+
+    #[test]
+    fn gemini_text_only_response() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Hello!"}],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+
+        let blocks = extract_content_gemini(&json);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Hello!"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemini_function_call_response() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "read",
+                            "args": {"path": "src/main.rs"}
+                        }
+                    }],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+
+        let blocks = extract_content_gemini(&json);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(name, "read");
+                assert_eq!(input["path"], "src/main.rs");
+                assert!(
+                    id.starts_with("gemini_call_"),
+                    "should have synthetic id, got: {id}"
+                );
+            }
+            other => panic!("expected ToolUse, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemini_mixed_text_and_function_calls() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "Let me read those files."},
+                        {"functionCall": {"name": "read", "args": {"path": "a.rs"}}},
+                        {"functionCall": {"name": "read", "args": {"path": "b.rs"}}}
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+
+        let blocks = extract_content_gemini(&json);
+        assert_eq!(blocks.len(), 3, "text + 2 function calls");
+
+        match &blocks[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Let me read those files."),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::ToolUse { name, .. } => assert_eq!(name, "read"),
+            other => panic!("expected ToolUse, got: {other:?}"),
+        }
+        match &blocks[2] {
+            ContentBlock::ToolUse { name, input, .. } => {
+                assert_eq!(name, "read");
+                assert_eq!(input["path"], "b.rs");
+            }
+            other => panic!("expected ToolUse, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemini_empty_response() {
+        let json = serde_json::json!({});
+        let blocks = extract_content_gemini(&json);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn gemini_empty_text_skipped() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": ""},
+                        {"functionCall": {"name": "exec", "args": {"cmd": "ls"}}}
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+
+        let blocks = extract_content_gemini(&json);
+        assert_eq!(blocks.len(), 1, "empty text should be skipped");
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse { .. }));
+    }
+
+    // ── Gemini StopReason extraction ─────────────────────────────
+
+    #[test]
+    fn stop_reason_gemini_stop_text_only() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "hi"}]},
+                "finishReason": "STOP"
+            }]
+        });
+        assert_eq!(extract_stop_reason_gemini(&json), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn stop_reason_gemini_stop_with_function_call() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"functionCall": {"name": "read", "args": {}}}]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        assert_eq!(
+            extract_stop_reason_gemini(&json),
+            StopReason::ToolUse,
+            "STOP with functionCall should be ToolUse"
+        );
+    }
+
+    #[test]
+    fn stop_reason_gemini_max_tokens() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "truncated"}]},
+                "finishReason": "MAX_TOKENS"
+            }]
+        });
+        assert_eq!(extract_stop_reason_gemini(&json), StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn stop_reason_gemini_safety() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": []},
+                "finishReason": "SAFETY"
+            }]
+        });
+        assert_eq!(
+            extract_stop_reason_gemini(&json),
+            StopReason::EndTurn,
+            "SAFETY should map to EndTurn"
+        );
+    }
+
+    #[test]
+    fn stop_reason_gemini_missing_defaults() {
+        let json = serde_json::json!({});
+        assert_eq!(extract_stop_reason_gemini(&json), StopReason::EndTurn);
+    }
+
+    // ── End-to-end: Gemini response → ActionIntents ──────────────
+
+    #[test]
+    fn e2e_gemini_response_to_intents() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "I'll read both files."},
+                        {"functionCall": {"name": "read", "args": {"path": "a.rs"}}},
+                        {"functionCall": {"name": "read", "args": {"path": "b.rs"}}}
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+
+        let blocks = extract_content_gemini(&json);
+        let stop = extract_stop_reason_gemini(&json);
+        let intents = content_blocks_to_intents(&blocks);
+
+        assert_eq!(stop, StopReason::ToolUse);
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0].params["path"], "a.rs");
+        assert_eq!(intents[1].params["path"], "b.rs");
     }
 }
