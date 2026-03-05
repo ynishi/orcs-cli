@@ -93,7 +93,12 @@ pub(crate) fn extract_content_openai(json: &serde_json::Value) -> Vec<ContentBlo
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-            blocks.push(ContentBlock::ToolUse { id, name, input });
+            blocks.push(ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature: None,
+            });
         }
     }
 
@@ -158,7 +163,12 @@ pub(crate) fn extract_content_anthropic(json: &serde_json::Value) -> Vec<Content
                     .cloned()
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-                blocks.push(ContentBlock::ToolUse { id, name, input });
+                blocks.push(ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    thought_signature: None,
+                });
             }
             _ => {
                 // Unknown block types ignored (future-proof)
@@ -266,7 +276,19 @@ pub(crate) fn extract_content_gemini(json: &serde_json::Value) -> Vec<ContentBlo
             // Gemini does not provide call IDs; generate a synthetic one.
             let id = format!("gemini_call_{idx}");
 
-            blocks.push(ContentBlock::ToolUse { id, name, input });
+            // Gemini 2.5 thinking models include thought_signature at part level;
+            // must be echoed back when replaying this functionCall.
+            let thought_signature = part
+                .get("thought_signature")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            blocks.push(ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature,
+            });
         }
     }
 
@@ -319,9 +341,9 @@ pub(crate) fn content_blocks_to_intents(blocks: &[ContentBlock]) -> Vec<ActionIn
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, input } => {
-                Some(ActionIntent::from_llm_tool_call(id, name, input.clone()))
-            }
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => Some(ActionIntent::from_llm_tool_call(id, name, input.clone())),
             _ => None,
         })
         .collect()
@@ -399,7 +421,9 @@ mod tests {
         let blocks = extract_content_openai(&json);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "call_abc123");
                 assert_eq!(name, "read");
                 assert_eq!(input["path"], "src/main.rs");
@@ -536,7 +560,9 @@ mod tests {
             other => panic!("expected Text, got: {other:?}"),
         }
         match &blocks[1] {
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "toolu_abc123");
                 assert_eq!(name, "read");
                 assert_eq!(input["path"], "src/main.rs");
@@ -672,11 +698,13 @@ mod tests {
                 id: "call_1".into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "x"}),
+                thought_signature: None,
             },
             ContentBlock::ToolUse {
                 id: "call_2".into(),
                 name: "exec".into(),
                 input: serde_json::json!({"cmd": "ls"}),
+                thought_signature: None,
             },
         ];
 
@@ -723,6 +751,7 @@ mod tests {
                 id: "call_2".into(),
                 name: "write".into(),
                 input: serde_json::json!({"path": "a.txt", "content": "hi"}),
+                thought_signature: None,
             },
         ];
 
@@ -756,6 +785,7 @@ mod tests {
                 id: "c1".into(),
                 name: "read".into(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             },
         ];
         let content = blocks_to_message_content(blocks);
@@ -768,6 +798,7 @@ mod tests {
             id: "c1".into(),
             name: "read".into(),
             input: serde_json::json!({}),
+            thought_signature: None,
         }];
         let content = blocks_to_message_content(blocks);
         // Single ToolUse is NOT collapsed to Text
@@ -881,7 +912,9 @@ mod tests {
         let blocks = extract_content_gemini(&json);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(name, "read");
                 assert_eq!(input["path"], "src/main.rs");
                 assert!(

@@ -360,6 +360,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "/tmp/f"}),
+                thought_signature: None,
             },
         ]);
         append_message(&lua, session_id, Role::Assistant, blocks);

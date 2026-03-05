@@ -242,7 +242,9 @@ fn classify_content_blocks(blocks: &[ContentBlock]) -> ClassifiedBlocks<'_> {
     for block in blocks {
         match block {
             ContentBlock::Text { text } => text_parts.push(text.as_str()),
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 tool_uses.push((id.as_str(), name.as_str(), input));
             }
             ContentBlock::ToolResult {
@@ -459,13 +461,23 @@ fn build_gemini_body(
                         ContentBlock::Text { text } => {
                             parts.push(serde_json::json!({"text": text}));
                         }
-                        ContentBlock::ToolUse { id: _, name, input } => {
-                            parts.push(serde_json::json!({
+                        ContentBlock::ToolUse {
+                            id: _,
+                            name,
+                            input,
+                            thought_signature,
+                        } => {
+                            let mut part = serde_json::json!({
                                 "functionCall": {
                                     "name": name,
                                     "args": input,
                                 }
-                            }));
+                            });
+                            // Echo back thought_signature for Gemini 2.5 thinking models
+                            if let Some(sig) = thought_signature {
+                                part["thought_signature"] = serde_json::json!(sig);
+                            }
+                            parts.push(part);
                         }
                         ContentBlock::ToolResult {
                             tool_use_id: _,
@@ -1026,6 +1038,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "read".to_string(),
                     input: serde_json::json!({"path": "src/main.rs"}),
+                    thought_signature: None,
                 },
             ]),
         };
@@ -1094,11 +1107,13 @@ mod tests {
                     id: "c1".to_string(),
                     name: "read".to_string(),
                     input: serde_json::json!({"path": "a.rs"}),
+                    thought_signature: None,
                 },
                 ContentBlock::ToolUse {
                     id: "c2".to_string(),
                     name: "read".to_string(),
                     input: serde_json::json!({"path": "b.rs"}),
+                    thought_signature: None,
                 },
             ]),
         };
@@ -1246,6 +1261,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "a.rs"}),
+                    thought_signature: None,
                 }]),
             },
             Message {

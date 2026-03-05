@@ -19,6 +19,10 @@ pub(super) struct ParsedLlmResponse {
     pub stop_reason: StopReason,
     /// Tool-use intents extracted from the response (empty if text-only).
     pub intents: Vec<ActionIntent>,
+    /// Original content blocks from the provider response.
+    /// Preserved for session history so provider-specific metadata
+    /// (e.g. Gemini `thought_signature`) is not lost during reconstruction.
+    pub blocks: Vec<ContentBlock>,
 }
 
 /// Parse a provider response JSON into a unified `ParsedLlmResponse`.
@@ -39,7 +43,7 @@ pub(super) fn parse_provider_response(
     };
 
     let intents = llm_adapter::content_blocks_to_intents(&blocks);
-    let message_content = llm_adapter::blocks_to_message_content(blocks);
+    let message_content = llm_adapter::blocks_to_message_content(blocks.clone());
 
     // Extract text for session history and backward-compatible `content` field
     let content = message_content.text().unwrap_or("").to_string();
@@ -56,6 +60,7 @@ pub(super) fn parse_provider_response(
         model,
         stop_reason,
         intents,
+        blocks,
     })
 }
 
@@ -165,33 +170,16 @@ pub(super) fn parse_response_body(
 
 // ── Resolve-flow Helpers ──────────────────────────────────────────────
 
-/// Build MessageContent::Blocks from a ParsedLlmResponse for session storage.
+/// Build MessageContent from a ParsedLlmResponse for session storage.
 ///
-/// Reconstructs the assistant message as ContentBlocks so that tool_use blocks
-/// are preserved in session history for multi-turn tool loops.
+/// Uses the original content blocks from the provider response so that
+/// provider-specific metadata (e.g. Gemini `thought_signature`) is preserved
+/// in session history for multi-turn tool loops.
 pub(super) fn build_assistant_content_blocks(parsed: &ParsedLlmResponse) -> MessageContent {
-    let mut blocks = Vec::new();
-
-    // Add text block if non-empty
-    if !parsed.content.is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: parsed.content.clone(),
-        });
-    }
-
-    // Add tool_use blocks from intents
-    for intent in &parsed.intents {
-        blocks.push(ContentBlock::ToolUse {
-            id: intent.id.clone(),
-            name: intent.name.clone(),
-            input: intent.params.clone(),
-        });
-    }
-
-    if blocks.is_empty() {
-        MessageContent::Text(String::new())
+    if parsed.blocks.is_empty() {
+        MessageContent::Text(parsed.content.clone())
     } else {
-        MessageContent::Blocks(blocks)
+        MessageContent::Blocks(parsed.blocks.clone())
     }
 }
 
@@ -541,6 +529,9 @@ mod tests {
             model: None,
             stop_reason: StopReason::EndTurn,
             intents: vec![],
+            blocks: vec![ContentBlock::Text {
+                text: "Hello".into(),
+            }],
         };
         let blocks = build_assistant_content_blocks(&parsed);
         assert_eq!(
@@ -562,6 +553,17 @@ mod tests {
                 params: serde_json::json!({"path": "/tmp/test.txt"}),
                 meta: Default::default(),
             }],
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "Let me read that file.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "/tmp/test.txt"}),
+                    thought_signature: None,
+                },
+            ],
         };
         let blocks = build_assistant_content_blocks(&parsed);
         match blocks {
@@ -592,6 +594,12 @@ mod tests {
                 params: serde_json::json!({}),
                 meta: Default::default(),
             }],
+            blocks: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "list_files".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
         };
         let blocks = build_assistant_content_blocks(&parsed);
         match blocks {
@@ -614,6 +622,9 @@ mod tests {
             model: Some("test-model".to_string()),
             stop_reason: StopReason::EndTurn,
             intents: vec![],
+            blocks: vec![ContentBlock::Text {
+                text: "Hello world".into(),
+            }],
         };
         let opts = LlmOpts {
             provider: Provider::Ollama,
@@ -674,6 +685,20 @@ mod tests {
                     name: "tool_b".to_string(),
                     params: serde_json::json!({}),
                     meta: Default::default(),
+                },
+            ],
+            blocks: vec![
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "tool_a".into(),
+                    input: serde_json::json!({"x": 1}),
+                    thought_signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "c2".into(),
+                    name: "tool_b".into(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ],
         };

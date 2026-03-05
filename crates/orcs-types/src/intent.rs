@@ -373,6 +373,11 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Gemini 2.5 thinking models require this signature to be echoed back
+        /// when replaying `functionCall` parts in conversation history.
+        /// `None` for non-Gemini providers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
 
     /// Tool result feedback (system → assistant).
@@ -717,6 +722,7 @@ mod tests {
                 id: "call_1".into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "x"}),
+                thought_signature: None,
             },
         ]);
         assert_eq!(content.text(), Some("thinking..."));
@@ -728,6 +734,7 @@ mod tests {
             id: "call_1".into(),
             name: "read".into(),
             input: serde_json::json!({}),
+            thought_signature: None,
         }]);
         assert_eq!(content.text(), None);
     }
@@ -750,6 +757,7 @@ mod tests {
                 id: "c1".into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "main.rs"}),
+                thought_signature: None,
             },
         ]);
         let json = serde_json::to_string(&original).expect("serialize");
@@ -762,7 +770,9 @@ mod tests {
                     other => panic!("expected Text block, got: {other:?}"),
                 }
                 match &blocks[1] {
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         assert_eq!(id, "c1");
                         assert_eq!(name, "read");
                         assert_eq!(input["path"], "main.rs");
