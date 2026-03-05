@@ -1188,3 +1188,23 @@ fn globals_used_in_component_id() {
 // `globals_rejects_non_object_string`) have been removed because the type system
 // makes them impossible to express. This is the intended outcome of the
 // "parse, don't validate" design — invalid states are unrepresentable.
+
+// ─── Thread safety static assertions ───────────────────────────────
+//
+// LuaComponent has manual `unsafe impl Send` and `unsafe impl Sync`
+// (justified by the Mutex<Lua> wrapper and mlua's "send" feature).
+// These compile-time checks ensure the assertions hold. If a future
+// field addition introduces a !Send or !Sync type without updating
+// the safety justification, compilation will fail here.
+
+#[test]
+fn lua_component_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<LuaComponent>();
+}
+
+#[test]
+fn lua_component_is_sync() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<LuaComponent>();
+}

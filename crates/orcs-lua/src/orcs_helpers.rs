@@ -177,7 +177,16 @@ pub fn register_base_orcs_functions(
     }
 
     // orcs.git_info() -> {ok, branch, commit_short, dirty}
-    // Runs git commands directly from Rust (no sandbox exec, no permission needed).
+    //
+    // AUDIT NOTE: Calls `Command::new("git")` directly, bypassing ChildContext
+    // capability/permission checks. Intentional design:
+    //   - Read-only: only `rev-parse` and `status --porcelain` (no mutations)
+    //   - Scoped to sandbox root via `current_dir(&sandbox_root)`
+    //   - No user-controlled arguments (all args are hardcoded literals)
+    //   - Available unconditionally (no Capability gate) for prompt context
+    //
+    // If you add write-operation git commands, they MUST go through
+    // ChildContext with Capability::EXECUTE + permission check instead.
     {
         let sandbox_root = sandbox.root().to_path_buf();
         let git_info_fn = lua.create_function(move |lua, ()| {
