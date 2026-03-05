@@ -1,0 +1,31 @@
+[package]
+name = "orcs-acp"
+description = "ORCS ACP - Agent Client Protocol bridge for ORCS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["orcs", "acp", "agent", "protocol"]
+categories = ["development-tools"]
+
+[dependencies]
+orcs-app = { workspace = true }
+orcs-runtime = { workspace = true }
+orcs-types = { workspace = true }
+agent-client-protocol = "0.9"
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["compat"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -279,6 +279,18 @@ local handlers = {
     reload        = handle_reload,
     status        = handle_status,
     profile_apply = handle_profile_apply,
+    describe      = function(_payload)
+        return {
+            success = true,
+            data = {
+                id = "foundation_manager",
+                fqn = "foundation::foundation_manager",
+                description = "Foundation prompt segment management. Reads agent.md and serves system/task/guard segments.",
+                operations = { "get_segment", "get_all", "reload", "status", "profile_apply" },
+                usage = "@foundation status | @foundation reload | @foundation get_segment <name>",
+            },
+        }
+    end,
 }
 
 -- === Component Definition ===

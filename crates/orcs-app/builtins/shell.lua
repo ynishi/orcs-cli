@@ -46,6 +46,19 @@ return {
     elevated = false,
 
     on_request = function(request)
+        if request.operation == "describe" then
+            return {
+                success = true,
+                data = {
+                    id = "shell",
+                    fqn = "builtin::shell",
+                    description = "Execute shell commands with permission checking and HIL approval support.",
+                    operations = { "input" },
+                    usage = "@shell <command>",
+                },
+            }
+        end
+
         local cmd = request.payload
         if type(cmd) == "table" then
             cmd = cmd.message or cmd.content or ""

@@ -386,6 +386,18 @@ local handlers = {
     get     = handle_get,
     reload  = handle_reload,
     input   = handle_input,
+    describe = function(_payload)
+        return {
+            success = true,
+            data = {
+                id = "profile_manager",
+                fqn = "profile::profile_manager",
+                description = "Profile discovery, loading, and switching. Distributes component settings from TOML profiles.",
+                operations = { "list", "current", "use", "get", "reload" },
+                usage = "@profile list | @profile current | @profile use <name> | @profile get <name> | @profile reload",
+            },
+        }
+    end,
 }
 
 -- === Component Definition ===

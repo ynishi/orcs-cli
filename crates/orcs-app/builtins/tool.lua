@@ -40,6 +40,19 @@ return {
     elevated = true,
 
     on_request = function(request)
+        if request.operation == "describe" then
+            return {
+                success = true,
+                data = {
+                    id = "tool",
+                    fqn = "builtin::tool",
+                    description = "File system tools with capability-gated permission layer.",
+                    operations = { "read", "write", "grep", "glob", "mkdir", "remove", "mv", "pwd" },
+                    usage = "@tool <cmd> [args] (commands: read, write, grep, glob, mkdir, remove, mv, pwd)",
+                },
+            }
+        end
+
         local msg = request.payload
         if type(msg) == "table" then
             msg = msg.message or msg.content or ""

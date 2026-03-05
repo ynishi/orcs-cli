@@ -214,6 +214,16 @@ impl OrcsApp {
         &self.config
     }
 
+    /// Consumes the app and returns engine + IO handles for ACP mode.
+    ///
+    /// This transfers ownership of the engine and IO channels to the
+    /// caller, which is responsible for managing the engine lifecycle
+    /// and routing IO. After calling this, the app instance is consumed
+    /// and `run_interactive` / `run_command` are no longer available.
+    pub fn into_acp_parts(self) -> (OrcsEngine, IOInputHandle, IOOutputHandle) {
+        (self.engine, self.io_input, self.io_output)
+    }
+
     /// Re-resolves configuration from all sources (hot-reload).
     ///
     /// Calls the retained `ConfigResolver::resolve()` to get a fresh

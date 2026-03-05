@@ -16,6 +16,8 @@ members = [
     "crates/orcs-lua",
     # Application Layer
     "crates/orcs-app",
+    # ACP Layer (Agent Client Protocol)
+    "crates/orcs-acp",
     # Frontend Layer
     "crates/orcs-cli",
     # Dev Tools
@@ -46,6 +48,8 @@ orcs-mcp = { path = "crates/orcs-mcp", version = "0.1.1" }
 orcs-lua = { path = "crates/orcs-lua", version = "0.1.1" }
 # Application Layer
 orcs-app = { path = "crates/orcs-app", version = "0.1.1" }
+# ACP Layer
+orcs-acp = { path = "crates/orcs-acp", version = "0.1.1" }
 
 # External dependencies
 bitflags = { version = "2", features = ["serde"] }

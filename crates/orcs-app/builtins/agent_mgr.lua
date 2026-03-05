@@ -934,11 +934,12 @@ end
 ---                           (component parses the message internally)
 --- dispatch = "operation":   parse first word of body as operation, rest as args
 local routes = {
-    shell      = { target = "builtin::shell",                 dispatch = "passthrough" },
-    skill      = { target = "skill::skill_manager",           dispatch = "operation" },
-    profile    = { target = "profile::profile_manager",       dispatch = "passthrough" },
-    tool       = { target = "builtin::tool",                  dispatch = "passthrough" },
-    foundation = { target = "foundation::foundation_manager", dispatch = "operation" },
+    shell      = { target = "builtin::shell",                 dispatch = "passthrough", description = "Execute shell commands with permission checking" },
+    skill      = { target = "skill::skill_manager",           dispatch = "operation",   description = "Manage and invoke skills" },
+    profile    = { target = "profile::profile_manager",       dispatch = "passthrough", description = "Profile discovery, loading, and switching" },
+    tool       = { target = "builtin::tool",                  dispatch = "passthrough", description = "File system tools (read, write, grep, glob, etc.)" },
+    foundation = { target = "foundation::foundation_manager", dispatch = "operation",   description = "Foundation prompt segment management" },
+    help       = { target = "builtin::help",                  dispatch = "passthrough", description = "Component discovery and usage reference" },
 }
 
 --- Parse @prefix from message. Returns (prefix, rest) or (nil, original).
@@ -1196,6 +1197,19 @@ return {
 
     on_request = function(request)
         local operation = request.operation or "input"
+
+        if operation == "describe" then
+            return {
+                success = true,
+                data = {
+                    id = "agent_mgr",
+                    fqn = "builtin::agent_mgr",
+                    description = "Agent router. Routes user input to LLM agents, handles @prefix commands, manages agent lifecycle.",
+                    operations = { "list_agents", "list_routes", "resolve_route", "delegate", "invoke_agent", "list_active" },
+                    usage = "Primary input handler. Dispatches @prefix commands and LLM tasks.",
+                },
+            }
+        end
 
         -- Handle DelegateResult events from delegate-worker.
         -- Store completed results for context injection into next LLM turn.
@@ -1524,6 +1538,70 @@ return {
                     spawned = list_spawned_agents(),
                 },
             }
+        end
+
+        -- list_routes: return all @-routable components (for HelpComponent)
+        if operation == "list_routes" then
+            local route_list = {}
+            for prefix, route in pairs(routes) do
+                table.insert(route_list, {
+                    prefix = prefix,
+                    target = route.target,
+                    dispatch = route.dispatch,
+                    description = route.description or "",
+                })
+            end
+            -- Sort by prefix for stable output
+            table.sort(route_list, function(a, b) return a.prefix < b.prefix end)
+
+            local agent_list = {}
+            for name, cfg in pairs(agent_registry) do
+                table.insert(agent_list, {
+                    name = name,
+                    expertise = cfg.expertise or "",
+                    spawned = find_spawned_by_name(name) ~= nil,
+                })
+            end
+            table.sort(agent_list, function(a, b) return a.name < b.name end)
+
+            return {
+                success = true,
+                data = {
+                    routes = route_list,
+                    agents = agent_list,
+                },
+            }
+        end
+
+        -- resolve_route: resolve a @prefix to its target FQN (for HelpComponent)
+        if operation == "resolve_route" then
+            local name = request.payload and request.payload.name or ""
+            -- Check static routes
+            local route = routes[name]
+            if route then
+                return {
+                    success = true,
+                    data = {
+                        target = route.target,
+                        dispatch = route.dispatch,
+                        description = route.description or "",
+                    },
+                }
+            end
+            -- Check agent registry
+            local agent_cfg = agent_registry[name]
+            if agent_cfg then
+                local agent_info = find_spawned_by_name(name)
+                return {
+                    success = true,
+                    data = {
+                        target = agent_info and agent_info.fqn or ("agent::" .. name),
+                        dispatch = "agent",
+                        description = agent_cfg.expertise or "",
+                    },
+                }
+            end
+            return { success = false, error = "unknown route: " .. name }
         end
 
         -- Handle UserInput events (default path).

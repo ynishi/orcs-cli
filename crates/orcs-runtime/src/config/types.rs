@@ -761,6 +761,7 @@ impl Default for ComponentsConfig {
                 "console_metrics".into(),
                 "shell".into(),
                 "tool".into(),
+                "help".into(),
             ],
             experimental: vec!["life_game".into()],
             paths: vec![PathBuf::from("~/.orcs/components")],

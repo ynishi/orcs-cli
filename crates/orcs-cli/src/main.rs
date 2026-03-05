@@ -93,6 +93,10 @@ struct Args {
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
 
+    /// Run as ACP (Agent Client Protocol) server on stdio
+    #[arg(long)]
+    acp: bool,
+
     /// Command to execute (optional)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -334,11 +338,20 @@ async fn main() -> Result<()> {
     let mut builder = OrcsApp::builder(resolver)
         .with_sandbox(sandbox)
         .with_printer_slot(printer_slot);
-    if let Some(session_id) = args.resume {
+    if let Some(session_id) = args.resume.clone() {
         builder = builder.resume(session_id);
     }
 
-    let mut app = builder.build().await?;
+    let app = builder.build().await?;
+
+    // ACP server mode: decompose app and run as ACP agent on stdio
+    if args.acp {
+        info!("Starting ACP server mode");
+        let (engine, io_input, io_output) = app.into_acp_parts();
+        return orcs_acp::run_acp_server(engine, io_input, io_output).await;
+    }
+
+    let mut app = app;
 
     info!(
         "Application initialized (debug={}, verbose={})",
@@ -495,6 +508,7 @@ mod tests {
             sandbox: None,
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -525,6 +539,7 @@ mod tests {
             sandbox: None,
             log_file: Some(PathBuf::from("/custom/logs")),
             log_level: Some("trace".into()),
+            acp: false,
             command: vec!["run".into()],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -687,6 +702,7 @@ mod tests {
             sandbox: None,
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -711,6 +727,7 @@ mod tests {
             sandbox: Some(None), // --sandbox without DIR
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
@@ -737,6 +754,7 @@ mod tests {
             sandbox: Some(Some(explicit.clone())),
             log_file: None,
             log_level: None,
+            acp: false,
             command: vec![],
         };
         let resolver = CliConfigResolver::from_args(&args);
