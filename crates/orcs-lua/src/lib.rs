@@ -92,22 +92,22 @@ mod component;
 pub(crate) mod context_wrapper;
 mod error;
 pub mod hook_helpers;
-pub mod http_command;
+pub(crate) mod http_command;
 pub(crate) mod kill_flag;
-pub mod llm_adapter;
-pub mod llm_command;
+pub(crate) mod llm_adapter;
+pub(crate) mod llm_command;
 mod loader;
 mod lua_env;
-pub mod orcs_helpers;
+pub(crate) mod orcs_helpers;
 pub(crate) mod resolve_loop;
-pub mod sandbox_eval;
-pub mod sanitize;
+pub(crate) mod sandbox_eval;
+pub(crate) mod sanitize;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod scenario;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
-pub mod tool_registry;
-pub mod tools;
+pub(crate) mod tool_registry;
+pub(crate) mod tools;
 mod types;
 
 pub use child::LuaChild;

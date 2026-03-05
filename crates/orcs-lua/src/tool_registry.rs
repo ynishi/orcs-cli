@@ -104,6 +104,7 @@ impl IntentRegistry {
 
     /// Register a RustTool (creates IntentDef automatically).
     /// Returns error if name is already taken.
+    #[allow(dead_code)] // used in tests; kept as public API surface for IntentRegistry
     pub fn register_tool(&mut self, tool: Arc<dyn RustTool>) -> Result<(), String> {
         let def = tool.intent_def();
         let name = def.name.clone();
@@ -118,6 +119,7 @@ impl IntentRegistry {
     }
 
     /// Number of registered intents.
+    #[allow(dead_code)] // used in tests; kept as public API surface for IntentRegistry
     pub fn len(&self) -> usize {
         self.defs.len()
     }
