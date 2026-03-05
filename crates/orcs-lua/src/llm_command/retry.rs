@@ -73,6 +73,11 @@ pub(super) fn send_with_retry(
                 }
                 req = req.header("anthropic-version", "2023-06-01");
             }
+            Provider::Gemini => {
+                if let Some(ref key) = opts.api_key {
+                    req = req.header("x-goog-api-key", key.as_str());
+                }
+            }
         }
 
         let send_result = tokio::task::block_in_place(|| {
