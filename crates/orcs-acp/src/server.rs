@@ -2,15 +2,32 @@
 //!
 //! Starts the ACP server on stdin/stdout using `AgentSideConnection`
 //! from the `agent-client-protocol` crate.
+//!
+//! The engine worker bridges ACP prompt requests to the ORCS engine:
+//!
+//! ```text
+//! ACP Client ─── AgentSideConnection ─── OrcsAgent
+//!                                           │
+//!                                      PromptJob channel
+//!                                           │
+//!                                      engine_worker
+//!                                      ┌────┴────┐
+//!                                 IOInputHandle  IOOutputHandle
+//!                                      │              │
+//!                                      └──── ORCS ────┘
+//!                                           Engine
+//! ```
 
 use std::rc::Rc;
 
 use agent_client_protocol::{
     AgentSideConnection, Client, PromptResponse, SessionNotification, StopReason,
 };
+use orcs_runtime::io::{IOInputHandle, IOOutputHandle};
+use orcs_runtime::IOOutput;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::agent::{AcpClient, OrcsAgent, PromptJob};
 use crate::convert;
@@ -30,27 +47,95 @@ impl AcpClient for ConnectionClient {
     }
 }
 
+/// Idle timeout after first output received (stream complete heuristic).
+const IDLE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(3);
+/// Maximum wait for the first output from the engine.
+const MAX_WAIT: tokio::time::Duration = tokio::time::Duration::from_secs(120);
+
 /// Processes prompt jobs by sending text to the ORCS engine and
 /// streaming output back as ACP session updates.
 ///
-/// This function runs in a loop, receiving jobs from the agent and
-/// dispatching them. In P1, it uses a simple request-response model
-/// (no streaming yet).
-async fn engine_worker(mut rx: mpsc::Receiver<PromptJob>, conn: Rc<AgentSideConnection>) {
+/// For each prompt job:
+/// 1. Sends `IOInput::line(text)` to the engine via `IOInputHandle`
+/// 2. Collects `IOOutput` from `IOOutputHandle` with idle-timeout
+/// 3. Converts each `IOOutput` to an ACP `SessionUpdate` and sends it
+/// 4. Completes the prompt when `IOOutput::Prompt` is received or timeout
+async fn engine_worker(
+    mut rx: mpsc::Receiver<PromptJob>,
+    conn: Rc<AgentSideConnection>,
+    io_input: IOInputHandle,
+    mut io_output: IOOutputHandle,
+) {
     while let Some(job) = rx.recv().await {
         let session_id = &job.session_id;
+        debug!(session_id = %session_id, text = %job.text, "engine_worker: processing prompt");
 
-        // Send the agent's response as a message chunk.
-        let update =
-            convert::text_to_agent_message_chunk(&format!("[ORCS] Received: {}", job.text));
+        // Send user text to ORCS engine.
+        if let Err(e) = io_input.send_line(&job.text).await {
+            error!(session_id = %session_id, error = %e, "failed to send input to engine");
+            let _ = job
+                .response_tx
+                .send(PromptResponse::new(StopReason::EndTurn));
+            continue;
+        }
 
-        let notification = SessionNotification::new(
-            agent_client_protocol::SessionId::new(session_id.clone()),
-            update,
-        );
+        // Collect output with idle-timeout detection.
+        //   - Before first output: wait up to MAX_WAIT (LLM may be slow to start).
+        //   - After first output:  wait up to IDLE_TIMEOUT for more (stream complete).
+        let start = tokio::time::Instant::now();
+        let mut received_output = false;
 
-        if let Err(e) = conn.session_notification(notification).await {
-            error!(session_id = %session_id, error = %e, "failed to send session update");
+        loop {
+            if start.elapsed() > MAX_WAIT {
+                warn!(
+                    session_id = %session_id,
+                    "engine_worker: max timeout reached ({}s)",
+                    MAX_WAIT.as_secs()
+                );
+                break;
+            }
+
+            let timeout = if received_output {
+                IDLE_TIMEOUT
+            } else {
+                MAX_WAIT
+            };
+
+            tokio::select! {
+                Some(io_out) = io_output.recv() => {
+                    // Prompt signals engine is ready for next input → job done.
+                    if matches!(io_out, IOOutput::Prompt { .. }) {
+                        debug!(session_id = %session_id, "engine_worker: prompt received, completing");
+                        break;
+                    }
+
+                    received_output = true;
+
+                    // Convert IOOutput to ACP SessionUpdate.
+                    if let Some(update) = convert::io_output_to_session_update(&io_out) {
+                        let notification = SessionNotification::new(
+                            agent_client_protocol::SessionId::new(session_id.clone()),
+                            update,
+                        );
+
+                        if let Err(e) = conn.session_notification(notification).await {
+                            error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "failed to send session update"
+                            );
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    debug!(
+                        session_id = %session_id,
+                        received_output,
+                        "engine_worker: timeout, completing"
+                    );
+                    break;
+                }
+            }
         }
 
         // Complete the prompt.
@@ -66,15 +151,28 @@ async fn engine_worker(mut rx: mpsc::Receiver<PromptJob>, conn: Rc<AgentSideConn
 /// It creates an `AgentSideConnection`, wires up the ORCS agent,
 /// and runs the JSON-RPC event loop until the connection closes.
 ///
+/// # Arguments
+///
+/// * `engine` - The ORCS engine (must be started before calling this)
+/// * `io_input` - Handle to send input to the engine
+/// * `io_output` - Handle to receive output from the engine
+///
 /// # Errors
 ///
 /// Returns error if the server encounters a fatal I/O error.
-pub async fn run_acp_server() -> anyhow::Result<()> {
+pub async fn run_acp_server(
+    mut engine: orcs_runtime::OrcsEngine,
+    io_input: IOInputHandle,
+    io_output: IOOutputHandle,
+) -> anyhow::Result<()> {
     info!("Starting ORCS ACP server on stdio");
+
+    // Start the engine so runners begin processing.
+    engine.start();
 
     let local = LocalSet::new();
 
-    local
+    let result = local
         .run_until(async {
             // Channel for prompt jobs between agent and engine worker.
             let (prompt_tx, prompt_rx) = mpsc::channel::<PromptJob>(32);
@@ -105,10 +203,10 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
             });
             agent.set_client(client);
 
-            // Spawn the engine worker.
+            // Spawn the engine worker with IO handles.
             let conn_for_worker = Rc::clone(&conn);
             tokio::task::spawn_local(async move {
-                engine_worker(prompt_rx, conn_for_worker).await;
+                engine_worker(prompt_rx, conn_for_worker, io_input, io_output).await;
             });
 
             info!("ACP server ready, waiting for client connection");
@@ -126,5 +224,11 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
 
             Ok(())
         })
-        .await
+        .await;
+
+    // Gracefully stop the engine.
+    engine.stop();
+    engine.shutdown().await;
+
+    result
 }
