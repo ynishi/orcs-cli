@@ -188,8 +188,33 @@ impl OrcsAppBuilder {
             .with_paths(config.components.resolved_paths())
             .with_path(&versioned_builtins);
 
-        // Create World with IO channel + pre-allocated component channels
-        let component_names = &config.components.load;
+        // Auto-discover builtins and build component load list.
+        // All builtins are loaded by default, except those in `exclude`.
+        // User components from `load` are appended (for non-builtin scripts).
+        let builtin_loader = ScriptLoader::new(Arc::clone(&sandbox)).with_path(&versioned_builtins);
+        let exclude: std::collections::HashSet<&str> = config
+            .components
+            .exclude
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut component_names: Vec<String> = builtin_loader
+            .list_available()
+            .into_iter()
+            .filter(|name| !exclude.contains(name.as_str()))
+            .collect();
+        // Append user components (dedup against builtins)
+        for name in &config.components.load {
+            if !component_names.contains(name) {
+                component_names.push(name.clone());
+            }
+        }
+        tracing::info!(
+            count = component_names.len(),
+            excluded = config.components.exclude.len(),
+            user = config.components.load.len(),
+            "Component load list resolved"
+        );
         let mut world = World::new();
         let io = world.create_channel(ChannelConfig::interactive());
         let builtin_channels: Vec<_> = component_names

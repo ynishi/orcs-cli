@@ -585,7 +585,7 @@ mod tests {
         resolver.experimental = true;
         let config = resolver.resolve().expect("resolve should succeed");
 
-        assert!(config.components.load.contains(&"life_game".to_string()));
+        assert!(!config.components.exclude.contains(&"life_game".to_string()));
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
         let (_wd, resolver) = resolver_with(false, false, None);
         let config = resolver.resolve().expect("resolve should succeed");
 
-        assert!(!config.components.load.contains(&"life_game".to_string()));
+        assert!(config.components.exclude.contains(&"life_game".to_string()));
     }
 
     // --- Sandbox tests ---

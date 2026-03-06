@@ -784,8 +784,8 @@ default = "explicit-model"
             .load()
             .expect("should load config with experimental components activated");
 
-        // life_game should now be in load
-        assert!(config.components.load.contains(&"life_game".to_string()));
+        // life_game should be removed from exclude
+        assert!(!config.components.exclude.contains(&"life_game".to_string()));
     }
 
     #[test]
@@ -802,8 +802,8 @@ default = "explicit-model"
             .load()
             .expect("should load config without activating experimental when false");
 
-        // life_game should NOT be in load
-        assert!(!config.components.load.contains(&"life_game".to_string()));
+        // life_game should still be in exclude
+        assert!(config.components.exclude.contains(&"life_game".to_string()));
     }
 
     #[test]

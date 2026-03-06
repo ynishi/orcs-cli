@@ -631,11 +631,18 @@ impl ScriptsConfig {
 ///
 /// Controls which components are loaded at startup and where to find them.
 ///
+/// **Builtin auto-loading**: All builtins in `builtins_dir` are loaded
+/// automatically, except those listed in `exclude`. Use `load` only for
+/// user-defined components outside the builtins directory.
+///
 /// # Example TOML
 ///
 /// ```toml
 /// [components]
-/// load = ["agent_mgr", "skill_manager", "profile_manager", "shell", "tool"]
+/// # User components (non-builtin) to load additionally
+/// load = ["my_custom_component"]
+/// # Builtins to skip (dynamic-spawn / test components excluded by default)
+/// exclude = ["console_metrics"]
 /// experimental = ["life_game"]
 /// paths = ["~/.orcs/components"]
 /// builtins_dir = "~/.orcs/builtins"
@@ -643,17 +650,26 @@ impl ScriptsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ComponentsConfig {
-    /// Component names to load at startup.
+    /// Additional user component names to load at startup.
     ///
+    /// For non-builtin components only. Builtins are auto-loaded from
+    /// `builtins_dir` unless excluded.
     /// Each name is resolved via `ScriptLoader` from `paths` (user-first)
     /// then from the versioned builtins directory.
     pub load: Vec<String>,
+
+    /// Builtin component names to exclude from auto-loading.
+    ///
+    /// Components listed here will not be loaded at startup even if they
+    /// exist in the builtins directory. Dynamic-spawn and test components
+    /// are excluded by default.
+    pub exclude: Vec<String>,
 
     /// Experimental component names.
     ///
     /// These are only loaded when the `--experimental` CLI flag or
     /// `ORCS_EXPERIMENTAL=true` environment variable is set.
-    /// They are appended to `load` at config resolution time.
+    /// They are appended to the builtin auto-load list at config resolution time.
     pub experimental: Vec<String>,
 
     /// User component search directories (priority order, searched first).
@@ -749,20 +765,30 @@ pub struct ComponentsConfig {
     pub settings: HashMap<String, serde_json::Value>,
 }
 
+/// Default exclude list for builtins that should NOT be auto-loaded.
+///
+/// These are either:
+/// - Dynamic-spawn components (spawned by agent_mgr at runtime)
+/// - Test/demo components
+/// - Internal components loaded on demand
+const DEFAULT_EXCLUDE: &[&str] = &[
+    "concierge",
+    "delegate_worker",
+    "subagent",
+    "echo",
+    "echo_emitter",
+    "worker_child",
+    "spawner_child",
+    "manager_worker",
+    "lua_sandbox",
+    "life_game",
+];
+
 impl Default for ComponentsConfig {
     fn default() -> Self {
         Self {
-            load: vec![
-                "agent_mgr".into(),
-                "skill_manager".into(),
-                "mcp_manager".into(),
-                "profile_manager".into(),
-                "foundation_manager".into(),
-                "console_metrics".into(),
-                "shell".into(),
-                "tool".into(),
-                "help".into(),
-            ],
+            load: Vec::new(),
+            exclude: DEFAULT_EXCLUDE.iter().map(|s| (*s).into()).collect(),
             experimental: vec!["life_game".into()],
             paths: vec![PathBuf::from("~/.orcs/components")],
             builtins_dir: PathBuf::from("~/.orcs/builtins"),
@@ -786,15 +812,14 @@ impl ComponentsConfig {
         self.paths.iter().map(|p| expand_tilde(p)).collect()
     }
 
-    /// Appends experimental component names to `load`, deduplicating.
+    /// Activates experimental components by removing them from the exclude list.
     ///
     /// Called by config resolvers when `--experimental` or `ORCS_EXPERIMENTAL=true` is set.
     pub fn activate_experimental(&mut self) {
-        for name in &self.experimental {
-            if !self.load.contains(name) {
-                self.load.push(name.clone());
-            }
-        }
+        let experimental: std::collections::HashSet<&str> =
+            self.experimental.iter().map(String::as_str).collect();
+        self.exclude
+            .retain(|name| !experimental.contains(name.as_str()));
     }
 
     /// Returns the per-component settings for `name`, or an empty JSON object.
@@ -1131,38 +1156,40 @@ enabled = true
     }
 
     #[test]
-    fn activate_experimental_appends_to_load() {
+    fn activate_experimental_removes_from_exclude() {
         let mut config = ComponentsConfig::default();
+        assert!(config.exclude.contains(&"life_game".to_string()));
+
         config.activate_experimental();
 
-        assert!(config.load.contains(&"life_game".to_string()));
-        // Original load items preserved
-        assert!(config.load.contains(&"agent_mgr".to_string()));
+        // life_game removed from exclude
+        assert!(!config.exclude.contains(&"life_game".to_string()));
     }
 
     #[test]
-    fn activate_experimental_deduplicates() {
+    fn activate_experimental_idempotent() {
         let mut config = ComponentsConfig::default();
-        // Manually add life_game to load first
-        config.load.push("life_game".into());
-        let len_before = config.load.len();
+        config.activate_experimental();
+        let len_after_first = config.exclude.len();
 
         config.activate_experimental();
 
-        // No duplicate added
-        assert_eq!(config.load.len(), len_before);
+        assert_eq!(config.exclude.len(), len_after_first);
     }
 
     #[test]
     fn activate_experimental_custom_list() {
         let mut config = ComponentsConfig::default();
         config.experimental = vec!["foo".into(), "bar".into()];
+        config.exclude.push("foo".into());
+        config.exclude.push("bar".into());
+
         config.activate_experimental();
 
-        assert!(config.load.contains(&"foo".to_string()));
-        assert!(config.load.contains(&"bar".to_string()));
-        // Default experimental not present (was overridden)
-        assert!(!config.load.contains(&"life_game".to_string()));
+        assert!(!config.exclude.contains(&"foo".to_string()));
+        assert!(!config.exclude.contains(&"bar".to_string()));
+        // life_game still excluded (not in custom experimental list)
+        assert!(config.exclude.contains(&"life_game".to_string()));
     }
 
     #[test]
