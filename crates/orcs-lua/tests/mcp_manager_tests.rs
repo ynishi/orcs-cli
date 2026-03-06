@@ -356,10 +356,10 @@ mod run {
             .request(
                 ext_cat(),
                 "run",
-                json!({"name": "outline:toc", "args": {"key": "val"}}),
+                json!({"name": "outline__toc", "args": {"key": "val"}}),
             )
             .await
-            .expect("run with server:tool format should succeed");
+            .expect("run with server__tool format should succeed");
 
         let calls = captured.lock().expect("captured mutex");
         assert_eq!(calls[0]["server"], "outline");
