@@ -603,7 +603,7 @@ fn dispatch_mcp(
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| mlua::Error::RuntimeError("no tokio runtime available for MCP call".into()))?;
 
-    let namespaced = format!("mcp:{server_name}:{tool_name}");
+    let namespaced = format!("mcp__{server_name}__{tool_name}");
     let call_result =
         tokio::task::block_in_place(|| handle.block_on(manager.call_tool(&namespaced, json_args)));
 
@@ -991,7 +991,7 @@ pub fn register_dispatch_functions(lua: &Lua) -> Result<(), LuaError> {
     // orcs.mcp_call(server, tool, args) -> { ok, content?, error? }
     let mcp_call_fn =
         lua.create_function(|lua, (server, tool, args): (String, String, Table)| {
-            let namespaced = format!("mcp:{server}:{tool}");
+            let namespaced = format!("mcp__{server}__{tool}");
             dispatch_mcp(lua, &namespaced, &server, &tool, &args)
         })?;
     orcs_table.set("mcp_call", mcp_call_fn)?;
@@ -2126,7 +2126,7 @@ mod tests {
                 .remove_app_data::<IntentRegistry>()
                 .expect("registry should exist");
             let def_a = IntentDef {
-                name: "mcp:srv_a:tool1".into(),
+                name: "mcp__srv_a__tool1".into(),
                 description: "[MCP:srv_a] tool1 desc".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
                 resolver: IntentResolver::Mcp {
@@ -2135,7 +2135,7 @@ mod tests {
                 },
             };
             let def_b = IntentDef {
-                name: "mcp:srv_b:tool2".into(),
+                name: "mcp__srv_b__tool2".into(),
                 description: "[MCP:srv_b] tool2 desc".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
                 resolver: IntentResolver::Mcp {
