@@ -87,7 +87,7 @@ end
 
 -- Run (call) an MCP tool
 -- payload: { server, tool, args }
--- or: { name = "mcp:server:tool", args }
+-- or: { name = "mcp__server__tool", args }
 local function handle_run(payload)
     if not payload then
         return { success = false, error = "payload is required" }
@@ -95,14 +95,14 @@ local function handle_run(payload)
 
     local server, tool, args
     if payload.name then
-        -- Parse "mcp:server:tool" format
-        local s, t = payload.name:match("^mcp:([^:]+):(.+)$")
+        -- Parse "mcp__server__tool" format
+        local s, t = payload.name:match("^mcp__([^_]+)__(.+)$")
         if not s then
-            -- Try "server:tool" format
-            s, t = payload.name:match("^([^:]+):(.+)$")
+            -- Try "server__tool" format
+            s, t = payload.name:match("^([^_]+)__(.+)$")
         end
         if not s then
-            return { success = false, error = "invalid tool name format, expected 'server:tool' or 'mcp:server:tool'" }
+            return { success = false, error = "invalid tool name format, expected 'server__tool' or 'mcp__server__tool'" }
         end
         server = s
         tool = t
@@ -251,7 +251,7 @@ local function handle_recommend(payload)
             table.insert(recommended, {
                 server = entry.server,
                 tool = entry.tool,
-                name = string.format("mcp:%s:%s", entry.server, entry.tool),
+                name = string.format("mcp__%s__%s", entry.server, entry.tool),
             })
         end
     end

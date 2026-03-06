@@ -110,8 +110,10 @@ impl McpClientManager {
 
         for tool in &tools {
             let tool_name = tool.name.to_string();
-            // Namespace MCP tools: "mcp:<server>:<tool>"
-            let namespaced = format!("mcp:{name}:{tool_name}");
+            // Namespace MCP tools: "mcp__<server>__<tool>"
+            // Uses double-underscore instead of colon to satisfy LLM API
+            // tool-name constraints (^[a-zA-Z0-9_-]{1,128}).
+            let namespaced = format!("mcp__{name}__{tool_name}");
 
             let intent_def = mcp_tool_to_intent_def(&namespaced, tool, name);
 
@@ -344,20 +346,20 @@ fn mcp_tool_to_intent_def(
     }
 }
 
-/// Extract original tool name from namespaced name `"mcp:<server>:<tool>"`.
+/// Extract original tool name from namespaced name `"mcp__<server>__<tool>"`.
 ///
 /// Returns the `<tool>` portion. If the name does not match the expected
 /// format, logs a warning and returns the input as-is (defensive fallback).
 fn extract_original_tool_name(namespaced: &str) -> String {
     match namespaced
-        .strip_prefix("mcp:")
-        .and_then(|rest| rest.find(':').map(|i| &rest[i + 1..]))
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.find("__").map(|i| &rest[i + 2..]))
     {
         Some(tool) => tool.to_string(),
         None => {
             warn!(
                 name = namespaced,
-                "unexpected MCP tool name format, expected 'mcp:<server>:<tool>'"
+                "unexpected MCP tool name format, expected 'mcp__<server>__<tool>'"
             );
             namespaced.to_string()
         }
@@ -371,12 +373,12 @@ mod tests {
     #[test]
     fn extract_tool_name_valid() {
         assert_eq!(
-            extract_original_tool_name("mcp:filesystem:read_file"),
+            extract_original_tool_name("mcp__filesystem__read_file"),
             "read_file"
         );
         assert_eq!(
-            extract_original_tool_name("mcp:my-server:complex.tool.name"),
-            "complex.tool.name"
+            extract_original_tool_name("mcp__my-server__complex_tool_name"),
+            "complex_tool_name"
         );
     }
 
@@ -386,9 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_tool_name_single_colon() {
-        // "mcp:nocolon" → only one colon after mcp:, so find(':') on "nocolon" returns None
-        assert_eq!(extract_original_tool_name("mcp:nocolon"), "mcp:nocolon");
+    fn extract_tool_name_no_separator() {
+        // "mcp__nocolon" → no second __ after server, so find("__") returns None
+        assert_eq!(
+            extract_original_tool_name("mcp__noseparator"),
+            "mcp__noseparator"
+        );
     }
 
     #[test]
@@ -413,9 +418,9 @@ mod tests {
             meta: None,
         };
 
-        let def = super::mcp_tool_to_intent_def("mcp:fs:read_file", &tool, "fs");
+        let def = super::mcp_tool_to_intent_def("mcp__fs__read_file", &tool, "fs");
 
-        assert_eq!(def.name, "mcp:fs:read_file");
+        assert_eq!(def.name, "mcp__fs__read_file");
         assert!(def.description.contains("Read a file from disk"));
         assert!(def.description.starts_with("[MCP:fs]"));
         assert_eq!(def.parameters["type"], "object");
@@ -445,7 +450,7 @@ mod tests {
             meta: None,
         };
 
-        let def = super::mcp_tool_to_intent_def("mcp:srv:no_desc", &tool, "srv");
+        let def = super::mcp_tool_to_intent_def("mcp__srv__no_desc", &tool, "srv");
         assert!(def.description.contains("(no description)"));
     }
 
@@ -499,12 +504,12 @@ mod tests {
     async fn call_tool_not_connected_returns_error() {
         let manager = McpClientManager::new(McpConfig::default());
         let result = manager
-            .call_tool("mcp:srv:tool", serde_json::json!({}))
+            .call_tool("mcp__srv__tool", serde_json::json!({}))
             .await;
         assert!(result.is_err());
         match result {
             Err(McpError::ToolNotFound { tool }) => {
-                assert_eq!(tool, "mcp:srv:tool");
+                assert_eq!(tool, "mcp__srv__tool");
             }
             other => panic!("expected ToolNotFound, got: {other:?}"),
         }
